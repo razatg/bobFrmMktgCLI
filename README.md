@@ -17,7 +17,7 @@
               Bob — Performance Marketing Analyst
 ```
 
-Bob is a performance marketing analyst that lives in your terminal. You ask questions about your Google Ads app campaigns in plain English — Bob pulls the data, does the maths, and tells you what's happening and what to do about it.
+Bob is a performance marketing analyst that lives in your AI assistant. You ask questions about your Google Ads app campaigns in plain English — Bob pulls the data, does the maths, and tells you what's happening and what to do about it.
 
 No dashboards. No spreadsheets. Just answers.
 
@@ -64,7 +64,8 @@ No dashboards. No spreadsheets. Just answers.
 
 You'll need:
 
-- A **Mac** or **Windows** (Windows Terminal with WSL, or Git Bash — see setup notes below)
+- A **Mac or Windows** machine
+- One of these AI desktop apps: **[Claude](https://claude.ai/download)**, **[Codex](https://openai.com/codex)**, or **[Antigravity](https://antigravity.ai)** — Bob lives inside whichever one you use. Not sure how to install one? Ask your office IT person — or open any AI chat (ChatGPT, Claude.ai, Gemini) and ask it to walk you through the install.
 - A **Google Ads account** running App Campaigns
 - A **Google Ads API credentials file** — a `.yaml` file that gives Bob read access to your account. Your developer can set this up, or follow the [Google Ads API quickstart](https://developers.google.com/google-ads/api/docs/get-started/introduction). Bob never stores your credentials — it reads the file fresh each time.
 
@@ -76,61 +77,34 @@ You'll need:
 
 Click the green **Code** button on this page → **Download ZIP**. Unzip it somewhere easy to find (Desktop is fine).
 
-Or if you use Git:
-```
-git clone <this repo URL>
-cd bobFrmMktgCLI
-```
+---
+
+**Step 2 — Open the folder in your AI app**
+
+This is the key step. Bob only works when your AI assistant has the project folder open — that's what gives it the context to act as Bob rather than a generic assistant.
+
+- **Claude desktop app** — File → Open Folder → select the `bobFrmMktgCLI` folder
+- **Codex** — Open the `bobFrmMktgCLI` folder as a project
+- **Antigravity** — Open the `bobFrmMktgCLI` folder
+
+Once the folder is open, the AI reads the project instructions automatically and becomes Bob.
 
 ---
 
-**Step 2 — Run setup**
+**Step 3 — Say "set me up"**
 
-**On Mac** — open Terminal, navigate to the folder, and run:
-```
-bash setup.sh
-```
+Just type that in the chat. Bob will:
+- Install everything needed on your machine (Python, dependencies)
+- Walk you through connecting your Google Ads account
+- Pull your first data snapshot
 
-This installs everything Bob needs. If Python isn't on your machine it'll install it automatically via Homebrew. Takes about a minute.
-
-**On Windows** — open Windows Terminal (or Git Bash), navigate to the folder, and run:
-```
-bash setup.sh
-```
-
-If you're using plain Windows Terminal without WSL or Git Bash, install Python first from [python.org](https://www.python.org/downloads/) (tick "Add Python to PATH" during install), then run:
-```
-pip install -r requirements.txt
-```
-And use `python lib/datapull.py` in place of `./bob` for all commands below.
-
----
-
-**Step 3 — Connect your Google Ads account**
-
-```
-./bob onboard
-```
-
-Bob will walk you through it — your account ID, currency, primary goal (installs or in-app events), and where your credentials file lives. Takes about 2 minutes.
-
----
-
-**Step 4 — Pull your first data**
-
-```
-./bob bootstrap
-```
-
-Fetches a snapshot of your recent campaign data — yesterday, last week, this month. Bob pulls pre-summarised numbers directly from Google Ads; nothing is stored raw on your machine beyond what's needed to answer questions.
-
-You're ready.
+You don't need to run anything yourself — Bob handles it all and talks you through each step conversationally.
 
 ---
 
 ## What you can ask
 
-Once bootstrap is done, open a conversation with Bob (via Claude Code or any agent that reads `CLAUDE.md`) and ask in plain English.
+Once set up, just ask in plain English. Examples:
 
 ### Yesterday & this week
 
@@ -182,13 +156,11 @@ Once bootstrap is done, open a conversation with Bob (via Claude Code or any age
 
 ## Managing multiple accounts
 
-Bob supports multiple Google Ads accounts.
+Bob supports multiple Google Ads accounts. Just tell Bob in the chat:
 
-```
-./bob onboard          ← add another account
-./bob switch-account   ← switch between accounts
-./bob list-accounts    ← see all your accounts
-```
+- *"Add another account"*
+- *"Switch to [account name]"*
+- *"Which account am I on?"*
 
 ---
 
@@ -210,10 +182,10 @@ It's your running record of what you checked and when — searchable, shareable,
 
 ## Troubleshooting
 
-**"command not found: ./bob"** — Run `bash setup.sh` first.
+**Setup failed or something isn't installing** — Tell Bob "setup failed" and paste the error. Bob will diagnose it.
 
-**"config not found" or credential errors** — Run `./bob check-config` to see what's missing. Most likely you need to point Bob to your credentials file — run `./bob onboard` again.
+**"Config not found" or credential errors** — Tell Bob "check my config". Most likely you need to point Bob to your credentials file.
 
-**Data looks stale** — Run `./bob bootstrap` to pull a fresh snapshot.
+**Data looks stale** — Tell Bob "pull fresh data".
 
 **Something Bob can't answer** — Bob will say so in plain English and log it for future improvement. Logged questions live in `logs/backlog.md`.
