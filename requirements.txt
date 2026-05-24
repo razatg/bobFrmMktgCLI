@@ -1,0 +1,9 @@
+# GARF — Google Ads query runner (read-only data pulls)
+garf-executors
+garf-google-ads
+
+# Google Ads Python client — required for write operations (bid-budget-apply, creative-copy-apply)
+google-ads
+
+# YAML — required for bid/budget plan files
+pyyaml

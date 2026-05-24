@@ -1,0 +1,16 @@
+{
+  "google_ads_customer_id": "",
+  "account_name": "",
+  "google_ads_mcc_id": "",
+  "google_ads_mcc_name": "",
+  "campaign_type": "",
+  "primary_goal": "",
+  "currency": "",
+  "campaign_goal_type": "",
+  "google_ads_config_path": "",
+  "google_ads_write_config_path": "",
+  "creative_min_impressions": 50000,
+  "cac_ceiling": 200,
+  "bid_budget_change_pct": 10,
+  "bid_budget_cooldown_days": 14
+}

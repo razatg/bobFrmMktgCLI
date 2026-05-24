@@ -1,0 +1,3633 @@
+#!/usr/bin/env python3
+"""Data pull commands for Bob Frm Mktg."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BOB_DIR = ROOT / ".bob"
+PROFILE_PATH = BOB_DIR / "profile.json"
+ACCOUNTS_DIR = BOB_DIR / "accounts"
+ACCOUNTS_REGISTRY = BOB_DIR / "accounts.json"
+QUERIES_DIR = ROOT / "garf" / "queries"
+RAW_DIR = ROOT / "garf" / "outputs" / "raw"
+PROCESSED_DIR = ROOT / "data" / "processed"
+REPORTS_DIR = ROOT / "validation" / "reports"
+PULL_LOG_PATH = ROOT / "logs" / "pull-log.jsonl"
+
+DEFAULT_BOOTSTRAP = [
+    {"query": "account_network_period", "period": "yesterday_vs_sdlw"},
+    {"query": "account_network_period", "period": "wow"},
+    {"query": "account_network_period", "period": "mom"},
+    {"query": "account_network_period", "period": "mtd"},
+    {"query": "campaign_network_period", "period": "yesterday_vs_sdlw"},
+    {"query": "campaign_network_period", "period": "3week_rolling"},
+    {"query": "creative_period",         "days": 30},
+    {"query": "change_history",          "days": 14},
+    {"query": "bid_budget_inputs",       "days": 7},
+]
+
+DATE_QUERIES = {
+    "campaign_daily",
+    "campaign_reach_daily",
+    "network_daily",
+    "creative_asset_daily",
+    "conversion_action_daily",
+    "bid_budget_inputs",
+    "creative_conversion_action_daily",
+    "account_network_period",
+    "campaign_network_period",
+    "adgroup_network_period",
+    "creative_period",
+}
+
+DEFAULT_CREATIVE_MIN_IMPRESSIONS = 50000
+
+SUM_METRICS = ["reach", "impressions", "clicks", "cost", "installs", "in_app_conversions"]
+
+ACCOUNT_DAILY_COLUMNS = [
+    "date",
+    "impressions",
+    "clicks",
+    "cost",
+    "installs",
+    "in_app_conversions",
+    "ctr_percent",
+    "cpc",
+    "cti_percent",
+    "conversion_rate_percent",
+]
+
+_METRIC_COLS = [
+    "reach", "impressions", "clicks", "cost", "installs", "in_app_conversions",
+    "goal_conversions", "cpm", "frequency", "ctr_percent", "cpc", "cti_percent",
+    "conversion_rate_percent", "cpa", "cpi",
+]
+
+ACCOUNT_NETWORK_PERIOD_COLUMNS = ["customer_id", "customer_name", "network"] + _METRIC_COLS
+CAMPAIGN_NETWORK_PERIOD_COLUMNS = [
+    "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
+] + _METRIC_COLS
+ADGROUP_NETWORK_PERIOD_COLUMNS = [
+    "customer_id", "campaign_id", "campaign_name",
+    "ad_group_id", "ad_group_name", "ad_group_status", "network",
+] + _METRIC_COLS
+
+CREATIVE_PERIOD_COLUMNS = [
+    "customer_id", "campaign_id", "campaign_name",
+    "ad_group_id", "ad_group_name",
+    "asset_view_resource_name", "asset_resource_name",
+    "asset_id", "asset_name", "asset_type", "field_type", "performance_label",
+] + _METRIC_COLS
+
+def _weekly_trend_columns(iso_weeks: list[int]) -> list[str]:
+    """Generate campaign_weekly_trend column list for specific ISO week numbers."""
+    cols = ["customer_id", "campaign_id", "campaign_name", "campaign_status",
+            "current_iso_week", "prior1_iso_week", "prior2_iso_week"]
+    for w in iso_weeks:
+        cols += [
+            f"w{w}_start", f"w{w}_end",
+            f"w{w}_impressions", f"w{w}_clicks", f"w{w}_cost",
+            f"w{w}_installs", f"w{w}_in_app_conversions",
+            f"w{w}_cpm", f"w{w}_ctr_percent", f"w{w}_cpc",
+            f"w{w}_cti_percent", f"w{w}_conversion_rate_percent",
+        ]
+    return cols + ["trend_direction", "signal_strength"]
+
+BID_BUDGET_REC_COLUMNS = [
+    "customer_id", "campaign_id", "campaign_name", "campaign_status",
+    "current_iso_week", "w0_cpi", "ref_cpi", "cpi_pct_vs_ref",
+    "w0_cpm", "ref_cpm", "cpm_pct_vs_ref",
+    "w0_cpa", "cac_ceiling", "cac_guard_passed",
+    "w0_installs", "min_installs_met",
+    "last_bid_budget_change_date", "days_since_last_change", "cooldown_days", "cooldown_ok",
+    "budget_utilization_pct", "budget_constrained",
+    "w0_conv_rate_pct", "w1_conv_rate_pct", "conv_rate_declining",
+    "action", "rationale", "forecast",
+    "current_target_cpa", "proposed_target_cpa",
+    "current_daily_budget", "proposed_daily_budget",
+    "campaign_budget_id",
+]
+
+_COMPARISON_VOLUME_METRICS = ["reach", "impressions", "clicks", "cost", "installs", "in_app_conversions", "goal_conversions"]
+_COMPARISON_RATIO_METRICS = ["cpm", "frequency", "ctr_percent", "cpc", "cti_percent", "conversion_rate_percent", "cpa", "cpi"]
+
+def _comparison_cols(id_cols: list[str]) -> list[str]:
+    cols = list(id_cols)
+    for m in _COMPARISON_VOLUME_METRICS:
+        cols += [f"current_{m}", f"baseline_{m}", f"delta_{m}_pct"]
+    for m in _COMPARISON_RATIO_METRICS:
+        cols += [f"current_{m}", f"baseline_{m}"]
+    return cols
+
+CAMPAIGN_SLICE_COMPARISON_COLUMNS = _comparison_cols(["campaign_id", "campaign_name", "campaign_status"])
+ACCOUNT_WEEK_COMPARISON_COLUMNS   = _comparison_cols(["network"])
+CAMPAIGN_WEEK_COMPARISON_COLUMNS  = _comparison_cols(["campaign_id", "campaign_name", "campaign_status"])
+
+DEFAULT_TOLERANCES = {
+    "impressions": ("relative", 0.01),
+    "clicks": ("relative", 0.01),
+    "cost": ("relative", 0.1),
+    "installs": ("relative", 0.1),
+    "in_app_conversions": ("relative", 0.1),
+    "ctr_percent": ("absolute", 0.1),
+    "cpc": ("relative", 0.1),
+    "cti_percent": ("absolute", 0.1),
+    "conversion_rate_percent": ("absolute", 0.1),
+}
+
+NETWORK_DISPLAY_NAMES: dict[str, str] = {
+    "0": "Unspecified", "1": "Unknown",
+    "2": "Search",      "3": "Search Partners",
+    "4": "Display",     "5": "YouTube Search",
+    "6": "YouTube",     "7": "Mixed",
+    "8": "Play",
+    # Legacy text values from older raw files
+    "SEARCH": "Search", "SEARCH_PARTNERS": "Search Partners",
+    "CONTENT": "Display", "YOUTUBE_SEARCH": "YouTube Search",
+    "YOUTUBE_WATCH": "YouTube", "MIXED": "Mixed",
+    "GOOGLE_PLAY": "Play",
+}
+
+def _display_network(code: str) -> str:
+    return NETWORK_DISPLAY_NAMES.get(str(code).strip(), str(code))
+
+
+_NETWORK_PERIOD_KEY_COLS: dict[str, list[str]] = {
+    "account_network_period": ["customer_id", "customer_name", "network"],
+    "campaign_network_period": [
+        "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
+    ],
+    "adgroup_network_period": [
+        "customer_id", "campaign_id", "campaign_name",
+        "ad_group_id", "ad_group_name", "ad_group_status", "network",
+    ],
+}
+
+_NETWORK_PERIOD_COLUMNS: dict[str, list[str]] = {
+    "account_network_period": ACCOUNT_NETWORK_PERIOD_COLUMNS,
+    "campaign_network_period": CAMPAIGN_NETWORK_PERIOD_COLUMNS,
+    "adgroup_network_period": ADGROUP_NETWORK_PERIOD_COLUMNS,
+}
+
+_NETWORK_PERIOD_SUBDIR: dict[str, str] = {
+    "account_network_period": "account-network",
+    "campaign_network_period": "campaign-network",
+    "adgroup_network_period": "adgroup-network",
+}
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def today() -> dt.date:
+    override = os.getenv("BOB_TODAY")
+    if override:
+        return dt.date.fromisoformat(override)
+    return dt.date.today()
+
+
+def load_profile(required: bool = True) -> dict[str, Any]:
+    """Load the active account profile from .bob/accounts/{id}/profile.json via accounts.json."""
+    accounts = _load_accounts_registry()
+    active = next((a for a in accounts if a.get("active")), None)
+    if not active:
+        if required:
+            die("No active account found. Run: python3 lib/datapull.py onboard")
+        return {}
+    cid = str(active.get("google_ads_customer_id", "")).replace("-", "")
+    acct_profile = ACCOUNTS_DIR / cid / "profile.json"
+    if not acct_profile.exists():
+        if required:
+            die(f"Account profile missing: {acct_profile}. Run: python3 lib/datapull.py onboard")
+        return {}
+    with acct_profile.open() as f:
+        return json.load(f)
+
+
+def account_processed_dir(customer_id: str, subdir: str) -> Path:
+    """data/processed/{customer_id}/{subdir}/ — per-account data store."""
+    return PROCESSED_DIR / customer_id.replace("-", "") / subdir
+
+
+def account_wiki_dir(customer_id: str) -> Path:
+    """wiki/{customer_id}/ — per-account wiki store."""
+    return ROOT / "wiki" / customer_id.replace("-", "")
+
+
+def _resolve_processed_dir(subdir: str, customer_id: str | None) -> Path:
+    """Return per-account dir if it exists, else fall back to legacy flat dir."""
+    if customer_id:
+        scoped = account_processed_dir(customer_id, subdir)
+        if scoped.exists():
+            return scoped
+    return PROCESSED_DIR / subdir
+
+
+def _load_accounts_registry() -> list[dict]:
+    if not ACCOUNTS_REGISTRY.exists():
+        return []
+    with ACCOUNTS_REGISTRY.open() as f:
+        return json.load(f)
+
+
+def _save_accounts_registry(accounts: list[dict]) -> None:
+    BOB_DIR.mkdir(parents=True, exist_ok=True)
+    with ACCOUNTS_REGISTRY.open("w") as f:
+        json.dump(accounts, f, indent=2)
+        f.write("\n")
+
+
+def _set_active_account(profile: dict) -> None:
+    """Write profile to the per-account file. accounts.json active flag is the source of truth."""
+    cid = str(profile.get("google_ads_customer_id", "")).replace("-", "")
+    if cid:
+        acct_dir = ACCOUNTS_DIR / cid
+        acct_dir.mkdir(parents=True, exist_ok=True)
+        with (acct_dir / "profile.json").open("w") as f:
+            json.dump(profile, f, indent=2)
+            f.write("\n")
+
+
+def parse_date(value: str | None) -> dt.date | None:
+    if not value:
+        return None
+    return dt.date.fromisoformat(value)
+
+
+def resolve_range(args: argparse.Namespace) -> tuple[dt.date, dt.date]:
+    end = parse_date(args.to) or (today() - dt.timedelta(days=1))
+    if args.from_date:
+        start = parse_date(args.from_date)
+    else:
+        days = int(args.days or 30)
+        start = end - dt.timedelta(days=days - 1)
+    if start is None:
+        die("could not resolve start date")
+    if start > end:
+        die(f"start date {start} is after end date {end}")
+    return start, end
+
+
+def resolve_period_dates(period: str) -> list[tuple[dt.date, dt.date]]:
+    """Return [(start, end), ...] for each fetch window in the named period pattern."""
+    yesterday = today() - dt.timedelta(days=1)
+    if period == "yesterday_vs_sdlw":
+        sdlw = yesterday - dt.timedelta(days=7)
+        return [(yesterday, yesterday), (sdlw, sdlw)]
+    if period == "wow":
+        return [
+            (yesterday - dt.timedelta(days=6), yesterday),
+            (yesterday - dt.timedelta(days=13), yesterday - dt.timedelta(days=7)),
+        ]
+    if period == "mom":
+        return [
+            (yesterday - dt.timedelta(days=29), yesterday),
+            (yesterday - dt.timedelta(days=59), yesterday - dt.timedelta(days=30)),
+        ]
+    if period == "3week_rolling":
+        return [
+            (yesterday - dt.timedelta(days=6),  yesterday),
+            (yesterday - dt.timedelta(days=13), yesterday - dt.timedelta(days=7)),
+            (yesterday - dt.timedelta(days=20), yesterday - dt.timedelta(days=14)),
+        ]
+    if period == "mtd":
+        # Current: 1st of this month → yesterday
+        # Prior:   1st of prior month → same day-of-month last month
+        a_start = yesterday.replace(day=1)
+        a_end = yesterday
+        b_start = (a_start - dt.timedelta(days=1)).replace(day=1)
+        try:
+            b_end = b_start.replace(day=a_end.day)
+        except ValueError:
+            # Prior month is shorter (e.g. Feb when today is Mar 31)
+            import calendar as _cal
+            b_end = b_start.replace(day=_cal.monthrange(b_start.year, b_start.month)[1])
+        return [(a_start, a_end), (b_start, b_end)]
+    m = re.match(r"^partial_wow_(\d+)$", period)
+    if m:
+        n = max(1, int(m.group(1)))
+        yesterday = today() - dt.timedelta(days=1)
+        monday_cur = today() - dt.timedelta(days=today().weekday())
+        cur_start = monday_cur
+        cur_end = min(monday_cur + dt.timedelta(days=n - 1), yesterday)
+        monday_base = monday_cur - dt.timedelta(days=7)
+        return [(cur_start, cur_end), (monday_base, monday_base + dt.timedelta(days=n - 1))]
+    die(f"unknown period name: {period}")
+
+
+def iso_week_to_dates(week: int, year: int) -> tuple[dt.date, dt.date]:
+    """Return (monday, sunday) for the given ISO week and year."""
+    try:
+        monday = dt.date.fromisocalendar(year, week, 1)
+    except ValueError:
+        die(f"ISO week {week} does not exist in year {year}")
+    return monday, monday + dt.timedelta(days=6)
+
+
+def last_complete_iso_week(reference: dt.date) -> tuple[int, int]:
+    """Return (week, year) for the most recently completed ISO week ending before reference."""
+    last_sunday = reference - dt.timedelta(days=reference.isoweekday())
+    cal = last_sunday.isocalendar()
+    return cal.week, cal.year
+
+
+def cmd_resolve_dates(args: argparse.Namespace) -> None:
+    """Print concrete date ranges for a named period so the agent can construct fetch commands."""
+    import calendar as _cal
+    period = args.period.replace("-", "_")
+    if period == "partial_wow":
+        n = args.n if args.n else 3
+        period = f"partial_wow_{n}"
+
+    windows = resolve_period_dates(period)
+    labels = ["current", "baseline", "prior-2"]
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    print(f"\nPeriod: {args.period}" + (f"  (first {args.n} days of week vs prior week)" if "partial_wow" in period else ""))
+    print(f"  {'':12}  {'from':12}  {'to':12}  label")
+    print(f"  {'':12}  {'────────────':12}  {'────────────':12}  ─────────────────────")
+    for i, (start, end) in enumerate(windows):
+        label = labels[i] if i < len(labels) else f"window-{i}"
+        iso_w = start.isocalendar()
+        week_label = f"W{iso_w.week} ({day_names[start.weekday()]} {start.day} {_cal.month_abbr[start.month]}–{day_names[end.weekday()]} {end.day} {_cal.month_abbr[end.month]})"
+        print(f"  {label:<12}  {str(start):12}  {str(end):12}  {week_label}")
+    print()
+
+
+def run_id() -> str:
+    return dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+
+
+def render_query(query_name: str, start: dt.date, end: dt.date) -> str:
+    query_file = QUERIES_DIR / f"{query_name}.sql"
+    if not query_file.exists():
+        die(f"query file not found: {query_file}")
+    text = query_file.read_text()
+    yesterday = today() - dt.timedelta(days=1)
+    sdlw = yesterday - dt.timedelta(days=7)
+    return text.format(
+        start_date=start.isoformat(),
+        end_date=end.isoformat(),
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+        yesterday=yesterday.isoformat(),
+        sdlw=sdlw.isoformat(),
+    )
+
+
+def ensure_dirs() -> None:
+    for path in [RAW_DIR, PROCESSED_DIR, REPORTS_DIR, ACCOUNTS_DIR]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def garf_command(query_path: Path, output_dir: Path, account: str, config: str | None) -> list[str]:
+    garf_exe = shutil.which("garf")
+    if not garf_exe:
+        candidate = Path(sys.executable).parent / "garf"
+        if candidate.exists():
+            garf_exe = str(candidate)
+    if not garf_exe:
+        garf_exe = "garf"
+    cmd = [
+        garf_exe,
+        str(query_path),
+        "--source",
+        "google-ads",
+        "--output",
+        "csv",
+        f"--csv.destination-folder={output_dir}",
+        f"--source.account={account}",
+    ]
+    if config:
+        cmd.append(f"--source.path-to-config={config}")
+    return cmd
+
+
+def newest_raw(query_name: str) -> Path:
+    query_dir = RAW_DIR / query_name
+    files = sorted(query_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        die(f"no raw CSV found for {query_name} in {query_dir}")
+    return files[0]
+
+
+def find_period_files(query_name: str, n: int) -> list[Path]:
+    """Return up to n raw CSV files for a query, sorted by start_date in filename descending."""
+    query_dir = RAW_DIR / query_name
+    if not query_dir.exists():
+        return []
+    dated: list[tuple[dt.date, Path]] = []
+    for p in query_dir.glob("*.csv"):
+        parts = p.stem.split("_")
+        # filename: {customer_id}_{YYYY-MM-DD}_{YYYY-MM-DD}_{run_id}
+        if len(parts) >= 3:
+            try:
+                dated.append((dt.date.fromisoformat(parts[1]), p))
+            except ValueError:
+                pass
+    dated.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in dated[:n]]
+
+
+def find_processed_files_for_period(
+    subdir: str, windows: list[tuple[dt.date, dt.date]], customer_id: str | None = None
+) -> list[Path | None]:
+    """Return processed CSV files matching given (start, end) windows by filename date encoding."""
+    proc_dir = _resolve_processed_dir(subdir, customer_id)
+    if not proc_dir.exists():
+        return [None] * len(windows)
+    file_index: dict[tuple[str, str], Path] = {}
+    for p in proc_dir.glob("*.csv"):
+        parts = p.stem.split("_")
+        if len(parts) >= 3:
+            file_index[(parts[1], parts[2])] = p
+    return [file_index.get((s.isoformat(), e.isoformat())) for s, e in windows]
+
+
+def log_pull(
+    query: str,
+    from_date: str,
+    to_date: str,
+    account: str,
+    run_id_val: str,
+    output_file: str,
+    reason: str,
+    question: str = "",
+    outcome: str = "fetched",
+) -> None:
+    """Append one entry to the pull log (logs/pull-log.jsonl).
+
+    outcome values: 'fetched' (API called), 'skipped_raw' (file existed),
+    'skipped_wiki' (wiki cache hit — agent writes via log-pull subcommand).
+    """
+    PULL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "query": query,
+        "from_date": from_date,
+        "to_date": to_date,
+        "account": account,
+        "question": question,
+        "reason": reason,
+        "outcome": outcome,
+        "run_id": run_id_val,
+        "output_file": output_file,
+    }
+    with PULL_LOG_PATH.open("a") as f:
+        json.dump(entry, f)
+        f.write("\n")
+
+
+def write_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    with path.open("w") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def fetch(args: argparse.Namespace) -> None:
+    ensure_dirs()
+    profile = load_profile(required=not bool(args.account))
+    query_name = args.query
+    account = args.account or profile.get("google_ads_customer_id")
+    if not account:
+        die("google_ads_customer_id missing from profile and --account not provided")
+    account = str(account).replace("-", "")
+    config = args.config or profile.get("google_ads_config_path")
+    if config:
+        config = str(Path(config).expanduser())
+
+    if query_name in DATE_QUERIES:
+        start, end = resolve_range(args)
+    else:
+        end = parse_date(args.to) or (today() - dt.timedelta(days=1))
+        start = parse_date(args.from_date) or (end - dt.timedelta(days=int(args.days or 30) - 1))
+
+    rid = args.run_id or run_id()
+    raw_query_dir = RAW_DIR / query_name
+    raw_query_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deduplication: skip if exact (query, account, start, end) already exists
+    question = getattr(args, "question", "") or ""
+    reason = getattr(args, "reason", "") or ""
+    if not getattr(args, "force", False) and not args.dry_run:
+        existing = sorted(raw_query_dir.glob(f"{account}_{start}_{end}_*.csv"))
+        if existing:
+            print(f"skipping {query_name} {start}..{end} — already have {existing[-1].name}")
+            log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(existing[-1]), reason, question, outcome="skipped_raw")
+            return
+
+    rendered_query = render_query(query_name, start, end)
+    rendered_query_path = raw_query_dir / f"{account}_{start}_{end}_{rid}.sql"
+    rendered_query_path.write_text(rendered_query)
+
+    output_file = raw_query_dir / f"{account}_{start}_{end}_{rid}.csv"
+    meta_file = raw_query_dir / f"{account}_{start}_{end}_{rid}.meta.json"
+
+    metadata = {
+        "query_name": query_name,
+        "customer_id": account,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "run_id": rid,
+        "reason": reason,
+        "source": "google-ads",
+        "query_file": str(QUERIES_DIR / f"{query_name}.sql"),
+        "rendered_query_file": str(rendered_query_path),
+        "output_file": str(output_file),
+    }
+
+    if args.dry_run:
+        metadata["dry_run"] = True
+        write_metadata(meta_file, metadata)
+        print(f"dry-run query written: {rendered_query_path}")
+        print(f"metadata written: {meta_file}")
+        return
+
+    with tempfile.TemporaryDirectory(prefix="bob-garf-") as tmp:
+        tmp_dir = Path(tmp)
+        cmd = garf_command(rendered_query_path, tmp_dir, account, config)
+        metadata["command"] = cmd
+        try:
+            result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
+        except FileNotFoundError:
+            die("garf executable not found. Install with: pip install garf-executors garf-google-ads")
+        metadata["returncode"] = result.returncode
+        metadata["stdout"] = result.stdout[-4000:]
+        metadata["stderr"] = result.stderr[-4000:]
+        if result.returncode != 0:
+            write_metadata(meta_file, metadata)
+            die(f"GARF failed for {query_name}. See {meta_file}")
+
+        produced = sorted(tmp_dir.glob("*.csv"))
+        if not produced:
+            write_metadata(meta_file, metadata)
+            die(f"GARF completed but no CSV was written to {tmp_dir}")
+        shutil.move(str(produced[0]), output_file)
+
+    write_metadata(meta_file, metadata)
+    log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(output_file), reason, question, outcome="fetched")
+    print(f"raw output written: {output_file}")
+    print(f"metadata written: {meta_file}")
+
+
+def bootstrap(args: argparse.Namespace) -> None:
+    failures: list[str] = []
+    for entry in DEFAULT_BOOTSTRAP:
+        query_name = entry["query"]
+        if "period" in entry:
+            windows = resolve_period_dates(entry["period"])
+            label = f"{query_name} ({entry['period']}, {len(windows)} windows)"
+        else:
+            windows = [None]
+            label = f"{query_name} ({entry['days']} days)"
+        print(f"\n==> fetching {label}")
+        for window in windows:
+            _reason = getattr(args, "reason", "") or ""
+            _question = getattr(args, "question", "") or ""
+            _force = getattr(args, "force", False)
+            if window is not None:
+                start, end = window
+                child = argparse.Namespace(
+                    query=query_name,
+                    days=None,
+                    from_date=start.isoformat(),
+                    to=end.isoformat(),
+                    account=args.account,
+                    config=args.config,
+                    dry_run=args.dry_run,
+                    run_id=args.run_id,
+                    reason=_reason,
+                    question=_question,
+                    force=_force,
+                )
+            else:
+                child = argparse.Namespace(
+                    query=query_name,
+                    days=entry["days"],
+                    from_date=args.from_date,
+                    to=args.to,
+                    account=args.account,
+                    config=args.config,
+                    dry_run=args.dry_run,
+                    run_id=args.run_id,
+                    reason=_reason,
+                    question=_question,
+                    force=_force,
+                )
+            try:
+                fetch(child)
+            except SystemExit as exc:
+                failures.append(f"{query_name}: exit {exc.code}")
+                if not args.keep_going:
+                    raise
+    if failures:
+        print("\ncompleted with failures:")
+        for failure in failures:
+            print(f"- {failure}")
+        raise SystemExit(1)
+    print("\nbootstrap fetch complete — running aggregates\n")
+
+    if not args.dry_run:
+        for grain in ("account_network_period", "campaign_network_period", "creative_period", "campaign_weekly_trend"):
+            try:
+                agg_args = argparse.Namespace(grain=grain, source=None, goal=None, input=None, customer=None, output=None)
+                aggregate(agg_args)
+            except SystemExit:
+                print(f"  aggregate {grain}: skipped (no data yet)")
+        print("\nbootstrap complete")
+
+
+def read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample) if sample.strip() else csv.excel
+        except Exception:
+            dialect = csv.excel
+        return list(csv.DictReader(f, dialect=dialect))
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def number(value: Any) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip().replace(",", "")
+    if text == "" or text.upper() in {"NA", "NULL", "NAN"}:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def ratio(num: float, den: float, scale: float = 1.0) -> str:
+    if den == 0:
+        return "NA"
+    return format_float(num / den * scale)
+
+
+def format_float(value: float) -> str:
+    if value == 0:
+        return "0"
+    if abs(value) >= 100:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _derive_metrics(g: dict[str, float], primary_goal: str) -> dict[str, str]:
+    """Compute derived metrics from summed base metrics."""
+    goal = g["installs"] if primary_goal == "installs" else g["in_app_conversions"]
+    reach = g.get("reach", 0.0)
+    return {
+        "reach": format_float(reach),
+        "impressions": format_float(g["impressions"]),
+        "clicks": format_float(g["clicks"]),
+        "cost": format_float(g["cost"]),
+        "installs": format_float(g["installs"]),
+        "in_app_conversions": format_float(g["in_app_conversions"]),
+        "goal_conversions": format_float(goal),
+        "cpm": ratio(g["cost"], g["impressions"], 1000),
+        "frequency": ratio(g["impressions"], reach),
+        "ctr_percent": ratio(g["clicks"], g["impressions"], 100),
+        "cpc": ratio(g["cost"], g["clicks"]),
+        "cti_percent": ratio(g["installs"], g["clicks"], 100),
+        "conversion_rate_percent": ratio(goal, g["clicks"], 100),
+        "cpa": ratio(g["cost"], goal),
+        "cpi": ratio(g["cost"], g["installs"]),
+    }
+
+
+CURRENCY_SYMBOLS: dict[str, str] = {
+    "INR": "₹", "USD": "$", "EUR": "€", "GBP": "£",
+    "AUD": "A$", "CAD": "C$", "SGD": "S$",
+}
+
+# (display label, metric key in aggregated row, format kind)
+METRIC_DISPLAY_SPEC: list[tuple[str, str, str]] = [
+    ("Users",        "reach",                   "count"),
+    ("Impressions",  "impressions",              "count"),
+    ("CPM",          "cpm",                      "cost"),
+    ("Frequency",    "frequency",                "ratio"),
+    ("Clicks",       "clicks",                   "count"),
+    ("CTR %",        "ctr_percent",              "percent"),
+    ("CPC",          "cpc",                      "cost"),
+    ("Installs",     "installs",                 "count"),
+    ("CTI %",        "cti_percent",              "percent"),
+    ("Conversions",  "goal_conversions",         "count"),
+    ("Conv %",       "conversion_rate_percent",  "percent"),
+    ("CPA",          "cpa",                      "cost"),
+    ("CPI",          "cpi",                      "cost"),
+]
+
+
+def _currency_symbol(currency: str) -> str:
+    return CURRENCY_SYMBOLS.get((currency or "").upper(), "")
+
+
+def _fmt_display(val: Any, kind: str, sym: str = "") -> str:
+    if str(val).upper() in ("NA", "", "NAN", "NONE"):
+        return "NA"
+    v = number(val)
+    if v == 0 and kind in ("ratio", "frequency"):
+        return "NA"
+    if kind == "count":
+        if v >= 1_000_000:
+            return f"{v / 1_000_000:,.2f}M"
+        return f"{v:,.0f}"
+    if kind == "cost":
+        if v >= 1_000_000:
+            return f"{sym}{v / 1_000_000:,.2f}M"
+        if v >= 1_000:
+            return f"{sym}{v:,.2f}"
+        return f"{sym}{v:.2f}"
+    if kind == "percent":
+        return f"{v:.2f}%"
+    return f"{v:.2f}"  # ratio
+
+
+def _fmt_delta_display(cur: Any, base: Any) -> str:
+    if str(cur).upper() in ("NA", "", "NAN") or str(base).upper() in ("NA", "", "NAN"):
+        return "NA"
+    c, b = number(cur), number(base)
+    if b == 0:
+        return "NA" if c == 0 else "+∞"
+    pct = (c - b) / b * 100
+    return f"+{pct:.1f}%" if pct >= 0 else f"{pct:.1f}%"
+
+
+def _print_metric_table(
+    cur: dict[str, Any],
+    base: dict[str, Any],
+    cur_label: str,
+    base_label: str,
+    currency_sym: str,
+) -> None:
+    col_m = max(len(s[0]) for s in METRIC_DISPLAY_SPEC) + 1
+    col_v = max(18, len(cur_label) + 2, len(base_label) + 2)
+    col_d = 10
+    hdr = f"  {'Metric':<{col_m}}  {cur_label:>{col_v}}  {base_label:>{col_v}}  {'Δ %':>{col_d}}"
+    sep = "  " + "─" * col_m + "──" + "─" * col_v + "──" + "─" * col_v + "──" + "─" * col_d
+    print(hdr)
+    print(sep)
+    for label, key, kind in METRIC_DISPLAY_SPEC:
+        cur_fmt = _fmt_display(cur.get(key, "NA"), kind, currency_sym)
+        base_fmt = _fmt_display(base.get(key, "NA"), kind, currency_sym)
+        delta_fmt = _fmt_delta_display(cur.get(key, "NA"), base.get(key, "NA"))
+        print(f"  {label:<{col_m}}  {cur_fmt:>{col_v}}  {base_fmt:>{col_v}}  {delta_fmt:>{col_d}}")
+
+
+def _delta_pct(current: float, baseline: float) -> str:
+    if baseline == 0:
+        return "NA" if current == 0 else "+inf"
+    return format_float((current - baseline) / baseline * 100)
+
+
+def _date_label(path: Path) -> str:
+    parts = path.stem.split("_")
+    if len(parts) >= 3:
+        return f"{parts[1]}–{parts[2]}"
+    return path.name
+
+
+def _build_comparison_rows(
+    current_rows: list[dict],
+    baseline_rows: list[dict],
+    key_cols: list[str],
+    primary_goal: str,
+) -> list[dict[str, Any]]:
+    """Aggregate both sets by key_cols, join, and compute delta_pct columns."""
+    cur_agg = {
+        tuple(r.get(c, "") for c in key_cols): r
+        for r in _aggregate_period_rows(current_rows, key_cols, primary_goal)
+    }
+    base_agg = {
+        tuple(r.get(c, "") for c in key_cols): r
+        for r in _aggregate_period_rows(baseline_rows, key_cols, primary_goal)
+    }
+    out: list[dict[str, Any]] = []
+    for key in sorted(set(cur_agg) | set(base_agg)):
+        cur = cur_agg.get(key, {})
+        base = base_agg.get(key, {})
+        rep = cur or base
+        row: dict[str, Any] = {col: rep.get(col, "") for col in key_cols}
+        for m in _COMPARISON_VOLUME_METRICS:
+            c_val = number(cur.get(m, 0))
+            b_val = number(base.get(m, 0))
+            row[f"current_{m}"] = format_float(c_val)
+            row[f"baseline_{m}"] = format_float(b_val)
+            row[f"delta_{m}_pct"] = _delta_pct(c_val, b_val)
+        for m in _COMPARISON_RATIO_METRICS:
+            row[f"current_{m}"] = cur.get(m, "NA")
+            row[f"baseline_{m}"] = base.get(m, "NA")
+        out.append(row)
+    return out
+
+
+def _aggregate_period_rows(
+    rows: list[dict],
+    key_cols: list[str],
+    primary_goal: str,
+) -> list[dict]:
+    """Group by key_cols, sum SUM_METRICS, recalculate derived metrics."""
+    grouped: dict[tuple, dict[str, Any]] = {}
+    for row in rows:
+        key = tuple(row.get(col, "") for col in key_cols)
+        if key not in grouped:
+            grouped[key] = {col: row.get(col, "") for col in key_cols}
+            for m in SUM_METRICS:
+                grouped[key][m] = 0.0
+        for m in SUM_METRICS:
+            grouped[key][m] += number(row.get(m))
+    out = []
+    for key in sorted(grouped):
+        g = grouped[key]
+        row_out = {col: g[col] for col in key_cols}
+        row_out.update(_derive_metrics(g, primary_goal))
+        out.append(row_out)
+    return out
+
+
+def aggregate(args: argparse.Namespace) -> None:
+    profile = load_profile(required=False)
+    grain = args.grain
+    primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
+
+    if grain == "account_daily":
+        _agg_account_daily(args, profile, primary_goal)
+    elif grain in _NETWORK_PERIOD_KEY_COLS:
+        _agg_network_period(args, profile, grain, primary_goal)
+    elif grain == "creative_period":
+        _agg_creative_period(args, profile, primary_goal)
+    elif grain == "campaign_weekly_trend":
+        _agg_campaign_weekly_trend(args, profile, primary_goal)
+    else:
+        die(f"unknown grain: {grain}")
+
+
+def _agg_account_daily(
+    args: argparse.Namespace, profile: dict, primary_goal: str
+) -> None:
+    source = args.source or "campaign_daily"
+    input_path = Path(args.input).expanduser() if args.input else newest_raw(source)
+    rows = read_csv(input_path)
+    grouped: dict[str, dict[str, float]] = {}
+    for row in rows:
+        date = row.get("date")
+        if not date:
+            continue
+        if date not in grouped:
+            grouped[date] = {m: 0.0 for m in SUM_METRICS}
+        for m in SUM_METRICS:
+            grouped[date][m] += number(row.get(m))
+
+    out_rows: list[dict[str, Any]] = []
+    for date in sorted(grouped):
+        row_out: dict[str, Any] = {"date": date}
+        row_out.update(_derive_metrics(grouped[date], primary_goal))
+        out_rows.append(row_out)
+
+    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    if args.output:
+        output_path = Path(args.output).expanduser()
+    else:
+        start = out_rows[0]["date"] if out_rows else "empty"
+        end = out_rows[-1]["date"] if out_rows else "empty"
+        output_path = account_processed_dir(customer, "account") / f"account_daily_{customer}_{start}_{end}.csv"
+    write_csv(output_path, out_rows, ACCOUNT_DAILY_COLUMNS)
+    print(f"processed aggregate written: {output_path}")
+
+
+def _agg_network_period(
+    args: argparse.Namespace, profile: dict, grain: str, primary_goal: str
+) -> None:
+    source = args.source or grain
+    input_path = Path(args.input).expanduser() if args.input else newest_raw(source)
+    rows = read_csv(input_path)
+    out_rows = _aggregate_period_rows(rows, _NETWORK_PERIOD_KEY_COLS[grain], primary_goal)
+
+    parts = input_path.stem.split("_")
+    file_start = parts[1] if len(parts) >= 3 else "unknown"
+    file_end = parts[2] if len(parts) >= 3 else "unknown"
+    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    if args.output:
+        output_path = Path(args.output).expanduser()
+    else:
+        subdir = _NETWORK_PERIOD_SUBDIR[grain]
+        output_path = account_processed_dir(customer, subdir) / f"{customer}_{file_start}_{file_end}.csv"
+    write_csv(output_path, out_rows, _NETWORK_PERIOD_COLUMNS[grain])
+    print(f"processed aggregate written: {output_path}")
+
+
+def _agg_creative_period(
+    args: argparse.Namespace, profile: dict, primary_goal: str
+) -> None:
+    source = args.source or "creative_period"
+    input_path = Path(args.input).expanduser() if args.input else newest_raw(source)
+    rows = read_csv(input_path)
+    key_cols = [
+        "customer_id", "campaign_id", "campaign_name",
+        "ad_group_id", "ad_group_name",
+        "asset_view_resource_name", "asset_resource_name",
+        "asset_id", "asset_name", "asset_type", "field_type", "performance_label",
+    ]
+    out_rows = _aggregate_period_rows(rows, key_cols, primary_goal)
+    min_imp = int(profile.get("creative_min_impressions", DEFAULT_CREATIVE_MIN_IMPRESSIONS))
+    out_rows = [r for r in out_rows if number(r.get("impressions")) >= min_imp]
+
+    parts = input_path.stem.split("_")
+    file_start = parts[1] if len(parts) >= 3 else "unknown"
+    file_end = parts[2] if len(parts) >= 3 else "unknown"
+    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    if args.output:
+        output_path = Path(args.output).expanduser()
+    else:
+        output_path = account_processed_dir(customer, "creative") / f"{customer}_{file_start}_{file_end}.csv"
+    write_csv(output_path, out_rows, CREATIVE_PERIOD_COLUMNS)
+    print(f"processed aggregate written: {output_path} ({len(out_rows)} creatives >= {min_imp} impressions)")
+
+
+def _agg_campaign_weekly_trend(
+    args: argparse.Namespace, profile: dict, primary_goal: str
+) -> None:
+    source = args.source or "campaign_network_period"
+    period_files = find_period_files(source, 3)
+    if len(period_files) < 3:
+        die(
+            f"need 3 {source} raw files for campaign_weekly_trend, found {len(period_files)}. "
+            "Run: python3 lib/datapull.py bootstrap"
+        )
+
+    campaign_key_cols = ["customer_id", "campaign_id", "campaign_name", "campaign_status"]
+    week_data: list[tuple[int, str, str, dict[str, dict]]] = []
+    for path in period_files:
+        parts = path.stem.split("_")
+        w_start = parts[1] if len(parts) >= 3 else ""
+        w_end = parts[2] if len(parts) >= 3 else ""
+        try:
+            iso_week = dt.date.fromisoformat(w_start).isocalendar().week
+        except (ValueError, AttributeError):
+            iso_week = 0
+        agg = _aggregate_period_rows(read_csv(path), campaign_key_cols, primary_goal)
+        week_data.append((iso_week, w_start, w_end, {r["campaign_id"]: r for r in agg}))
+
+    w0_iso, w0_start, w0_end, w0 = week_data[0]
+    w1_iso, w1_start, w1_end, w1 = week_data[1]
+    w2_iso, w2_start, w2_end, w2 = week_data[2]
+    goal_col = "installs" if primary_goal == "installs" else "in_app_conversions"
+
+    def cpi(r: dict) -> float:
+        cost = number(r.get("cost", 0))
+        goal = number(r.get(goal_col, 0))
+        return cost / goal if goal > 0 else 0.0
+
+    def week_prefixed(iso_w: int, start: str, end: str, r: dict) -> dict:
+        p = f"w{iso_w}"
+        return {
+            f"{p}_start": start,
+            f"{p}_end": end,
+            f"{p}_impressions": r.get("impressions", "0"),
+            f"{p}_clicks": r.get("clicks", "0"),
+            f"{p}_cost": r.get("cost", "0"),
+            f"{p}_installs": r.get("installs", "0"),
+            f"{p}_in_app_conversions": r.get("in_app_conversions", "0"),
+            f"{p}_cpm": ratio(number(r.get("cost", 0)), number(r.get("impressions", 0)), 1000),
+            f"{p}_ctr_percent": r.get("ctr_percent", "NA"),
+            f"{p}_cpc": r.get("cpc", "NA"),
+            f"{p}_cti_percent": r.get("cti_percent", "NA"),
+            f"{p}_conversion_rate_percent": r.get("conversion_rate_percent", "NA"),
+        }
+
+    all_ids = set(w0) | set(w1) | set(w2)
+    out_rows = []
+    for cid in sorted(all_ids):
+        r0, r1, r2 = w0.get(cid, {}), w1.get(cid, {}), w2.get(cid, {})
+        rep = r0 or r1 or r2
+        c0, c1, c2 = cpi(r0), cpi(r1), cpi(r2)
+
+        # CPI lower = better; w0 is most recent
+        if c0 > 0 and c1 > 0 and c2 > 0:
+            w0_better = c0 < c1
+            w1_better = c1 < c2
+            if w0_better and w1_better:
+                trend, signal = "improving", "confirmed"
+            elif not w0_better and not w1_better:
+                trend, signal = "deteriorating", "confirmed"
+            elif w0_better and not w1_better:
+                trend, signal = "improving", "early"
+            else:
+                trend, signal = "deteriorating", "blip"
+        elif c0 > 0 and c1 > 0:
+            trend = "improving" if c0 < c1 else "deteriorating"
+            signal = "early"
+        else:
+            trend, signal = "stable", "early"
+
+        row_out: dict[str, Any] = {
+            "customer_id": rep.get("customer_id", ""),
+            "campaign_id": cid,
+            "campaign_name": rep.get("campaign_name", ""),
+            "campaign_status": rep.get("campaign_status", ""),
+            "current_iso_week": w0_iso,
+            "prior1_iso_week": w1_iso,
+            "prior2_iso_week": w2_iso,
+        }
+        row_out.update(week_prefixed(w0_iso, w0_start, w0_end, r0))
+        row_out.update(week_prefixed(w1_iso, w1_start, w1_end, r1))
+        row_out.update(week_prefixed(w2_iso, w2_start, w2_end, r2))
+        row_out["trend_direction"] = trend
+        row_out["signal_strength"] = signal
+        out_rows.append(row_out)
+
+    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    if args.output:
+        output_path = Path(args.output).expanduser()
+    else:
+        output_path = account_processed_dir(customer, "campaign-trend") / f"{customer}_{w0_start}_{w0_end}.csv"
+    trend_cols = _weekly_trend_columns([w0_iso, w1_iso, w2_iso])
+    write_csv(output_path, out_rows, trend_cols)
+    print(f"processed aggregate written: {output_path} ({len(out_rows)} campaigns)")
+
+
+def correlate_change_history(
+    campaign_id: str,
+    start_date: str,
+    end_date: str,
+    change_history_path: Path,
+) -> list[dict]:
+    """Return change events for a campaign within a date window, for diagnostic overlay."""
+    if not change_history_path.exists():
+        return []
+    target = str(campaign_id).replace("-", "")
+    results = []
+    for row in read_csv(change_history_path):
+        row_campaign = str(row.get("campaign_id", "")).replace("-", "")
+        changed_at = row.get("changed_at", "")[:10]
+        if row_campaign == target and start_date <= changed_at <= end_date:
+            results.append(row)
+    return results
+
+
+def _print_grain_results(
+    grain_name: str,
+    key_cols: list[str],
+    cur_rows: list[dict],
+    base_rows: list[dict],
+    primary_goal: str,
+    all_metrics: bool,
+    currency_sym: str,
+    cur_label: str,
+    base_label: str,
+    name_filter: str,
+    output_path: str | None,
+    output_account_path: str | None,
+) -> None:
+    goal_col = "installs" if primary_goal == "installs" else "in_app_conversions"
+    rows = _build_comparison_rows(cur_rows, base_rows, key_cols, primary_goal)
+    total_cur = _aggregate_period_rows(cur_rows, ["customer_id"], primary_goal)
+    total_base = _aggregate_period_rows(base_rows, ["customer_id"], primary_goal)
+    tc = total_cur[0] if total_cur else {}
+    tb = total_base[0] if total_base else {}
+
+    _all_metric_keys = [m for _, m, _ in METRIC_DISPLAY_SPEC]
+
+    def _row_to_period_dicts(r: dict) -> tuple[dict, dict]:
+        cur_d = {m: r.get(f"current_{m}", "NA") for m in _all_metric_keys}
+        base_d = {m: r.get(f"baseline_{m}", "NA") for m in _all_metric_keys}
+        return cur_d, base_d
+
+    if grain_name == "account_network_period":
+        if all_metrics:
+            print(f"\nAccount Summary — all metrics")
+            _print_metric_table(tc, tb, cur_label, base_label, currency_sym)
+            for row in rows:
+                network = _display_network(row.get("network", ""))
+                cur_net, base_net = _row_to_period_dicts(row)
+                print(f"\nNetwork: {network}")
+                _print_metric_table(cur_net, base_net, cur_label, base_label, currency_sym)
+
+        print(f"\nAccount × Network")
+        hdr = f"  {'Network':<16}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+        print(hdr)
+        print("  " + "─" * (len(hdr) - 2))
+        for row in rows:
+            g_cur = row[f'current_{goal_col}']
+            g_base = row[f'baseline_{goal_col}']
+            c_cur = row['current_cost']
+            c_base = row['baseline_cost']
+            print(
+                f"  {_display_network(row.get('network', '')):<16}  "
+                f"{_fmt_display(g_cur, 'count'):>12}  "
+                f"{_fmt_display(g_base, 'count'):>12}  "
+                f"{_fmt_delta_display(g_cur, g_base):>8}  "
+                f"{_fmt_display(c_cur, 'cost', currency_sym):>12}  "
+                f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
+                f"{_fmt_delta_display(c_cur, c_base):>8}"
+            )
+        print(
+            f"  {'TOTAL':<16}  "
+            f"{_fmt_display(tc.get(goal_col, '0'), 'count'):>12}  "
+            f"{_fmt_display(tb.get(goal_col, '0'), 'count'):>12}  "
+            f"{_fmt_delta_display(tc.get(goal_col, '0'), tb.get(goal_col, '0')):>8}  "
+            f"{_fmt_display(tc.get('cost', '0'), 'cost', currency_sym):>12}  "
+            f"{_fmt_display(tb.get('cost', '0'), 'cost', currency_sym):>12}  "
+            f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
+        )
+        if output_account_path:
+            write_csv(Path(output_account_path).expanduser(), rows, ACCOUNT_WEEK_COMPARISON_COLUMNS)
+            print(f"account comparison written: {output_account_path}")
+
+    elif grain_name == "campaign_network_period":
+        rows.sort(
+            key=lambda r: abs(number(r[f"current_{goal_col}"]) - number(r[f"baseline_{goal_col}"])),
+            reverse=True,
+        )
+        n = len(rows)
+        n_label = f"{n} campaigns" + (f" matching '{name_filter}'" if name_filter else "")
+        if all_metrics:
+            print(f"\nCampaign Segment Summary — all metrics ({n_label})")
+            _print_metric_table(tc, tb, cur_label, base_label, currency_sym)
+
+        print(f"\nCampaigns ({n_label}) — sorted by |goal Δ|")
+        hdr = f"  {'Campaign':<45}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+        print(hdr)
+        print("  " + "─" * (len(hdr) - 2))
+        for row in rows:
+            g_cur = row[f'current_{goal_col}']
+            g_base = row[f'baseline_{goal_col}']
+            c_cur = row['current_cost']
+            c_base = row['baseline_cost']
+            print(
+                f"  {row['campaign_name']:<45}  "
+                f"{_fmt_display(g_cur, 'count'):>12}  "
+                f"{_fmt_display(g_base, 'count'):>12}  "
+                f"{_fmt_delta_display(g_cur, g_base):>8}  "
+                f"{_fmt_display(c_cur, 'cost', currency_sym):>12}  "
+                f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
+                f"{_fmt_delta_display(c_cur, c_base):>8}"
+            )
+        print(
+            f"  {'— TOTAL —':<45}  "
+            f"{_fmt_display(tc.get(goal_col, '0'), 'count'):>12}  "
+            f"{_fmt_display(tb.get(goal_col, '0'), 'count'):>12}  "
+            f"{_fmt_delta_display(tc.get(goal_col, '0'), tb.get(goal_col, '0')):>8}  "
+            f"{_fmt_display(tc.get('cost', '0'), 'cost', currency_sym):>12}  "
+            f"{_fmt_display(tb.get('cost', '0'), 'cost', currency_sym):>12}  "
+            f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
+        )
+        if output_path:
+            write_csv(Path(output_path).expanduser(), rows, CAMPAIGN_WEEK_COMPARISON_COLUMNS)
+            print(f"\ncampaign comparison written: {output_path}")
+
+
+def slice_campaigns(args: argparse.Namespace) -> None:
+    profile = load_profile(required=False)
+    primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
+    currency_sym = _currency_symbol(profile.get("currency", ""))
+    pattern = (args.name_contains or "").lower()
+    all_metrics = getattr(args, "all_metrics", False)
+    customer_id = profile.get("google_ads_customer_id")
+
+    if args.current and args.baseline:
+        current_path: Path | None = Path(args.current).expanduser()
+        baseline_path: Path | None = Path(args.baseline).expanduser()
+    else:
+        period = args.period or "yesterday_vs_sdlw"
+        windows = resolve_period_dates(period)
+        found = find_processed_files_for_period("campaign-network", [windows[0], windows[1]], customer_id)
+        current_path, baseline_path = found[0], found[1]
+        if not current_path or not baseline_path:
+            missing = []
+            if not current_path:
+                missing.append(f"{windows[0][0]}_{windows[0][1]}")
+            if not baseline_path:
+                missing.append(f"{windows[1][0]}_{windows[1][1]}")
+            die(
+                f"processed campaign-network files not found for: {', '.join(missing)}\n"
+                "Run: python3 lib/datapull.py aggregate --grain campaign_network_period"
+            )
+
+    cur_rows = [r for r in read_csv(current_path) if pattern in r.get("campaign_name", "").lower()]
+    base_rows = [r for r in read_csv(baseline_path) if pattern in r.get("campaign_name", "").lower()]
+
+    if not cur_rows and not base_rows:
+        print(f"no campaigns matching {args.name_contains!r}")
+        return
+
+    cur_label = _date_label(current_path)
+    base_label = _date_label(baseline_path)
+    print(f"\nCampaign slice: name contains '{args.name_contains}'")
+    print(f"Current: {cur_label}  |  Baseline: {base_label}")
+
+    _print_grain_results(
+        "campaign_network_period",
+        ["customer_id", "campaign_id", "campaign_name", "campaign_status"],
+        cur_rows, base_rows, primary_goal, all_metrics, currency_sym,
+        cur_label, base_label, pattern,
+        args.output, None,
+    )
+
+
+def compare_weeks(args: argparse.Namespace) -> None:
+    profile = load_profile(required=False)
+    primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
+    currency_sym = _currency_symbol(profile.get("currency", ""))
+    name_filter = (args.name_contains or "").lower()
+    all_metrics = getattr(args, "all_metrics", False)
+    customer_id = profile.get("google_ads_customer_id")
+
+    ref = today()
+    if args.week:
+        cur_week, cur_year = args.week, (args.year or ref.isocalendar().year)
+    else:
+        cur_week, cur_year = last_complete_iso_week(ref)
+
+    if args.vs:
+        base_week = args.vs
+        base_year = cur_year if base_week <= cur_week else cur_year - 1
+    else:
+        base_week = cur_week - 1
+        base_year = cur_year
+        if base_week < 1:
+            prev = cur_year - 1
+            base_week = dt.date(prev, 12, 28).isocalendar().week
+            base_year = prev
+
+    cur_start, cur_end = iso_week_to_dates(cur_week, cur_year)
+    base_start, base_end = iso_week_to_dates(base_week, base_year)
+    cur_label = f"W{cur_week} ({cur_start}–{cur_end})"
+    base_label = f"W{base_week} ({base_start}–{base_end})"
+
+    print(f"\nISO week comparison:  W{cur_week} {cur_year} ({cur_start}–{cur_end})  vs  W{base_week} {base_year} ({base_start}–{base_end})")
+    if name_filter:
+        print(f"Campaign filter: name contains '{args.name_contains}'")
+
+    grains: list[tuple[str, list[str]]] = []
+    if args.grain in ("account", "both"):
+        grains.append(("account_network_period", ["customer_id", "customer_name", "network"]))
+    if args.grain in ("campaign", "both"):
+        grains.append(("campaign_network_period", ["customer_id", "campaign_id", "campaign_name", "campaign_status"]))
+
+    all_ok = True
+    for grain_name, key_cols in grains:
+        subdir = _NETWORK_PERIOD_SUBDIR[grain_name]
+        found = find_processed_files_for_period(subdir, [(cur_start, cur_end), (base_start, base_end)], customer_id)
+        cur_path, base_path = found[0], found[1]
+
+        if not cur_path or not base_path:
+            all_ok = False
+            missing = []
+            if not cur_path:
+                missing.append(f"W{cur_week} ({cur_start}–{cur_end})")
+            if not base_path:
+                missing.append(f"W{base_week} ({base_start}–{base_end})")
+            print(f"\n[{grain_name}] processed files missing for: {', '.join(missing)}")
+            print("Fetch and aggregate:")
+            for start, end in [(cur_start, cur_end), (base_start, base_end)]:
+                print(f"  python3 lib/datapull.py fetch --query {grain_name} --from {start} --to {end}")
+            print(f"  python3 lib/datapull.py aggregate --grain {grain_name}")
+            continue
+
+        cur_rows = read_csv(cur_path)
+        base_rows = read_csv(base_path)
+        if grain_name == "campaign_network_period" and name_filter:
+            cur_rows = [r for r in cur_rows if name_filter in r.get("campaign_name", "").lower()]
+            base_rows = [r for r in base_rows if name_filter in r.get("campaign_name", "").lower()]
+
+        _print_grain_results(
+            grain_name, key_cols, cur_rows, base_rows,
+            primary_goal, all_metrics, currency_sym,
+            cur_label, base_label, name_filter,
+            args.output if grain_name == "campaign_network_period" else None,
+            args.output_account if grain_name == "account_network_period" else None,
+        )
+
+    if not all_ok:
+        raise SystemExit(1)
+
+
+def _month_date_range(
+    month: int, year: int, full: bool, reference: dt.date
+) -> tuple[dt.date, dt.date]:
+    """Return (start, end) for a calendar month.
+
+    full=True  → 1st of month to last day of month (or yesterday if current month)
+    full=False → MTD: 1st of month to the minimum of (same day-of-month as yesterday, last day of month)
+    """
+    import calendar as _cal
+    first = dt.date(year, month, 1)
+    last_day = _cal.monthrange(year, month)[1]
+    last = dt.date(year, month, last_day)
+    yesterday = reference - dt.timedelta(days=1)
+    if full:
+        end = min(last, yesterday)
+    else:
+        target_day = min(yesterday.day, last_day)
+        end = dt.date(year, month, target_day)
+    return first, end
+
+
+def compare_months(args: argparse.Namespace) -> None:
+    profile = load_profile(required=False)
+    primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
+    currency_sym = _currency_symbol(profile.get("currency", ""))
+    name_filter = (args.name_contains or "").lower()
+    all_metrics = getattr(args, "all_metrics", False)
+    customer_id = profile.get("google_ads_customer_id")
+
+    ref = today()
+    cur_month = args.month or ref.month
+    cur_year = args.year or ref.year
+
+    if args.vs:
+        base_month = args.vs
+        base_year = cur_year if base_month <= cur_month else cur_year - 1
+    else:
+        base_month = cur_month - 1
+        base_year = cur_year
+        if base_month < 1:
+            base_month = 12
+            base_year = cur_year - 1
+
+    cur_start, cur_end = _month_date_range(cur_month, cur_year, args.full, ref)
+    base_start, base_end = _month_date_range(base_month, base_year, args.full, ref)
+
+    import calendar as _cal
+    cur_label = f"{_cal.month_abbr[cur_month]} {cur_year} ({cur_start}–{cur_end})"
+    base_label = f"{_cal.month_abbr[base_month]} {base_year} ({base_start}–{base_end})"
+    mode = "full month" if args.full else "MTD"
+    print(f"\nMonth comparison ({mode}):  {cur_label}  vs  {base_label}")
+    if name_filter:
+        print(f"Campaign filter: name contains '{args.name_contains}'")
+
+    grains: list[tuple[str, list[str]]] = []
+    if args.grain in ("account", "both"):
+        grains.append(("account_network_period", ["customer_id", "customer_name", "network"]))
+    if args.grain in ("campaign", "both"):
+        grains.append(("campaign_network_period", ["customer_id", "campaign_id", "campaign_name", "campaign_status"]))
+
+    all_ok = True
+    for grain_name, key_cols in grains:
+        subdir = _NETWORK_PERIOD_SUBDIR[grain_name]
+        found = find_processed_files_for_period(subdir, [(cur_start, cur_end), (base_start, base_end)], customer_id)
+        cur_path, base_path = found[0], found[1]
+
+        if not cur_path or not base_path:
+            all_ok = False
+            missing = []
+            if not cur_path:
+                missing.append(f"{_cal.month_abbr[cur_month]} ({cur_start}–{cur_end})")
+            if not base_path:
+                missing.append(f"{_cal.month_abbr[base_month]} ({base_start}–{base_end})")
+            print(f"\n[{grain_name}] processed files missing for: {', '.join(missing)}")
+            print("Fetch and aggregate:")
+            for start, end in [(cur_start, cur_end), (base_start, base_end)]:
+                print(f"  python3 lib/datapull.py fetch --query {grain_name} --from {start} --to {end}")
+            print(f"  python3 lib/datapull.py aggregate --grain {grain_name}")
+            continue
+
+        cur_rows = read_csv(cur_path)
+        base_rows = read_csv(base_path)
+
+        if grain_name == "campaign_network_period" and name_filter:
+            cur_rows = [r for r in cur_rows if name_filter in r.get("campaign_name", "").lower()]
+            base_rows = [r for r in base_rows if name_filter in r.get("campaign_name", "").lower()]
+
+        _print_grain_results(
+            grain_name, key_cols, cur_rows, base_rows,
+            primary_goal, all_metrics, currency_sym,
+            cur_label, base_label, name_filter,
+            args.output if grain_name == "campaign_network_period" else None,
+            args.output_account if grain_name == "account_network_period" else None,
+        )
+
+    if not all_ok:
+        raise SystemExit(1)
+
+
+def load_mapping(path: str | None) -> dict[str, str]:
+    if not path:
+        return {}
+    mapping_path = Path(path).expanduser()
+    if not mapping_path.exists():
+        die(f"mapping file not found: {mapping_path}")
+    mapping: dict[str, str] = {}
+    for raw_line in mapping_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            die(f"invalid mapping line: {raw_line}")
+        key, value = line.split(":", 1)
+        mapping[key.strip()] = value.strip().strip('"').strip("'")
+    return mapping
+
+
+def indexed(rows: list[dict[str, str]], grain: str) -> dict[str, dict[str, str]]:
+    output: dict[str, dict[str, str]] = {}
+    for row in rows:
+        key = row.get(grain)
+        if key:
+            output[key] = row
+    return output
+
+
+def compare_status(metric: str, bob: float, manual: float, diff: float) -> tuple[str, float | str]:
+    mode, threshold = DEFAULT_TOLERANCES.get(metric, ("relative", 0.1))
+    if mode == "absolute":
+        value = abs(diff)
+        return ("pass" if value <= threshold else "fail", value)
+    if manual == 0:
+        value = 0 if bob == 0 else math.inf
+        return ("pass" if bob == 0 else "fail", value)
+    value = abs(diff / manual * 100)
+    return ("pass" if value <= threshold else "fail", value)
+
+
+def likely_causes(failed_metrics: set[str]) -> list[str]:
+    causes: list[str] = []
+    traffic = {"impressions", "clicks"}
+    conversions = {"installs", "in_app_conversions", "cti_percent", "conversion_rate_percent"}
+    if failed_metrics & conversions and not (failed_metrics & traffic):
+        causes.append("Conversion action inclusion, biddable-vs-all conversion choice, or conversion lag.")
+    if "cost" in failed_metrics and not (failed_metrics & traffic):
+        causes.append("Cost unit, currency, or manual export rounding.")
+    if failed_metrics & traffic:
+        causes.append("Date range, timezone, customer ID, campaign type, or campaign status filter mismatch.")
+    if not causes and failed_metrics:
+        causes.append("Column mapping, rounding, or manual export formatting mismatch.")
+    return causes
+
+
+def validate_manual(args: argparse.Namespace) -> None:
+    bob_path = Path(args.bob).expanduser()
+    manual_path = Path(args.manual).expanduser()
+    if not bob_path.exists():
+        die(f"Bob aggregate not found: {bob_path}")
+    if not manual_path.exists():
+        die(f"manual aggregate not found: {manual_path}")
+
+    mapping = load_mapping(args.mapping)
+    grain = args.grain
+    bob_rows = indexed(read_csv(bob_path), grain)
+    manual_rows_raw = read_csv(manual_path)
+    manual_rows: dict[str, dict[str, str]] = {}
+    manual_grain = mapping.get(grain, grain)
+    for row in manual_rows_raw:
+        key = row.get(manual_grain)
+        if key:
+            manual_rows[key] = row
+
+    metrics = [m for m in ACCOUNT_DAILY_COLUMNS if m != grain]
+    comparison_rows: list[dict[str, Any]] = []
+    failed: set[str] = set()
+
+    for key in sorted(set(bob_rows) | set(manual_rows)):
+        bob_row = bob_rows.get(key, {})
+        manual_row = manual_rows.get(key, {})
+        for metric in metrics:
+            manual_col = mapping.get(metric, metric)
+            if metric not in bob_row or manual_col not in manual_row:
+                continue
+            bob_value = number(bob_row.get(metric))
+            manual_value = number(manual_row.get(manual_col))
+            diff = bob_value - manual_value
+            status, tolerance_value = compare_status(metric, bob_value, manual_value, diff)
+            if status != "pass":
+                failed.add(metric)
+            rel = "NA" if manual_value == 0 else format_float(diff / manual_value * 100)
+            comparison_rows.append(
+                {
+                    grain: key,
+                    "metric": metric,
+                    "bob_value": format_float(bob_value),
+                    "manual_value": format_float(manual_value),
+                    "absolute_diff": format_float(diff),
+                    "relative_diff_percent": rel,
+                    "tolerance_check_value": "inf" if tolerance_value == math.inf else format_float(float(tolerance_value)),
+                    "status": status,
+                }
+            )
+
+    if args.output_prefix:
+        prefix = Path(args.output_prefix).expanduser()
+    else:
+        prefix = REPORTS_DIR / f"{bob_path.stem}_validation"
+    csv_path = prefix.with_suffix(".csv")
+    md_path = prefix.with_suffix(".md")
+    fields = [
+        grain, "metric", "bob_value", "manual_value",
+        "absolute_diff", "relative_diff_percent", "tolerance_check_value", "status",
+    ]
+    write_csv(csv_path, comparison_rows, fields)
+    write_validation_md(md_path, bob_path, manual_path, comparison_rows, failed, grain)
+    print(f"validation CSV written: {csv_path}")
+    print(f"validation report written: {md_path}")
+    if failed:
+        print(f"validation failed metrics: {', '.join(sorted(failed))}")
+        raise SystemExit(2)
+    print("validation passed")
+
+
+def check_config(args: argparse.Namespace) -> None:
+    profile = load_profile(required=False)
+    config = args.config or profile.get("google_ads_config_path") or "~/google-ads-garf.yaml"
+    config_path = Path(config).expanduser()
+    if not config_path.exists():
+        die(f"Google Ads GARF config not found: {config_path}\nExpected at {config_path} — create it or set google_ads_config_path in your account profile (.bob/accounts/<id>/profile.json)")
+    text = config_path.read_text()
+    keys = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        keys[key.strip()] = value.strip().strip("\"'")
+
+    # GARF read config — no client_secret or refresh_token required
+    expected = ["developer_token", "client_id", "login_customer_id"]
+    print(f"GARF read config: {config_path}")
+    for key in expected:
+        value = keys.get(key, "")
+        if not value:
+            print(f"{key}: MISSING")
+        elif key == "login_customer_id":
+            normalized = value.replace("-", "")
+            shape = "SET_WITH_HYPHENS" if "-" in value else "SET"
+            print(f"{key}: {shape} length={len(normalized)}")
+        else:
+            print(f"{key}: SET")
+    account = str(args.account or profile.get("google_ads_customer_id") or "").replace("-", "")
+    print(f"target_customer_id: {'SET length=' + str(len(account)) if account else 'MISSING'}")
+    if keys.get("login_customer_id") and account and keys["login_customer_id"].replace("-", "") == account:
+        print("note: login_customer_id equals target_customer_id; omit login_customer_id unless this is a manager account.")
+
+    write_config = profile.get("google_ads_write_config_path", "")
+    if write_config and write_config != profile.get("google_ads_config_path", ""):
+        write_path = Path(write_config).expanduser()
+        print(f"\nwrite config (bid-budget-apply): {write_path}")
+        if not write_path.exists():
+            print("  STATUS: FILE NOT FOUND")
+            print("  Run this to generate write credentials (one-time OAuth2 flow):")
+            print("    python3 lib/datapull.py setup-write-credentials")
+            print("  The command prints a single-line OAuth URL. Open it in your browser to authorize.")
+            print("  Once authorized, the file is saved automatically and bid-budget-apply will work.")
+        else:
+            wtext = write_path.read_text()
+            wkeys: dict = {}
+            for raw_line in wtext.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                wkeys[k.strip()] = v.strip().strip("\"'")
+            for key in ["developer_token", "client_id", "client_secret", "refresh_token", "login_customer_id"]:
+                val = wkeys.get(key, "")
+                if not val:
+                    print(f"  {key}: MISSING")
+                elif key == "login_customer_id":
+                    normalized = val.replace("-", "")
+                    print(f"  {key}: SET length={len(normalized)}")
+                else:
+                    print(f"  {key}: SET")
+
+
+def write_validation_md(
+    path: Path,
+    bob_path: Path,
+    manual_path: Path,
+    rows: list[dict[str, Any]],
+    failed: set[str],
+    grain: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    total = len(rows)
+    failures = sum(1 for row in rows if row["status"] != "pass")
+    lines = [
+        "# Manual Validation Report",
+        "",
+        f"- Bob aggregate: `{bob_path}`",
+        f"- Manual aggregate: `{manual_path}`",
+        f"- Grain: `{grain}`",
+        f"- Checks: {total}",
+        f"- Failures: {failures}",
+        "",
+        "## Status",
+        "",
+        "PASS" if failures == 0 else "FAIL",
+        "",
+    ]
+    if failed:
+        lines.extend(["## Failed Metrics", ""])
+        for metric in sorted(failed):
+            lines.append(f"- `{metric}`")
+        lines.extend(["", "## Likely Causes", ""])
+        for cause in likely_causes(failed):
+            lines.append(f"- {cause}")
+        lines.append("")
+
+    lines.extend([
+        "## Largest Differences",
+        "",
+        "| Grain | Metric | Bob | Manual | Diff | Rel Diff % | Status |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ])
+    for row in sorted(rows, key=lambda r: abs(number(r["absolute_diff"])), reverse=True)[:25]:
+        lines.append(
+            f"| {row[grain]} | {row['metric']} | {row['bob_value']} | {row['manual_value']} | "
+            f"{row['absolute_diff']} | {row['relative_diff_percent']} | {row['status']} |"
+        )
+    lines.append("")
+    path.write_text("\n".join(lines))
+
+
+def newest_processed(subdir: str, customer_id: str | None = None) -> Path:
+    proc_dir = _resolve_processed_dir(subdir, customer_id)
+    files = sorted(proc_dir.glob("*.csv"), key=lambda p: p.stem.split("_")[1] if len(p.stem.split("_")) >= 2 else "", reverse=True)
+    if not files:
+        die(f"no processed file found in {proc_dir}")
+    return files[0]
+
+
+def bid_budget_recommend(args: argparse.Namespace) -> None:
+    profile = load_profile(required=False)
+    primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
+    cac_ceiling = float(args.cac_ceiling or profile.get("cac_ceiling", 200))
+    change_pct = min(float(args.change_pct or profile.get("bid_budget_change_pct", 10)), 20)
+    min_installs = 10
+    budget_constrained_threshold = 0.90
+    cpm_tolerance = 1.05
+    cooldown_days = int(profile.get("bid_budget_cooldown_days", 14))
+
+    customer_id = profile.get("google_ads_customer_id")
+    # Load trend file (most recent campaign-trend processed CSV)
+    if args.trend:
+        trend_path = Path(args.trend).expanduser()
+    else:
+        trend_path = newest_processed("campaign-trend", customer_id)
+    trend_rows = read_csv(trend_path)
+
+    # Load bid_budget_inputs (most recent raw)
+    if args.bid_budget:
+        bb_path = Path(args.bid_budget).expanduser()
+    else:
+        bb_path = newest_raw("bid_budget_inputs")
+    bb_rows = read_csv(bb_path)
+
+    # Index bid_budget_inputs by campaign_id (sum cost over 7 days per campaign)
+    bb_index: dict[str, dict] = {}
+    for row in bb_rows:
+        cid = str(row.get("campaign_id", "")).replace("-", "")
+        if cid not in bb_index:
+            bb_index[cid] = dict(row)
+            bb_index[cid]["_total_cost"] = 0.0
+        bb_index[cid]["_total_cost"] += number(row.get("cost", 0))
+
+    # Build cooldown index from change_history: last CAMPAIGN/CAMPAIGN_BUDGET update per campaign
+    ch_index: dict[str, str] = {}  # campaign_id → most recent change date (ISO)
+    ch_path = newest_raw("change_history") if True else None
+    try:
+        if ch_path and ch_path.exists():
+            for row in read_csv(ch_path):
+                cid = str(row.get("campaign_id", "")).replace("-", "")
+                rtype = row.get("change_resource_type", "").upper()
+                op = row.get("operation", "").upper()
+                changed_at = (row.get("changed_at", "") or "")[:10]
+                if cid and op == "UPDATE" and rtype in ("CAMPAIGN", "CAMPAIGN_BUDGET") and changed_at:
+                    if cid not in ch_index or changed_at > ch_index[cid]:
+                        ch_index[cid] = changed_at
+    except Exception:
+        pass  # change_history is informational; don't block recommend if unavailable
+
+    today_str = today().isoformat()
+    cooldown_cutoff = (today() - dt.timedelta(days=cooldown_days)).isoformat()
+
+    changes: list[dict] = []
+    holds: list[dict] = []
+    skipped: list[dict] = []
+
+    for row in trend_rows:
+        cid = str(row.get("campaign_id", "")).replace("-", "")
+        cname = row.get("campaign_name", "")
+        cstatus = row.get("campaign_status", "")
+
+        # Detect which ISO weeks are present
+        try:
+            w0_iso = int(row.get("current_iso_week", 0))
+            w1_iso = int(row.get("prior1_iso_week", 0))
+            w2_iso = int(row.get("prior2_iso_week", 0))
+        except (ValueError, TypeError):
+            skipped.append({"campaign_id": cid, "campaign_name": cname, "reason": "could not read ISO week columns"})
+            continue
+
+        def _w(iso: int, col: str) -> str:
+            return row.get(f"w{iso}_{col}", "0") or "0"
+
+        w0_cost = number(_w(w0_iso, "cost"))
+        w0_inst = number(_w(w0_iso, "installs"))
+        w0_imp = number(_w(w0_iso, "impressions"))
+        w0_conv = number(_w(w0_iso, "in_app_conversions"))
+        w1_cost = number(_w(w1_iso, "cost"))
+        w1_inst = number(_w(w1_iso, "installs"))
+        w1_imp = number(_w(w1_iso, "impressions"))
+        w1_conv = number(_w(w1_iso, "in_app_conversions"))
+        w2_cost = number(_w(w2_iso, "cost"))
+        w2_inst = number(_w(w2_iso, "installs"))
+        w2_imp = number(_w(w2_iso, "impressions"))
+
+        # CPI = cost / installs
+        w0_cpi = w0_cost / w0_inst if w0_inst > 0 else 0.0
+        w1_cpi = w1_cost / w1_inst if w1_inst > 0 else 0.0
+        w2_cpi = w2_cost / w2_inst if w2_inst > 0 else 0.0
+        ref_cpi = (w1_cpi + w2_cpi) / 2 if (w1_cpi > 0 and w2_cpi > 0) else 0.0
+
+        # CPM = cost / impressions * 1000
+        w0_cpm = w0_cost / w0_imp * 1000 if w0_imp > 0 else 0.0
+        w1_cpm = w1_cost / w1_imp * 1000 if w1_imp > 0 else 0.0
+        w2_cpm = w2_cost / w2_imp * 1000 if w2_imp > 0 else 0.0
+        ref_cpm = (w1_cpm + w2_cpm) / 2 if (w1_cpm > 0 and w2_cpm > 0) else 0.0
+
+        # Post-install conversion rate (in_app / installs) for declining conv% guard
+        w0_conv_rate = w0_conv / w0_inst * 100 if w0_inst > 0 and w0_conv > 0 else 0.0
+        w1_conv_rate = w1_conv / w1_inst * 100 if w1_inst > 0 and w1_conv > 0 else 0.0
+        conv_rate_declining = (
+            w0_conv_rate > 0 and w1_conv_rate > 0
+            and w0_conv_rate < w1_conv_rate * 0.95  # >5% drop in conv%
+        )
+
+        # Read bid_budget_inputs for this campaign early — needed by CAC guard
+        bb = bb_index.get(cid, {})
+        target_cpa_bid = number(bb.get("target_cpa", 0))
+
+        # CPA for CAC guard: use actual W0 CPA if available; fall back to target_cpa bid
+        w0_cpa = w0_cost / w0_conv if w0_conv > 0 else 0.0
+        if w0_cpa > 0:
+            cac_ok = w0_cpa <= cac_ceiling
+        elif target_cpa_bid > 0:
+            cac_ok = target_cpa_bid <= cac_ceiling  # bid above ceiling = skip
+        else:
+            cac_ok = False  # no conversion data and no bid → skip
+
+        # Volume guard
+        vol_ok = w0_inst >= min_installs
+
+        # Cooldown guard: skip if campaign was changed within cooldown_days
+        last_change = ch_index.get(cid, "")
+        cooldown_ok = not last_change or last_change < cooldown_cutoff
+        days_since_change = (
+            (dt.date.fromisoformat(today_str) - dt.date.fromisoformat(last_change)).days
+            if last_change else None
+        )
+
+        cpi_pct = (w0_cpi - ref_cpi) / ref_cpi * 100 if ref_cpi > 0 else 0.0
+        cpm_pct = (w0_cpm - ref_cpm) / ref_cpm * 100 if ref_cpm > 0 else 0.0
+
+        base_info = {
+            "customer_id": row.get("customer_id", ""),
+            "campaign_id": cid,
+            "campaign_name": cname,
+            "campaign_status": cstatus,
+            "current_iso_week": w0_iso,
+            "w0_cpi": format_float(w0_cpi),
+            "ref_cpi": format_float(ref_cpi),
+            "cpi_pct_vs_ref": format_float(cpi_pct),
+            "w0_cpm": format_float(w0_cpm),
+            "ref_cpm": format_float(ref_cpm),
+            "cpm_pct_vs_ref": format_float(cpm_pct),
+            "w0_cpa": format_float(w0_cpa),
+            "cac_ceiling": format_float(cac_ceiling),
+            "cac_guard_passed": str(cac_ok),
+            "w0_installs": format_float(w0_inst),
+            "min_installs_met": str(vol_ok),
+            "last_bid_budget_change_date": last_change or "unknown",
+            "days_since_last_change": str(days_since_change) if days_since_change is not None else "unknown",
+            "cooldown_days": str(cooldown_days),
+            "cooldown_ok": str(cooldown_ok),
+        }
+
+        if not vol_ok:
+            skipped.append({"campaign_id": cid, "campaign_name": cname,
+                            "reason": f"W{w0_iso} installs {w0_inst:.0f} below minimum {min_installs}"})
+            continue
+        if not cac_ok:
+            skipped.append({"campaign_id": cid, "campaign_name": cname,
+                            "reason": f"W{w0_iso} CPA {w0_cpa:.2f} exceeds CAC ceiling {cac_ceiling:.0f}"})
+            continue
+        if not cooldown_ok:
+            skipped.append({"campaign_id": cid, "campaign_name": cname,
+                            "reason": f"changed {days_since_change}d ago ({last_change}) — within {cooldown_days}-day cooldown"})
+            continue
+        if ref_cpi == 0:
+            skipped.append({"campaign_id": cid, "campaign_name": cname,
+                            "reason": "insufficient prior-week data for CPI reference"})
+            continue
+
+        # Budget utilization (bb already read above for CAC guard)
+        daily_budget = number(bb.get("daily_budget", 0))
+        target_cpa = target_cpa_bid
+        budget_id = bb.get("campaign_budget_id", "")
+        actual_7d_cost = bb.get("_total_cost", w0_cost)
+        utilization = actual_7d_cost / (daily_budget * 7) if daily_budget > 0 else 0.0
+        budget_const = utilization >= budget_constrained_threshold
+
+        base_info["budget_utilization_pct"] = format_float(utilization * 100)
+        base_info["budget_constrained"] = str(budget_const)
+        base_info["w0_conv_rate_pct"] = format_float(round(w0_conv_rate, 2))
+        base_info["w1_conv_rate_pct"] = format_float(round(w1_conv_rate, 2))
+        base_info["conv_rate_declining"] = str(conv_rate_declining)
+        base_info["current_target_cpa"] = format_float(target_cpa)
+        base_info["current_daily_budget"] = format_float(daily_budget)
+        base_info["campaign_budget_id"] = budget_id
+
+        cpi_lower = w0_cpi < ref_cpi
+        cpm_lower_or_same = w0_cpm <= ref_cpm * cpm_tolerance
+
+        if cpi_lower and cpm_lower_or_same:
+            # Conv% declining overrides any increase — more volume won't convert
+            if conv_rate_declining:
+                holds.append({**base_info,
+                              "reason": (f"CPI efficient but post-install conv% declining "
+                                         f"({w1_conv_rate:.1f}%% → {w0_conv_rate:.1f}%%) — "
+                                         f"more installs won't convert until quality improves; hold")})
+                continue
+            if budget_const:
+                action = "increase_bid_and_budget"
+                rationale = (f"W{w0_iso} CPI {w0_cpi:.2f} is {abs(cpi_pct):.1f}%% below ref, "
+                             f"CPM flat/lower, budget constrained — scale bid+budget")
+            else:
+                action = "increase_bid"
+                rationale = (f"W{w0_iso} CPI {w0_cpi:.2f} is {abs(cpi_pct):.1f}%% below ref, "
+                             f"CPM flat/lower, budget headroom available — scale bid")
+            forecast = f"Higher spend and volume; CPI may edge up slightly toward target"
+        elif cpi_lower and not cpm_lower_or_same:
+            holds.append({**base_info,
+                          "reason": f"CPM rising {cpm_pct:.1f}%% — CPI improvement is likely temporary; hold"})
+            continue
+        elif not cpi_lower and cpm_lower_or_same:
+            holds.append({**base_info,
+                          "reason": f"CPI worsening but CPM improving {abs(cpm_pct):.1f}%% — buying getting cheaper; wait"})
+            continue
+        else:
+            if budget_const:
+                action = "decrease_bid_and_budget"
+                rationale = (f"W{w0_iso} CPI {w0_cpi:.2f} is {abs(cpi_pct):.1f}%% above ref, "
+                             f"CPM also up, budget constrained — protect efficiency")
+            else:
+                action = "decrease_bid"
+                rationale = (f"W{w0_iso} CPI {w0_cpi:.2f} is {abs(cpi_pct):.1f}%% above ref, "
+                             f"CPM also up — tighten bid to protect CPI")
+            forecast = f"Lower spend and volume; CPI should improve toward target"
+
+        new_tgt = new_bgt = None
+        if "bid" in action and target_cpa > 0:
+            new_tgt = target_cpa * (1 + change_pct / 100) if "increase" in action else target_cpa * (1 - change_pct / 100)
+        if "budget" in action and daily_budget > 0:
+            new_bgt = daily_budget * (1 + change_pct / 100) if "increase" in action else daily_budget * (1 - change_pct / 100)
+
+        changes.append({
+            **base_info,
+            "action": action,
+            "rationale": rationale,
+            "forecast": forecast,
+            "proposed_target_cpa": format_float(new_tgt) if new_tgt else "",
+            "proposed_daily_budget": format_float(new_bgt) if new_bgt else "",
+        })
+
+    # Print summary
+    current_iso = trend_rows[0].get("current_iso_week", "?") if trend_rows else "?"
+    print(f"\nBid/Budget Recommendations — W{current_iso}")
+    print(f"  {len(changes)} changes  |  {len(holds)} holds  |  {len(skipped)} skipped\n")
+    if changes:
+        hdr = f"  {'Campaign':<45}  {'Action':<26}  {'Cur tCPA':>10}  {'New tCPA':>10}  {'Cur Bgt':>10}  {'New Bgt':>10}"
+        print(hdr)
+        print("  " + "─" * (len(hdr) - 2))
+        for c in changes:
+            print(
+                f"  {c['campaign_name']:<45}  {c['action']:<26}  "
+                f"{_fmt_display(c['current_target_cpa'], 'cost', _currency_symbol(profile.get('currency', '')))  :>10}  "
+                f"{_fmt_display(c.get('proposed_target_cpa', 'NA'), 'cost', _currency_symbol(profile.get('currency', ''))):>10}  "
+                f"{_fmt_display(c['current_daily_budget'], 'cost', _currency_symbol(profile.get('currency', ''))):>10}  "
+                f"{_fmt_display(c.get('proposed_daily_budget', 'NA'), 'cost', _currency_symbol(profile.get('currency', ''))):>10}"
+            )
+
+    if args.dry_run:
+        print("\n[dry-run] no files written")
+        return
+
+    # Write CSV
+    customer = customer_id or "unknown"
+    date_str = today().isoformat()
+    csv_path = Path(args.output).expanduser() if args.output else (
+        account_processed_dir(customer, "bid-budget-recs") / f"{customer}_{date_str}.csv"
+    )
+    all_rows = [{**c, **{k: "" for k in BID_BUDGET_REC_COLUMNS if k not in c}} for c in changes]
+    write_csv(csv_path, all_rows, BID_BUDGET_REC_COLUMNS)
+    print(f"\nrecommendation CSV written: {csv_path}")
+
+    # Write YAML plan
+    wiki_base = account_wiki_dir(customer) if customer != "unknown" else ROOT / "wiki"
+    yaml_path = Path(args.yaml_output).expanduser() if args.yaml_output else (
+        wiki_base / "action-items" / f"bid-budget-{date_str}.yaml"
+    )
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import yaml as _yaml
+        plan = {
+            "generated": date_str,
+            "customer_id": str(customer).replace("-", ""),
+            "current_iso_week": int(current_iso) if str(current_iso).isdigit() else current_iso,
+            "signal_basis": f"W{current_iso} CPI vs avg(prior 2 weeks)",
+            "cac_ceiling": cac_ceiling,
+            "change_pct": change_pct,
+            "cooldown_days": cooldown_days,
+            "changes": [
+                {
+                    "campaign_id": c["campaign_id"],
+                    "campaign_name": c["campaign_name"],
+                    "action": c["action"],
+                    "field": "target_cpa" if "bid" in c["action"] else "daily_budget",
+                    "current_target_cpa": number(c["current_target_cpa"]),
+                    "proposed_target_cpa": number(c["proposed_target_cpa"]) if c.get("proposed_target_cpa") else None,
+                    "current_daily_budget": number(c["current_daily_budget"]),
+                    "proposed_daily_budget": number(c["proposed_daily_budget"]) if c.get("proposed_daily_budget") else None,
+                    "campaign_budget_id": c.get("campaign_budget_id", ""),
+                    "w0_cpi": number(c["w0_cpi"]),
+                    "ref_cpi": number(c["ref_cpi"]),
+                    "w0_cpm": number(c["w0_cpm"]),
+                    "ref_cpm": number(c["ref_cpm"]),
+                    "w0_conv_rate_pct": number(c.get("w0_conv_rate_pct", 0)),
+                    "w1_conv_rate_pct": number(c.get("w1_conv_rate_pct", 0)),
+                    "conv_rate_declining": c.get("conv_rate_declining", "False") == "True",
+                    "last_bid_budget_change_date": c.get("last_bid_budget_change_date", "unknown"),
+                    "days_since_last_change": c.get("days_since_last_change", "unknown"),
+                    "cooldown_ok": c.get("cooldown_ok", "True") == "True",
+                    "rationale": c["rationale"],
+                    "forecast": c["forecast"],
+                    "cac_guard_passed": c["cac_guard_passed"] == "True",
+                }
+                for c in changes
+            ],
+            "skipped": [{"campaign_id": s["campaign_id"], "campaign_name": s["campaign_name"], "reason": s["reason"]} for s in skipped],
+            "applied": False,
+            "applied_at": None,
+            "applied_by": None,
+        }
+        yaml_path.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
+        print(f"mutation plan written: {yaml_path}")
+    except ImportError:
+        print("note: pyyaml not installed — YAML plan not written. Run: pip install pyyaml")
+
+
+def bid_budget_apply(args: argparse.Namespace) -> None:
+    try:
+        import yaml as _yaml
+    except ImportError:
+        die("pyyaml is required. Install: pip install pyyaml")
+
+    plan_path = Path(args.plan).expanduser()
+    if not plan_path.exists():
+        die(f"plan file not found: {plan_path}")
+
+    plan = _yaml.safe_load(plan_path.read_text())
+    retry_fields: set[tuple[str, str]] | None = None
+    if plan.get("applied"):
+        prior_errors = [
+            r for r in plan.get("apply_results", [])
+            if r.get("status") == "error" and r.get("campaign") and r.get("field")
+        ]
+        if not prior_errors:
+            die(f"plan already applied on {plan['applied_at']} by {plan['applied_by']}")
+        retry_fields = {(r["campaign"], r["field"]) for r in prior_errors}
+        print(f"retrying {len(retry_fields)} failed mutation(s) from partial apply")
+
+    if not plan.get("changes"):
+        print("no changes in plan — nothing to apply")
+        return
+
+    try:
+        from google.ads.googleads.client import GoogleAdsClient  # type: ignore
+        from google.protobuf.field_mask_pb2 import FieldMask  # type: ignore
+    except ImportError:
+        die("google-ads library is required. Install: pip install google-ads")
+
+    profile = load_profile(required=False)
+    config_path = str(Path(
+        profile.get("google_ads_write_config_path")
+        or profile.get("google_ads_config_path", "~/google-ads-garf.yaml")
+    ).expanduser())
+    customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
+
+    try:
+        client = GoogleAdsClient.load_from_storage(config_path)
+    except Exception as exc:
+        die(f"failed to load Google Ads client: {exc}")
+
+    results: list[dict] = []
+    campaign_ops: list = []
+    budget_ops: list = []
+    campaign_ids_for_budget: list[tuple] = []
+
+    campaign_service = client.get_service("CampaignService")
+    budget_service = client.get_service("CampaignBudgetService")
+
+    for change in plan["changes"]:
+        cid = str(change["campaign_id"])
+        cname = change["campaign_name"]
+        action = change["action"]
+
+        if retry_fields is None or (cname, "target_cpa") in retry_fields:
+            should_apply_bid = "bid" in action and change.get("proposed_target_cpa")
+        else:
+            should_apply_bid = False
+
+        if retry_fields is None or (cname, "daily_budget") in retry_fields:
+            should_apply_budget = (
+                "budget" in action
+                and change.get("proposed_daily_budget")
+                and change.get("campaign_budget_id")
+            )
+        else:
+            should_apply_budget = False
+
+        if should_apply_bid:
+            op = client.get_type("CampaignOperation")
+            camp = op.update
+            camp.resource_name = campaign_service.campaign_path(customer_id, cid)
+            camp.target_cpa.target_cpa_micros = int(float(change["proposed_target_cpa"]) * 1_000_000)
+            field_mask = FieldMask()
+            field_mask.paths.append("target_cpa.target_cpa_micros")
+            op.update_mask.CopyFrom(field_mask)
+            campaign_ops.append((cname, cid, "target_cpa", change["proposed_target_cpa"], op))
+
+        if should_apply_budget:
+            op = client.get_type("CampaignBudgetOperation")
+            bgt = op.update
+            bgt.resource_name = budget_service.campaign_budget_path(customer_id, str(change["campaign_budget_id"]))
+            budget_amount = int(round(float(change["proposed_daily_budget"])))
+            bgt.amount_micros = budget_amount * 1_000_000
+            field_mask = FieldMask()
+            field_mask.paths.append("amount_micros")
+            op.update_mask.CopyFrom(field_mask)
+            budget_ops.append((cname, cid, "daily_budget", budget_amount, op))
+
+    # Apply campaign (Target CPA) mutations
+    if campaign_ops:
+        try:
+            response = campaign_service.mutate_campaigns(
+                customer_id=customer_id,
+                operations=[op for _, _, _, _, op in campaign_ops],
+            )
+            for (cname, cid, field, val, _), result in zip(campaign_ops, response.results):
+                results.append({"campaign": cname, "field": field, "value": val, "status": "ok", "resource": result.resource_name})
+                print(f"  ✓ {cname} — target_cpa → {val}")
+        except Exception as exc:
+            for cname, cid, field, val, _ in campaign_ops:
+                results.append({"campaign": cname, "field": field, "value": val, "status": "error", "error": str(exc)})
+            print(f"  ✗ campaign mutations failed: {exc}")
+
+    # Apply budget mutations
+    if budget_ops:
+        try:
+            response = budget_service.mutate_campaign_budgets(
+                customer_id=customer_id,
+                operations=[op for _, _, _, _, op in budget_ops],
+            )
+            for (cname, cid, field, val, _), result in zip(budget_ops, response.results):
+                results.append({"campaign": cname, "field": field, "value": val, "status": "ok", "resource": result.resource_name})
+                print(f"  ✓ {cname} — daily_budget → {val}")
+        except Exception as exc:
+            for cname, cid, field, val, _ in budget_ops:
+                results.append({"campaign": cname, "field": field, "value": val, "status": "error", "error": str(exc)})
+            print(f"  ✗ budget mutations failed: {exc}")
+
+    prior_results = plan.get("apply_results", [])
+    if retry_fields:
+        results = [
+            r for r in prior_results
+            if (r.get("campaign"), r.get("field")) not in retry_fields
+        ] + results
+
+    errors = [r for r in results if r.get("status") == "error"]
+
+    # Mark plan as applied only when every requested mutation has succeeded.
+    import datetime as _dt
+    plan["applied"] = not errors
+    plan["applied_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+    plan["applied_by"] = "bid-budget-apply"
+    plan["apply_results"] = results
+    plan_path.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
+    state = "applied" if plan["applied"] else "partially applied"
+    print(f"\nplan marked {state}: {plan_path}")
+
+    if errors:
+        print(f"{len(errors)} mutation(s) failed — see plan file for details")
+        raise SystemExit(2)
+
+
+def bid_budget_retrospective(args: argparse.Namespace) -> None:
+    try:
+        import yaml as _yaml
+    except ImportError:
+        die("pyyaml is required. Install: pip install pyyaml")
+
+    plan_path = Path(args.plan).expanduser()
+    if not plan_path.exists():
+        die(f"plan file not found: {plan_path}")
+    plan = _yaml.safe_load(plan_path.read_text())
+
+    if not plan.get("applied"):
+        die("plan has not been applied yet — nothing to evaluate")
+
+    applied_date = dt.date.fromisoformat(plan["applied_at"][:10])
+    cal = applied_date.isocalendar()
+    base_week, base_year = cal.week, cal.year
+
+    # Find W+1 and W+2 processed campaign-network files
+    w1_start, w1_end = iso_week_to_dates(base_week, base_year)
+    w2_week = base_week + 1
+    w2_year = base_year
+    if w2_week > dt.date(base_year, 12, 28).isocalendar().week:
+        w2_week = 1
+        w2_year = base_year + 1
+    w2_start, w2_end = iso_week_to_dates(w2_week, w2_year)
+
+    profile = load_profile(required=False)
+    retro_customer_id = profile.get("google_ads_customer_id")
+    found = find_processed_files_for_period("campaign-network", [(w1_start, w1_end), (w2_start, w2_end)], retro_customer_id)
+    w1_path, w2_path = found[0], found[1]
+
+    if not w1_path:
+        print(f"\nW+1 data not yet available (need {w1_start}–{w1_end})")
+        print(f"Run: python3 lib/datapull.py fetch --query campaign_network_period --from {w1_start} --to {w1_end}")
+        print("     python3 lib/datapull.py aggregate --grain campaign_network_period")
+        print("\nToo early to evaluate — check back after W+1 data is available.")
+        return
+
+    primary_goal = profile.get("primary_goal") or "in_app_conversions"
+    w1_rows = read_csv(w1_path)
+    w2_rows = read_csv(w2_path) if w2_path else []
+
+    def _cpi_from_rows(rows: list[dict], cid: str) -> float:
+        for r in rows:
+            if str(r.get("campaign_id", "")).replace("-", "") == cid:
+                cost = number(r.get("cost", 0))
+                inst = number(r.get("installs", 0))
+                return cost / inst if inst > 0 else 0.0
+        return 0.0
+
+    verdicts: list[dict] = []
+    for change in plan.get("changes", []):
+        cid = str(change["campaign_id"])
+        cname = change["campaign_name"]
+        action = change["action"]
+        baseline_cpi = float(change.get("w0_cpi", 0) or 0)
+        expected = "lower" if "increase" in action else "higher"
+
+        w1_cpi = _cpi_from_rows(w1_rows, cid)
+        w2_cpi = _cpi_from_rows(w2_rows, cid) if w2_rows else 0.0
+
+        w1_moved = (w1_cpi < baseline_cpi) if expected == "lower" else (w1_cpi > baseline_cpi)
+        w2_moved = (w2_cpi < baseline_cpi) if expected == "lower" else (w2_cpi > baseline_cpi)
+
+        if w2_cpi > 0 and w1_moved and w2_moved:
+            verdict = "working"
+        elif not w2_path or w2_cpi == 0:
+            verdict = "too_early"
+        else:
+            verdict = "not_working"
+
+        verdicts.append({
+            "campaign": cname,
+            "action": action,
+            "baseline_cpi": baseline_cpi,
+            "w1_cpi": w1_cpi,
+            "w2_cpi": w2_cpi if w2_cpi > 0 else None,
+            "expected": expected,
+            "verdict": verdict,
+        })
+
+    sym = _currency_symbol(profile.get("currency", ""))
+    total = len(verdicts)
+    working = sum(1 for v in verdicts if v["verdict"] == "working")
+    early = sum(1 for v in verdicts if v["verdict"] == "too_early")
+    not_wk = sum(1 for v in verdicts if v["verdict"] == "not_working")
+
+    print(f"\nBid/Budget Retrospective — changes applied {plan['applied_at'][:10]}")
+    print(f"  {working}/{total} working  |  {early} too early  |  {not_wk} not working\n")
+
+    hdr = f"  {'Campaign':<45}  {'Action':<26}  {'Baseline CPI':>12}  {'W+1 CPI':>10}  {'W+2 CPI':>10}  {'Verdict':<12}"
+    print(hdr)
+    print("  " + "─" * (len(hdr) - 2))
+    for v in verdicts:
+        w2_str = _fmt_display(v["w2_cpi"], "cost", sym) if v["w2_cpi"] else "—"
+        print(
+            f"  {v['campaign']:<45}  {v['action']:<26}  "
+            f"{_fmt_display(v['baseline_cpi'], 'cost', sym):>12}  "
+            f"{_fmt_display(v['w1_cpi'], 'cost', sym):>10}  "
+            f"{w2_str:>10}  "
+            f"{v['verdict']:<12}"
+        )
+
+
+def slice_creatives(args: argparse.Namespace) -> None:
+    """Filter creative processed CSV to LOW-label assets, flag Low-Action, show patterns."""
+    profile = load_profile(required=False)
+    min_imp = float(getattr(args, "min_impressions", None) or profile.get("creative_min_impressions", 50000))
+    primary_goal = profile.get("primary_goal", "in_app_conversions")
+    currency = _currency_symbol(profile.get("currency", ""))
+    customer_id = profile.get("google_ads_customer_id")
+
+    creative_path = newest_processed("creative", customer_id)
+    rows = read_csv(creative_path)
+
+    # Step 1: filter to min impressions only
+    eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
+    # Step 2: filter to LOW label only
+    low_rows = [r for r in eligible if r.get("performance_label", "").upper() == "LOW"]
+
+    if not low_rows:
+        print(f"No LOW-label creatives above {min_imp:.0f} minimum impressions.")
+        return
+
+    # Build per-(campaign, asset_type) aggregates so text/video/image are compared fairly
+    conv_col = "in_app_conversions" if primary_goal == "in_app_conversions" else "installs"
+    camp_agg: dict[tuple, dict] = {}
+    for r in eligible:
+        key = (r.get("campaign_name", ""), r.get("asset_type", ""))
+        if key not in camp_agg:
+            camp_agg[key] = {"imp": 0.0, "clicks": 0.0, "installs": 0.0, "cost": 0.0}
+        camp_agg[key]["imp"] += number(r.get("impressions", 0))
+        camp_agg[key]["clicks"] += number(r.get("clicks", 0))
+        camp_agg[key]["installs"] += number(r.get("installs", 0))
+        camp_agg[key]["cost"] += number(r.get("cost", 0))
+
+    for m in camp_agg.values():
+        m["ctr"] = m["clicks"] / m["imp"] * 100 if m["imp"] > 0 else 0.0
+        m["cti"] = m["installs"] / m["clicks"] * 100 if m["clicks"] > 0 else 0.0
+        m["cpc"] = m["cost"] / m["clicks"] if m["clicks"] > 0 else 0.0
+
+    # Count assets per (campaign, asset_type) so we know when comparison is meaningful
+    type_counts_per_camp: dict[tuple, int] = {}
+    for r in eligible:
+        key = (r.get("campaign_name", ""), r.get("asset_type", ""))
+        type_counts_per_camp[key] = type_counts_per_camp.get(key, 0) + 1
+
+    # Flag each LOW creative: low-action = 2+ metrics worse than campaign+asset_type avg
+    results = []
+    for r in low_rows:
+        cname = r.get("campaign_name", "")
+        atype = r.get("asset_type", "")
+        cm = camp_agg.get((cname, atype), {})
+
+        asset_ctr = number(r.get("ctr_percent", 0))
+        asset_cti = number(r.get("cti_percent", 0))
+        asset_cpc = number(r.get("cpc", 0))
+
+        worse_ctr = asset_ctr < cm.get("ctr", 0) * 0.90 if cm.get("ctr", 0) > 0 else False
+        worse_cti = asset_cti < cm.get("cti", 0) * 0.90 if cm.get("cti", 0) > 0 else False
+        worse_cpc = asset_cpc > cm.get("cpc", 0) * 1.10 if cm.get("cpc", 0) > 0 else False
+
+        peers = type_counts_per_camp.get((cname, atype), 0)
+        if peers <= 1:
+            # Only asset of its type in this campaign — can't compare; trust the API LOW label
+            flag = "low-action"
+            worse_ctr = worse_cti = worse_cpc = False
+        else:
+            flag = "low-action" if sum([worse_ctr, worse_cti, worse_cpc]) >= 2 else "low-watch"
+        results.append({
+            "flag": flag,
+            "campaign_name": cname,
+            "ad_group_name": r.get("ad_group_name", ""),
+            "asset_id": r.get("asset_id", ""),
+            "asset_name": r.get("asset_name", ""),
+            "asset_type": r.get("asset_type", ""),
+            "field_type": r.get("field_type", ""),
+            "impressions": r.get("impressions", ""),
+            "cost": r.get("cost", ""),
+            "ctr_percent": r.get("ctr_percent", ""),
+            "type_avg_ctr": format_float(cm.get("ctr", 0)),
+            "cti_percent": r.get("cti_percent", ""),
+            "type_avg_cti": format_float(cm.get("cti", 0)),
+            "cpc": r.get("cpc", ""),
+            "type_avg_cpc": format_float(cm.get("cpc", 0)),
+            "installs": r.get("installs", ""),
+            "in_app_conversions": r.get("in_app_conversions", ""),
+            "worse_ctr": str(worse_ctr),
+            "worse_cti": str(worse_cti),
+            "worse_cpc": str(worse_cpc),
+        })
+
+    text_low_action = [r for r in results if r["flag"] == "low-action" and r["asset_type"] == "TEXT"]
+    text_low_watch = [r for r in results if r["flag"] == "low-watch" and r["asset_type"] == "TEXT"]
+    media_low = [r for r in results if r["asset_type"] in ("YOUTUBE_VIDEO", "IMAGE", "MEDIA_BUNDLE")]
+
+    print(f"\n[Creative Underperformance — LOW label, ≥{min_imp:.0f} impressions]\n")
+    print(f"  {len(results)} LOW total | {len(text_low_action)} text low-action | {len(text_low_watch)} text low-watch | {len(media_low)} video/image LOW\n")
+
+    # Section 1: Text low-action (2+ metrics worse than same-type campaign avg)
+    if text_low_action:
+        print(f"  TEXT LOW-ACTION ({len(text_low_action)} — CTR/CTI/CPC worse vs same-type campaign avg)")
+        hdr = (f"  {'Asset/ID':<28}  {'Field':<14}  "
+               f"{'CTR%':>6}  {'TypeAvg':>8}  {'CTI%':>6}  {'TypeAvg':>8}  "
+               f"{'CPC':>8}  {'TypeAvg':>8}")
+        print(hdr)
+        print("  " + "─" * (len(hdr) - 2))
+        for r in text_low_action:
+            label = (r["asset_name"] or r["asset_id"] or "—")[:26]
+            print(
+                f"  {label:<28}  {r['field_type']:<14}  "
+                f"{_fmt_display(r['ctr_percent'], 'percent', ''):>6}  "
+                f"{_fmt_display(r['type_avg_ctr'], 'percent', ''):>8}  "
+                f"{_fmt_display(r['cti_percent'], 'percent', ''):>6}  "
+                f"{_fmt_display(r['type_avg_cti'], 'percent', ''):>8}  "
+                f"{_fmt_display(r['cpc'], 'cost', currency):>8}  "
+                f"{_fmt_display(r['type_avg_cpc'], 'cost', currency):>8}"
+            )
+
+    # Section 2: Video / Image LOW (always surfaced — production cost to replace)
+    if media_low:
+        print(f"\n  VIDEO / IMAGE LOW ({len(media_low)} — API signal; review for refresh)")
+        hdr2 = (f"  {'Asset name/ID':<36}  {'Type':<14}  "
+                f"{'CTR%':>6}  {'TypeAvg':>8}  {'CTI%':>6}  {'TypeAvg':>8}  "
+                f"{'CPC':>8}  {'TypeAvg':>8}")
+        print(hdr2)
+        print("  " + "─" * (len(hdr2) - 2))
+        for r in media_low:
+            label = (r["asset_name"] or r["asset_id"] or "—")[:34]
+            print(
+                f"  {label:<36}  {r['asset_type']:<14}  "
+                f"{_fmt_display(r['ctr_percent'], 'percent', ''):>6}  "
+                f"{_fmt_display(r['type_avg_ctr'], 'percent', ''):>8}  "
+                f"{_fmt_display(r['cti_percent'], 'percent', ''):>6}  "
+                f"{_fmt_display(r['type_avg_cti'], 'percent', ''):>8}  "
+                f"{_fmt_display(r['cpc'], 'cost', currency):>8}  "
+                f"{_fmt_display(r['type_avg_cpc'], 'cost', currency):>8}"
+            )
+
+    if text_low_watch:
+        print(f"\n  TEXT LOW-WATCH ({len(text_low_watch)} — only 1 metric worse; monitor):")
+        for r in text_low_watch[:10]:  # cap at 10 to avoid wall of text
+            label = (r["asset_name"] or r["asset_id"] or "—")[:40]
+            print(f"    {r['field_type']:<14}  {label}")
+        if len(text_low_watch) > 10:
+            print(f"    … and {len(text_low_watch) - 10} more (use --output to save full list)")
+
+    # Pattern analysis on all low-action assets (text + media)
+    all_low_action = text_low_action + media_low
+    if all_low_action:
+        from collections import Counter
+        type_counts: Counter = Counter(r["asset_type"] for r in all_low_action)
+        field_counts: Counter = Counter(r["field_type"] for r in all_low_action)
+
+        # Mine asset_name tokens (populated for images/videos)
+        name_words: Counter = Counter()
+        for r in all_low_action:
+            for src in (r.get("asset_name") or "", r.get("ad_group_name") or ""):
+                for tok in src.replace("-", " ").replace("_", " ").split():
+                    if len(tok) >= 4:
+                        name_words[tok.lower()] += 1
+
+        # Ad-group patterns (always populated — describes creative theme)
+        adgroup_counts: Counter = Counter(r.get("ad_group_name", "") for r in all_low_action if r.get("ad_group_name"))
+
+        print("\n  [Patterns in Low-Action creatives]")
+        print(f"  Asset types : {', '.join(f'{t}×{c}' for t, c in type_counts.most_common())}")
+        print(f"  Field types : {', '.join(f'{f}×{c}' for f, c in field_counts.most_common())}")
+        common_tokens = [(w, c) for w, c in name_words.most_common(8) if c >= 3]
+        if common_tokens:
+            print(f"  Common terms: {', '.join(f'{w}({c})' for w, c in common_tokens)}")
+        top_adgroups = adgroup_counts.most_common(5)
+        if top_adgroups:
+            print(f"  Top ad groups with Low-Action creatives:")
+            for ag, c in top_adgroups:
+                print(f"    {c:>3}× {ag}")
+
+    if getattr(args, "output", None):
+        out = Path(args.output).expanduser()
+        cols = ["flag", "campaign_name", "ad_group_name", "asset_id", "asset_name",
+                "asset_type", "field_type", "impressions", "cost",
+                "ctr_percent", "type_avg_ctr", "cti_percent", "type_avg_cti",
+                "cpc", "type_avg_cpc", "installs", "in_app_conversions",
+                "worse_ctr", "worse_cti", "worse_cpc"]
+        write_csv(out, results, cols)
+        print(f"\n  full CSV written: {out}")
+
+
+_LANG_CANONICAL: dict = {
+    'english': 'English', 'eng': 'English',
+    'hindi': 'Hindi',
+    'hinglish': 'Hinglish', 'nagpurihinglish': 'Hinglish',
+    'bengali': 'Bengali',
+    'telugu': 'Telugu', 'tenglish': 'Telugu',
+    'tamil': 'Tamil', 'tanglish': 'Tamil',
+    'gujarati': 'Gujarati', 'gujrati': 'Gujarati', 'gujlish': 'Gujarati',
+    'marathi': 'Marathi',
+    'malayalam': 'Malayalam', 'manglish': 'Malayalam',
+    'odia': 'Odia',
+    'kannada': 'Kannada',
+}
+_LANG_RE = re.compile(
+    r'\b(' + '|'.join(_LANG_CANONICAL) + r')\b', re.IGNORECASE
+)
+
+
+def _lang_canonical(ag_name: str) -> str:
+    """Extract canonical language from ad group name (e.g. 'Tenglish' → 'Telugu')."""
+    m = _LANG_RE.search(ag_name)
+    return _LANG_CANONICAL.get(m.group(1).lower(), 'Other') if m else 'Other'
+
+
+def _ad_group_theme(ag_name: str) -> str:
+    """First-two-segment theme from ad group name: 'UseCase-Party', 'Transit-Bus', etc."""
+    name = re.sub(r'[-_][A-Z][a-z]{2,4}\d{2,4}_?$', '', ag_name).strip()
+    parts = re.split(r'[-_]+', name)
+    return '-'.join(parts[:2]) if len(parts) >= 2 else name
+
+
+def _fetch_asset_texts(client, customer_id: str, asset_ids: list) -> dict:
+    """Fetch text content from ad_group_ad_asset_view, TEXT assets only."""
+    if not asset_ids:
+        return {}
+    ga_service = client.get_service("GoogleAdsService")
+    id_list = ", ".join(str(i) for i in asset_ids[:500])
+    query = (
+        "SELECT asset.id, asset.text_asset.text "
+        "FROM ad_group_ad_asset_view "
+        "WHERE asset.type = 'TEXT' "
+        f"AND asset.id IN ({id_list})"
+    )
+    result = {}
+    try:
+        response = ga_service.search(customer_id=customer_id, query=query)
+        for row in response:
+            result[str(row.asset.id)] = row.asset.text_asset.text or ""
+    except Exception as exc:
+        print(f"  warning: could not fetch asset text: {exc}")
+    return result
+
+
+def suggest_creative_copy(args: argparse.Namespace) -> None:
+    """Generate a copy plan YAML + compact agent-agnostic prompt for LOW-action text assets."""
+    import datetime as _dt
+    try:
+        import yaml as _yaml
+    except ImportError:
+        die("pyyaml is required: pip install pyyaml")
+
+    profile = load_profile(required=False)
+    min_imp = float(getattr(args, "min_impressions", None) or profile.get("creative_min_impressions", 50000))
+    primary_goal = profile.get("primary_goal", "in_app_conversions")
+    customer_id = profile.get("google_ads_customer_id", "unknown")
+
+    creative_path = newest_processed("creative", customer_id)
+    rows = read_csv(creative_path)
+    eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
+
+    # Campaign-level averages per (campaign_id, asset_type)
+    camp_agg: dict[tuple, dict] = {}
+    for r in eligible:
+        key = (r.get("campaign_id", ""), r.get("campaign_name", ""), r.get("asset_type", ""))
+        if key not in camp_agg:
+            camp_agg[key] = {"imp": 0.0, "clicks": 0.0, "installs": 0.0, "cost": 0.0}
+        camp_agg[key]["imp"] += number(r.get("impressions", 0))
+        camp_agg[key]["clicks"] += number(r.get("clicks", 0))
+        camp_agg[key]["installs"] += number(r.get("installs", 0))
+        camp_agg[key]["cost"] += number(r.get("cost", 0))
+    for m in camp_agg.values():
+        m["ctr"] = m["clicks"] / m["imp"] * 100 if m["imp"] > 0 else 0.0
+        m["cti"] = m["installs"] / m["clicks"] * 100 if m["clicks"] > 0 else 0.0
+        m["cpc"] = m["cost"] / m["clicks"] if m["clicks"] > 0 else 0.0
+
+    # Peer counts per (campaign_id, asset_type) for meaningful comparison
+    peer_counts: dict[tuple, int] = {}
+    for r in eligible:
+        key = (r.get("campaign_id", ""), r.get("campaign_name", ""), r.get("asset_type", ""))
+        peer_counts[key] = peer_counts.get(key, 0) + 1
+
+    # Current asset count per (ad_group_id, field_type) — used for limit check in apply
+    ag_field_counts: dict[tuple, int] = {}
+    for r in rows:  # full set, not just eligible
+        key = (r.get("ad_group_id", ""), r.get("field_type", ""))
+        ag_field_counts[key] = ag_field_counts.get(key, 0) + 1
+
+    # LOW-action TEXT candidates (same 2-metric test as slice_creatives)
+    low_rows = [r for r in eligible if r.get("performance_label", "").upper() == "LOW" and r.get("asset_type", "") == "TEXT"]
+    changes = []
+    for r in low_rows:
+        cid = r.get("campaign_id", "")
+        cname = r.get("campaign_name", "")
+        ft = r.get("field_type", "")
+        cm = camp_agg.get((cid, cname, "TEXT"), {})
+        peers = peer_counts.get((cid, cname, "TEXT"), 0)
+
+        asset_ctr = number(r.get("ctr_percent", 0))
+        asset_cti = number(r.get("cti_percent", 0))
+        asset_cpc = number(r.get("cpc", 0))
+        worse_ctr = asset_ctr < cm.get("ctr", 0) * 0.90 if cm.get("ctr", 0) > 0 else False
+        worse_cti = asset_cti < cm.get("cti", 0) * 0.90 if cm.get("cti", 0) > 0 else False
+        worse_cpc = asset_cpc > cm.get("cpc", 0) * 1.10 if cm.get("cpc", 0) > 0 else False
+
+        is_low_action = peers <= 1 or sum([worse_ctr, worse_cti, worse_cpc]) >= 2
+        if not is_low_action:
+            continue
+
+        # Primary failing metric for prompt (most actionable signal)
+        if worse_ctr:
+            metric_note = f"CTR {asset_ctr:.1f}% vs avg {cm.get('ctr', 0):.1f}%"
+        elif worse_cti:
+            metric_note = f"CTI {asset_cti:.1f}% vs avg {cm.get('cti', 0):.1f}%"
+        else:
+            metric_note = f"CPC {asset_cpc:.2f} vs avg {cm.get('cpc', 0):.2f}"
+
+        changes.append({
+            "campaign_id": cid,
+            "campaign_name": cname,
+            "ad_group_id": r.get("ad_group_id", ""),
+            "ad_group_name": r.get("ad_group_name", ""),
+            "asset_id": r.get("asset_id", ""),
+            "field_type": ft,
+            "current_text": "",
+            "current_asset_count": ag_field_counts.get((r.get("ad_group_id", ""), ft), 0),
+            "ctr_percent": format_float(asset_ctr),
+            "campaign_avg_ctr": format_float(cm.get("ctr", 0)),
+            "cti_percent": format_float(asset_cti),
+            "campaign_avg_cti": format_float(cm.get("cti", 0)),
+            "cpc": format_float(asset_cpc),
+            "campaign_avg_cpc": format_float(cm.get("cpc", 0)),
+            "_metric_note": metric_note,  # used for prompt only, not written to YAML
+            "suggested_text": None,
+            "action": "replace",
+        })
+
+    # Fetch asset text content via a targeted TEXT-only query
+    all_asset_ids = list({c["asset_id"] for c in changes})
+    text_map: dict = {}
+    try:
+        from google.ads.googleads.client import GoogleAdsClient
+        config_path = str(Path(profile.get("google_ads_write_config_path", "~/google-ads-api.yaml")).expanduser())
+        _ga_client = GoogleAdsClient.load_from_storage(config_path)
+        text_map = _fetch_asset_texts(_ga_client, customer_id.replace("-", ""), all_asset_ids)
+    except ImportError:
+        print("  warning: google-ads not installed — text content unavailable")
+    except Exception as _exc:
+        print(f"  warning: Google Ads client load failed — text content unavailable: {_exc}")
+    for c in changes:
+        c["current_text"] = text_map.get(str(c["asset_id"]), "")
+
+    # Assign 1-based index to each change so the subagent can reference by number
+    for i, c in enumerate(changes, 1):
+        c["change_index"] = i
+
+    today = _dt.date.today().isoformat()
+    out_dir = Path(getattr(args, "output_dir", None) or "wiki/action-items")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    yaml_path = out_dir / f"creative-copy-{today}.yaml"
+    prompt_path = out_dir / f"creative-copy-{today}-prompt.txt"
+
+    # Strip internal keys before writing YAML
+    _strip = {"_metric_note"}
+    yaml_changes = [{k: v for k, v in c.items() if k not in _strip} for c in changes]
+    plan = {
+        "date": today,
+        "customer_id": customer_id,
+        "changes": yaml_changes,
+        "applied": False,
+        "applied_at": None,
+    }
+    with open(yaml_path, "w") as f:
+        _yaml.dump(plan, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    _rules_header = [
+        "App campaign copy rules:",
+        "- HEADLINE ≤ 30 chars, DESCRIPTION ≤ 90 chars",
+        "- Lead with a specific app benefit — not a generic phrase",
+        "- Each asset must work standalone AND in combination with other assets and images",
+        "- Every DESCRIPTION must end with punctuation (. or !) — max 1 exclamation mark per asset",
+        "- Do not copy text already GOOD or BEST in the same ad group",
+        "- If the current text contains a proper noun (place name, landmark, neighbourhood — e.g. \"Dum Dum airport\", \"Kalighat\"), keep it in the replacement. Tweak the surrounding copy, never swap the proper noun for a generic term.",
+        "",
+        "For each numbered asset below write one replacement following the rules above.",
+        "Do NOT reuse the current text. Stay within the character limit for the field type.",
+        "",
+    ]
+
+    batch_size = getattr(args, "batch_size", 25)
+    batches = [changes[i:i + batch_size] for i in range(0, len(changes), batch_size)]
+    prompt_paths = []
+    for b_idx, batch in enumerate(batches, 1):
+        b_path = out_dir / f"creative-copy-{today}-batch-{b_idx:03d}.txt"
+        b_lines = list(_rules_header)
+        for c in batch:
+            b_lines.append(
+                f'{c["change_index"]}. [{c["campaign_name"]} / {c["field_type"]}]'
+                f'  ad_group: {c["ad_group_name"]}'
+            )
+            if c.get("current_text"):
+                b_lines.append(f'   Current: "{c["current_text"][:60]}" — {c["_metric_note"]}')
+        first_id = batch[0]["change_index"]
+        last_id = batch[-1]["change_index"]
+        b_lines += ['', f'Output ONLY: [{{"id":{first_id},"text":"..."}},{{"id":{last_id},"text":"..."}}]']
+        b_path.write_text("\n".join(b_lines))
+        prompt_paths.append((b_path, first_id, last_id))
+
+    print(f"\nPlan:    {yaml_path}")
+    print(f"Batches: {len(batches)} prompt files ({batch_size} assets each, last may be smaller)")
+    for b_path, fid, lid in prompt_paths:
+        print(f"  {b_path}  (assets {fid}–{lid})")
+    print(f"\n{len(changes)} assets across {len({c['campaign_id'] for c in changes})} campaigns.")
+    print("Use the bob-creative-copy skill — spawn one Agent call per batch file, then run:")
+    print(f'  python3 lib/datapull.py creative-copy-apply --plan {yaml_path} --suggestions \'[...json...]\' ')
+
+
+def creative_copy_apply(args: argparse.Namespace) -> None:
+    """Review suggested copy, get user approval, push to Google Ads."""
+    import datetime as _dt
+    try:
+        import yaml as _yaml
+    except ImportError:
+        die("pyyaml is required: pip install pyyaml")
+
+    plan_path = Path(args.plan).expanduser()
+    if not plan_path.exists():
+        die(f"plan file not found: {plan_path}")
+    plan = _yaml.safe_load(plan_path.read_text())
+
+    if plan.get("applied"):
+        die(f"plan already applied on {plan.get('applied_at')}")
+    if not plan.get("changes"):
+        print("no changes in plan — nothing to apply")
+        return
+
+    changes = plan["changes"]
+    groups = plan.get("groups", [])
+    LIMITS = {"HEADLINE": 30, "DESCRIPTION": 90}
+
+    # Merge --suggestions JSON
+    sug_map: dict = {}
+    if getattr(args, "suggestions", None):
+        import json as _json
+        try:
+            suggestions = _json.loads(args.suggestions)
+        except Exception as e:
+            die(f"invalid --suggestions JSON: {e}")
+        sug_map = {int(s["id"]): s["text"] for s in suggestions}
+
+    def _broadcast_groups() -> None:
+        """Apply sug_map group texts to all matching changes."""
+        for c in changes:
+            gid = c.get("group_id")
+            if gid and sug_map.get(gid):
+                c["suggested_text"] = sug_map[gid]
+
+    def _broadcast_legacy() -> None:
+        for i, c in enumerate(changes, 1):
+            if i in sug_map:
+                c["suggested_text"] = sug_map[i]
+
+    if groups:
+        _broadcast_groups()
+    else:
+        _broadcast_legacy()
+
+    # Validate suggestion IDs before doing anything irreversible
+    if not groups and sug_map:
+        from collections import Counter as _Counter
+        sug_ids = list(sug_map.keys())
+        n = len(changes)
+        out_of_range = [i for i in sug_ids if i < 1 or i > n]
+        duplicates = [i for i, cnt in _Counter(sug_ids).items() if cnt > 1]
+        missing = [i for i in range(1, n + 1)
+                   if i not in sug_map and changes[i - 1].get("action") == "replace"]
+        if out_of_range:
+            print(f"  ERROR: {len(out_of_range)} suggestion IDs out of range (1–{n}): "
+                  f"{out_of_range[:5]}{'...' if len(out_of_range) > 5 else ''}")
+        if duplicates:
+            print(f"  ERROR: duplicate suggestion IDs: "
+                  f"{duplicates[:5]}{'...' if len(duplicates) > 5 else ''}")
+        if missing:
+            print(f"  WARNING: {len(missing)} assets have no suggestion and will be skipped")
+        if out_of_range or duplicates:
+            print("  Suggestion set looks corrupted (ID drift). "
+                  "Re-run suggest-creative-copy and regenerate all batches.")
+            return
+
+    # Validate character limits and null out violators
+    if groups:
+        for g in groups:
+            text = sug_map.get(g["group_id"], "")
+            if text:
+                limit = LIMITS.get(g["field_type"], 90)
+                if len(text) > limit:
+                    print(f"  WARNING: group {g['group_id']} [{g['field_type']}/{g['language']}] "
+                          f"'{text}' is {len(text)} chars (limit {limit}) — will be skipped")
+                    sug_map[g["group_id"]] = None
+        _broadcast_groups()
+    else:
+        for i, c in enumerate(changes, 1):
+            st = c.get("suggested_text")
+            if st:
+                limit = LIMITS.get(c.get("field_type", ""), 90)
+                if len(st) > limit:
+                    print(f"  WARNING: #{i} '{st}' is {len(st)} chars (limit {limit}) — will be skipped")
+                    c["suggested_text"] = None
+
+    # Approval table
+    if groups:
+        print(f"\n{'#':<3}  {'Theme':<28}  {'Field':<12}  {'Lang':<10}  {'N':<4}  Suggested")
+        print("─" * 100)
+        for g in groups:
+            gid = g["group_id"]
+            text = sug_map.get(gid) or "—"
+            chars = len(text) if text != "—" else 0
+            theme_col = g.get("theme", g.get("field_type", ""))[:27]
+            print(f"{gid:<3}  {theme_col:<28}  {g['field_type']:<12}  {g['language']:<10}  "
+                  f"{g['asset_count']:<4}  \"{text[:45]}\"({chars})")
+    else:
+        actionable = [c for c in changes if c.get("action") in ("replace", "pause")]
+        if not actionable:
+            print("No actionable changes (suggested_text missing or over limit).")
+            return
+        print(f"\n{'#':<3}  {'Campaign':<22}  {'Field':<12}  {'Current':<32}  {'Suggested':<32}  Metric vs avg")
+        print("─" * 120)
+        for i, c in enumerate(changes, 1):
+            if c.get("action") not in ("replace", "pause"):
+                continue
+            current = (c.get("current_text") or "")[:30]
+            suggested = (c.get("suggested_text") or "—")[:30]
+            cur_chars = len(c.get("current_text") or "")
+            sug_chars = len(c.get("suggested_text") or "") if c.get("suggested_text") else 0
+            ft = c.get("field_type", "")
+            ctr_note = f"CTR {c.get('ctr_percent','')}%→{c.get('campaign_avg_ctr','')}%"
+            print(f"{i:<3}  {c.get('campaign_name','')[:22]:<22}  {ft:<12}  "
+                  f"\"{current}\"({cur_chars})  \"{suggested}\"({sug_chars})  {ctr_note}")
+
+    print("\nApprove all? [y/n/edit N]: ", end="", flush=True)
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return
+
+    while answer.startswith("edit"):
+        parts = answer.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            num = int(parts[1])
+            if groups:
+                # N = group_id
+                g_match = next((g for g in groups if g["group_id"] == num), None)
+                if g_match:
+                    ft = g_match["field_type"]
+                    print(f"New text for group {num} ({ft}, limit {LIMITS.get(ft, 90)} chars): ", end="", flush=True)
+                    try:
+                        new_text = input().strip()
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    limit = LIMITS.get(ft, 90)
+                    if len(new_text) > limit:
+                        print(f"  Still over limit ({len(new_text)} chars) — skipping")
+                    else:
+                        sug_map[num] = new_text
+                        _broadcast_groups()
+            else:
+                idx = num - 1
+                if 0 <= idx < len(changes):
+                    ft = changes[idx]["field_type"]
+                    print(f"New text for #{num} ({ft}, limit {LIMITS.get(ft, 90)} chars): ", end="", flush=True)
+                    try:
+                        new_text = input().strip()
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    limit = LIMITS.get(ft, 90)
+                    if len(new_text) > limit:
+                        print(f"  Still over limit ({len(new_text)} chars) — skipping")
+                    else:
+                        changes[idx]["suggested_text"] = new_text
+        # Re-show
+        if groups:
+            print(f"\n{'#':<3}  {'Theme':<28}  {'Field':<12}  {'Lang':<10}  {'N':<4}  Suggested")
+            for g in groups:
+                gid = g["group_id"]
+                text = sug_map.get(gid) or "—"
+                theme_col = g.get("theme", g.get("field_type", ""))[:27]
+                print(f"{gid:<3}  {theme_col:<28}  {g['field_type']:<12}  {g['language']:<10}  "
+                      f"{g['asset_count']:<4}  \"{text[:45]}\"")
+        else:
+            print(f"\n{'#':<3}  {'Field':<12}  {'Suggested'}")
+            for i, c in enumerate(changes, 1):
+                print(f"{i:<3}  {c.get('field_type',''):<12}  {c.get('suggested_text') or '—'}")
+        print("\nApprove all? [y/n/edit N]: ", end="", flush=True)
+        try:
+            answer = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+    if answer != "y":
+        print("Aborted — no changes applied.")
+        return
+
+    try:
+        from google.ads.googleads.client import GoogleAdsClient  # type: ignore
+        from google.ads.googleads.errors import GoogleAdsException  # type: ignore
+        from google.protobuf.field_mask_pb2 import FieldMask  # type: ignore
+    except ImportError:
+        die("google-ads library required: pip install google-ads")
+
+    profile = load_profile(required=False)
+    config_path = str(Path(
+        profile.get("google_ads_write_config_path") or profile.get("google_ads_config_path", "~/google-ads.yaml")
+    ).expanduser())
+    customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
+
+    try:
+        client = GoogleAdsClient.load_from_storage(config_path)
+    except Exception as exc:
+        die(f"failed to load Google Ads client: {exc}")
+
+    ga_svc = client.get_service("GoogleAdsService")
+    ad_svc = client.get_service("AdService")
+
+    results = []
+    today = _dt.date.today().isoformat()
+
+    from collections import defaultdict as _defaultdict
+    ag_to_changes: dict = _defaultdict(list)
+    for i, c in enumerate(changes, 1):
+        if c.get("action") in ("replace", "pause") and (
+            c.get("action") == "pause" or c.get("suggested_text")
+        ):
+            ag_to_changes[str(c.get("ad_group_id", ""))].append((i, c))
+
+    for ag_id, ag_changes in ag_to_changes.items():
+        gaql = (
+            "SELECT ad_group_ad.resource_name,"
+            " ad_group_ad.ad.id,"
+            " ad_group_ad.ad.app_ad.headlines,"
+            " ad_group_ad.ad.app_ad.descriptions"
+            f" FROM ad_group_ad"
+            f" WHERE ad_group.id = {ag_id}"
+            f" AND ad_group_ad.status != 'REMOVED'"
+            f" LIMIT 1"
+        )
+        try:
+            rows = list(ga_svc.search(customer_id=customer_id, query=gaql))
+        except Exception as exc:
+            for _, c in ag_changes:
+                results.append({"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
+                                 "field_type": c.get("field_type", ""), "status": "error",
+                                 "error": f"fetch app ad: {exc}"})
+                print(f"  ✗ {c.get('campaign_name','')} / {c.get('field_type','')} — fetch failed: {exc}")
+            continue
+
+        if not rows:
+            for _, c in ag_changes:
+                results.append({"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
+                                 "field_type": c.get("field_type", ""), "status": "error",
+                                 "error": "no app ad found for ad group"})
+                print(f"  ✗ {c.get('campaign_name','')} / {c.get('field_type','')} — no app ad in ad group {ag_id}")
+            continue
+
+        row_ad = rows[0].ad_group_ad
+        ad_id = row_ad.ad.id
+        ad_rn = ad_svc.ad_path(customer_id, str(ad_id))
+        headlines = [h.text for h in row_ad.ad.app_ad.headlines]
+        descriptions = [d.text for d in row_ad.ad.app_ad.descriptions]
+        updated_fields: set = set()
+        pending_indices: list = []
+
+        for _, c in ag_changes:
+            ft = c.get("field_type", "HEADLINE")
+            action = c.get("action", "replace")
+            current_list = headlines if ft == "HEADLINE" else descriptions
+            field_path = "app_ad.headlines" if ft == "HEADLINE" else "app_ad.descriptions"
+            target_text = c.get("current_text", "")
+
+            matched_i = next((li for li, t in enumerate(current_list) if t == target_text), None)
+            if matched_i is None:
+                results.append({"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
+                                 "field_type": ft, "status": "error",
+                                 "error": "asset not found in app ad"})
+                print(f"  ✗ {c.get('campaign_name','')} / {ft} — asset text not found in app ad")
+                continue
+
+            if action == "replace":
+                current_list[matched_i] = c.get("suggested_text")
+                entry = {"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
+                         "field_type": ft, "suggested_text": c.get("suggested_text"),
+                         "status": "pending_commit"}
+            else:
+                current_list.pop(matched_i)
+                entry = {"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
+                         "field_type": ft, "status": "pending_commit"}
+
+            results.append(entry)
+            pending_indices.append(len(results) - 1)
+            updated_fields.add(field_path)
+
+        if not pending_indices:
+            continue
+
+        op = client.get_type("AdOperation")
+        ad_upd = op.update
+        ad_upd.resource_name = ad_rn
+        for text in headlines:
+            ad_upd.app_ad.headlines.add().text = text
+        for text in descriptions:
+            ad_upd.app_ad.descriptions.add().text = text
+        mask = FieldMask()
+        mask.paths.extend(sorted(updated_fields))
+        op.update_mask.CopyFrom(mask)
+
+        try:
+            ad_svc.mutate_ads(customer_id=customer_id, operations=[op])
+            for ri in pending_indices:
+                r = results[ri]
+                r["status"] = "replaced" if "suggested_text" in r else "paused"
+                if r["status"] == "replaced":
+                    print(f"  ✓ {r['campaign']} / {r['field_type']} — replaced: \"{r['suggested_text']}\"")
+                else:
+                    print(f"  ✓ {r['campaign']} / {r['field_type']} — removed from app ad")
+        except GoogleAdsException as exc:
+            err_msg = "; ".join(e.message for e in exc.failure.errors)
+            for ri in pending_indices:
+                results[ri]["status"] = "error"
+                results[ri]["error"] = err_msg
+                print(f"  ✗ {results[ri]['campaign']} / {results[ri]['field_type']} — failed: {err_msg}")
+        except Exception as exc:
+            for ri in pending_indices:
+                results[ri]["status"] = "error"
+                results[ri]["error"] = str(exc)
+                print(f"  ✗ {results[ri].get('campaign','')} / {results[ri].get('field_type','')} — failed: {exc}")
+
+    errors = [r for r in results if r.get("status") == "error"]
+    plan["applied"] = not errors
+    plan["applied_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+    plan["apply_results"] = results
+    plan["changes"] = changes
+    with open(plan_path, "w") as f:
+        _yaml.dump(plan, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    n_replaced = sum(1 for r in results if r["status"] == "replaced")
+    n_paused = sum(1 for r in results if r["status"] == "paused")
+    print(f"\n{n_replaced} new assets live, {n_paused} paused, {len(errors)} errors — plan saved: {plan_path}")
+    if errors:
+        raise SystemExit(2)
+
+
+def setup_write_credentials(args: argparse.Namespace) -> None:
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore
+    except ImportError:
+        die("google_auth_oauthlib not installed — run: pip install google-auth-oauthlib")
+    import yaml as _yaml
+    import json as _json
+
+    creds_json = Path(getattr(args, "creds", None) or "~/google-ads-creds.json").expanduser()
+    if not creds_json.exists():
+        die(f"client secrets not found: {creds_json}\nDownload it from Google Cloud Console → OAuth 2.0 Client IDs → Download JSON")
+
+    garf_yaml = Path(load_profile(required=False).get("google_ads_config_path") or "~/google-ads-garf.yaml").expanduser()
+    gads_cfg = _yaml.safe_load(garf_yaml.read_text()) if garf_yaml.exists() else {}
+    dev_token = gads_cfg.get("developer_token", "")
+    login_cid = str(gads_cfg.get("login_customer_id", "")).replace("-", "")
+    if not dev_token:
+        die(f"developer_token not found in {garf_yaml}")
+
+    profile = load_profile(required=False)
+    out_path = Path(
+        getattr(args, "output", None)
+        or profile.get("google_ads_write_config_path", "~/google-ads-api.yaml")
+    ).expanduser()
+
+    print("Waiting for browser authorization — local server starting on http://127.0.0.1:8080 …")
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(creds_json), scopes=["https://www.googleapis.com/auth/adwords"]
+    )
+    credentials = flow.run_local_server(
+        port=8080,
+        open_browser=False,
+        authorization_prompt_message="OAUTH_URL: {url}",
+    )
+
+    secrets = _json.loads(creds_json.read_text()).get("installed", {})
+    write_cfg = {
+        "developer_token": dev_token,
+        "client_id": secrets.get("client_id", ""),
+        "client_secret": secrets.get("client_secret", ""),
+        "refresh_token": credentials.refresh_token,
+        "login_customer_id": login_cid,
+        "use_proto_plus": True,
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        _yaml.dump(write_cfg, f, default_flow_style=False, sort_keys=False)
+    print(f"\nWrite credentials saved: {out_path}")
+    print("Run 'python3 lib/datapull.py check-config' to verify.")
+
+
+CAMPAIGN_TYPES: list[tuple[str, str]] = [
+    ("app", "App Campaigns"),
+    ("search", "Search  [analysis features not wired yet — data only]"),
+    ("performance_max", "Performance Max  [analysis features not wired yet — data only]"),
+]
+
+CAMPAIGN_GOAL_TYPES: dict[str, dict[str, str]] = {
+    "installs": {"campaign_goal_type": "app_installs"},
+    "in_app_conversions": {"campaign_goal_type": "app_in_app_conversions"},
+}
+
+CURRENCY_OPTIONS: list[tuple[str, str]] = [
+    ("INR", "INR — Indian Rupee"),
+    ("USD", "USD — US Dollar"),
+    ("EUR", "EUR — Euro"),
+    ("GBP", "GBP — British Pound"),
+    ("BRL", "BRL — Brazilian Real"),
+    ("AUD", "AUD — Australian Dollar"),
+]
+
+_GARF_READ_FORMAT = """\
+  GARF read config format (google-ads-garf.yaml):
+  ┌──────────────────────────────────────────┐
+  │ developer_token: YOUR_TOKEN              │
+  │ client_id: YOUR_CLIENT_ID               │
+  │ login_customer_id: 1234567890           │  ← MCC ID, no hyphens
+  └──────────────────────────────────────────┘"""
+
+_WRITE_CONFIG_FORMAT = """\
+  Write config format (google-ads-api.yaml):
+  ┌──────────────────────────────────────────┐
+  │ developer_token: YOUR_TOKEN              │
+  │ client_id: YOUR_CLIENT_ID               │
+  │ client_secret: YOUR_SECRET              │
+  │ refresh_token: WRITE_REFRESH_TOKEN      │
+  │ login_customer_id: 1234567890           │
+  └──────────────────────────────────────────┘"""
+
+
+def _ob_prompt(label: str, default: str = "") -> str:
+    """Single-line interactive prompt with optional default.
+
+    Accepts empty string, 'y', 'yes', or 'same' as signals to use the default,
+    so the prompt works reliably when relayed through a terminal emulator or agent.
+    """
+    if default:
+        hint = f" [default: {default} — type 'y' to keep]"
+    else:
+        hint = ""
+    try:
+        val = input(f"  {label}{hint}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        raise SystemExit(0)
+    if default and val.lower() in ("", "y", "yes", "same", "default"):
+        return default
+    return val
+
+
+def _ob_numbered(label: str, options: list[tuple[str, str]], default: int = 1) -> tuple[str, str]:
+    """Numbered-choice prompt. Returns (key, display_label)."""
+    print(f"\n  {label}")
+    for i, (_, display) in enumerate(options, 1):
+        marker = " *" if i == default else "  "
+        print(f"{marker}  {i}) {display}")
+    while True:
+        raw = _ob_prompt(f"Choice", str(default))
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        print(f"  Enter a number between 1 and {len(options)}.")
+
+
+def _validate_customer_id(cid: str) -> bool:
+    return bool(re.fullmatch(r"\d{3}-\d{3}-\d{4}", cid.strip()))
+
+
+def _check_config_path(path_str: str, is_write_config: bool = False) -> list[str]:
+    """Return list of MISSING key names; empty list = all present."""
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        return ["FILE NOT FOUND"]
+    text = path.read_text()
+    present = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#") and ":" in line:
+            key = line.split(":", 1)[0].strip()
+            present.add(key)
+    # Write config (bid-budget-apply) requires full OAuth2 credentials
+    # GARF read config only needs developer_token, client_id, login_customer_id
+    if is_write_config:
+        required = {"developer_token", "client_id", "client_secret", "refresh_token", "login_customer_id"}
+    else:
+        required = {"developer_token", "client_id", "login_customer_id"}
+    return sorted(required - present)
+
+
+def _print_section(title: str) -> None:
+    print(f"\n  ── {title} {'─' * max(0, 46 - len(title))}")
+
+
+def onboard(args: argparse.Namespace) -> None:
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    existing = _load_accounts_registry()
+
+    # Migrate legacy single-account profile.json into registry on first onboard run
+    if not existing and PROFILE_PATH.exists():
+        legacy = load_profile(required=False)
+        cid = legacy.get("google_ads_customer_id", "")
+        if cid:
+            legacy_entry = {
+                "google_ads_customer_id": cid,
+                "account_name": legacy.get("account_name", cid),
+                "campaign_type": legacy.get("campaign_type", "app"),
+                "active": True,
+            }
+            existing = [legacy_entry]
+            _save_accounts_registry(existing)
+            # Also write per-account profile file
+            acct_dir = ACCOUNTS_DIR / cid.replace("-", "")
+            acct_dir.mkdir(parents=True, exist_ok=True)
+            with (acct_dir / "profile.json").open("w") as f:
+                json.dump(legacy, f, indent=2)
+                f.write("\n")
+
+    if existing:
+        active = next((a for a in existing if a.get("active")), None)
+        active_name = active.get("account_name", active.get("google_ads_customer_id", "")) if active else ""
+        n = len(existing)
+        print(f"\nHey mate. You've already got {n} account{'s' if n != 1 else ''} set up (active: {active_name}).")
+        print("Let's add another one.\n")
+    else:
+        print("\nHey mate. Let's get you set up.\n")
+
+    # ── ACCOUNT ──────────────────────────────────────────────────────────────
+    _print_section("Google Ads Account")
+    while True:
+        cid = _ob_prompt("Customer ID (e.g. 123-456-7890)")
+        if not cid:
+            print("  Customer ID is required.")
+            continue
+        if not _validate_customer_id(cid):
+            print("  Format must be DDD-DDD-DDDD (e.g. 123-456-7890).")
+            continue
+        if any(a.get("google_ads_customer_id") == cid for a in existing):
+            print(f"  {cid} is already registered. Use 'switch-account' to activate it.")
+            continue
+        break
+
+    account_name = _ob_prompt("Account name (e.g. Acme App, Brand iOS)")
+    if not account_name:
+        account_name = cid
+
+    # ── MCC ──────────────────────────────────────────────────────────────────
+    _print_section("MCC (Manager Account)")
+    print("  Your MCC ID is the login_customer_id in your google-ads-garf.yaml.")
+    while True:
+        mcc_id = _ob_prompt("MCC ID (e.g. 123-456-7890) — type 'skip' to leave blank")
+        if not mcc_id or mcc_id.lower() == "skip":
+            mcc_id = ""
+            break
+        if not _validate_customer_id(mcc_id):
+            print("  Format must be DDD-DDD-DDDD. Type 'skip' to leave blank.")
+            continue
+        break
+    mcc_name = _ob_prompt("MCC name (e.g. Acme MCC)") if mcc_id else ""
+
+    # ── CAMPAIGN TYPE ─────────────────────────────────────────────────────────
+    _print_section("Campaign Type")
+    ct_key, ct_display = _ob_numbered("What campaign type are you running?", CAMPAIGN_TYPES, default=1)
+    campaign_type = ct_key
+
+    # ── PRIMARY GOAL (App only) ───────────────────────────────────────────────
+    primary_goal = "in_app_conversions"
+    campaign_goal_type = "app_in_app_conversions"
+    if campaign_type == "app":
+        _print_section("Primary Goal")
+        goal_options = [("installs", "Installs"), ("in_app_conversions", "In-app conversions")]
+        goal_key, _ = _ob_numbered("What's the primary goal?", goal_options, default=2)
+        primary_goal = goal_key
+        campaign_goal_type = CAMPAIGN_GOAL_TYPES[goal_key]["campaign_goal_type"]
+
+    # ── CURRENCY ──────────────────────────────────────────────────────────────
+    _print_section("Currency")
+    currency_options_display = CURRENCY_OPTIONS + [("OTHER", "Other — I'll type it")]
+    cur_key, _ = _ob_numbered("Currency?", currency_options_display, default=1)
+    if cur_key == "OTHER":
+        while True:
+            cur_key = _ob_prompt("Currency code (3 letters, e.g. SGD)").upper()
+            if len(cur_key) == 3 and cur_key.isalpha():
+                break
+            print("  Enter a 3-letter currency code.")
+    currency = cur_key
+
+    # ── GOOGLE ADS READ CONFIG ────────────────────────────────────────────────
+    _print_section("Google Ads Read Config (GARF)")
+    print(_GARF_READ_FORMAT)
+    print()
+    google_ads_config_path = ""
+    while True:
+        raw_path = _ob_prompt("Path to google-ads-garf.yaml (Enter to skip and add later)", "~/google-ads-garf.yaml")
+        if not raw_path:
+            print(f"  No worries — add google_ads_config_path to .bob/accounts/{cid.replace('-','')}/profile.json when you're ready.")
+            break
+        missing = _check_config_path(raw_path)
+        if missing and missing[0] == "FILE NOT FOUND":
+            print(f"  File not found at {Path(raw_path).expanduser()}. Check the path or Enter to skip.")
+            continue
+        if missing:
+            print(f"  Config found but missing keys: {', '.join(missing)}. Saving path anyway.")
+        google_ads_config_path = raw_path
+        break
+
+    # ── GOOGLE ADS WRITE CONFIG ───────────────────────────────────────────────
+    _print_section("Google Ads Write Config (bid/budget mutations — optional)")
+    print(_WRITE_CONFIG_FORMAT)
+    print()
+    google_ads_write_config_path = ""
+    raw_write = _ob_prompt("Path to write config yaml (Enter to skip)")
+    if raw_write:
+        missing_w = _check_config_path(raw_write, is_write_config=True)
+        if missing_w and missing_w[0] != "FILE NOT FOUND" and missing_w:
+            print(f"  Config found but missing keys: {', '.join(missing_w)}. Saving path anyway.")
+        elif missing_w and missing_w[0] == "FILE NOT FOUND":
+            print(f"  File not found. Saving path anyway — create it later with: python3 lib/datapull.py setup-write-credentials")
+        google_ads_write_config_path = raw_write
+
+    # ── OPTIONAL DEFAULTS ─────────────────────────────────────────────────────
+    _print_section("Optional Defaults")
+    cac_raw = _ob_prompt(f"CAC ceiling ({currency})", "200")
+    cac_ceiling = int(cac_raw) if cac_raw.isdigit() else 200
+    pct_raw = _ob_prompt("Max bid/budget change %", "10")
+    bid_budget_change_pct = min(int(pct_raw) if pct_raw.isdigit() else 10, 20)
+    cd_raw = _ob_prompt("Cooldown days between changes", "14")
+    bid_budget_cooldown_days = int(cd_raw) if cd_raw.isdigit() else 14
+    creative_min_impressions = 50000
+
+    # ── CONFIRM ────────────────────────────────────────────────────────────────
+    profile: dict[str, Any] = {
+        "google_ads_customer_id": cid,
+        "account_name": account_name,
+        "google_ads_mcc_id": mcc_id,
+        "google_ads_mcc_name": mcc_name,
+        "campaign_type": campaign_type,
+        "primary_goal": primary_goal,
+        "currency": currency,
+        "campaign_goal_type": campaign_goal_type,
+        "google_ads_config_path": google_ads_config_path,
+        "google_ads_write_config_path": google_ads_write_config_path,
+        "creative_min_impressions": creative_min_impressions,
+        "cac_ceiling": cac_ceiling,
+        "bid_budget_change_pct": bid_budget_change_pct,
+        "bid_budget_cooldown_days": bid_budget_cooldown_days,
+    }
+
+    print("\n  ── Confirm ──────────────────────────────────────────────────────")
+    print(f"  Account:       {account_name} ({cid})")
+    if mcc_id:
+        print(f"  MCC:           {mcc_name} ({mcc_id})" if mcc_name else f"  MCC:           {mcc_id}")
+    print(f"  Campaign type: {ct_display.split('[')[0].strip()}")
+    if campaign_type == "app":
+        print(f"  Primary goal:  {primary_goal}")
+    print(f"  Currency:      {currency}")
+    print(f"  Read config:   {google_ads_config_path or '(not set)'}")
+    if google_ads_write_config_path:
+        print(f"  Write config:  {google_ads_write_config_path}")
+    print(f"  CAC ceiling:   {cac_ceiling}  |  Change %: {bid_budget_change_pct}  |  Cooldown: {bid_budget_cooldown_days}d")
+
+    confirm = _ob_prompt("\n  Save this? (y/n)", "y")
+    if confirm.lower() != "y":
+        print("No worries. Nothing saved.")
+        return
+
+    # Write files
+    _set_active_account(profile)
+    # Update registry
+    new_entry = {
+        "google_ads_customer_id": cid,
+        "account_name": account_name,
+        "campaign_type": campaign_type,
+        "active": True,
+    }
+    updated = [dict(a, active=False) for a in existing] + [new_entry]
+    _save_accounts_registry(updated)
+
+    print(f"\n  Saved to .bob/accounts/{cid.replace('-','')}/profile.json")
+
+    # ── DONE ──────────────────────────────────────────────────────────────────
+    data_path = account_processed_dir(cid, "account-network")
+    wiki_path = account_wiki_dir(cid)
+    print(f"""
+  Righto, {account_name} is set up.
+
+  Data:  {data_path.parent}
+  Wiki:  {wiki_path}
+
+  Pull your first data:
+    python3 lib/datapull.py bootstrap
+
+  Then pick a question to start with:
+    1) What happened yesterday?
+       → python3 lib/datapull.py compare-weeks --grain account
+    2) How did last week compare to the week before?
+       → python3 lib/datapull.py compare-weeks
+    3) Which campaigns are underperforming?
+       → python3 lib/datapull.py compare-weeks --grain campaign
+
+  Or verify your config first:
+    python3 lib/datapull.py check-config
+""")
+
+
+def switch_account(args: argparse.Namespace) -> None:
+    accounts = _load_accounts_registry()
+    if not accounts:
+        print("No accounts registered. Run: python3 lib/datapull.py onboard")
+        return
+
+    print("\nRegistered accounts:\n")
+    for i, a in enumerate(accounts, 1):
+        marker = "[ACTIVE]" if a.get("active") else "       "
+        cid = a.get("google_ads_customer_id", "")
+        name = a.get("account_name", cid)
+        ctype = a.get("campaign_type", "")
+        print(f"  {i}) {marker}  {name} — {cid}  ({ctype})")
+
+    target_id = getattr(args, "account_id", None)
+    if target_id:
+        choice_idx = next(
+            (i for i, a in enumerate(accounts) if a.get("google_ads_customer_id") == target_id),
+            None
+        )
+        if choice_idx is None:
+            die(f"account {target_id} not registered. Run 'onboard' to add it.")
+    else:
+        raw = _ob_prompt("\nSwitch to (number)")
+        if not raw.isdigit() or not (1 <= int(raw) <= len(accounts)):
+            print("No change.")
+            return
+        choice_idx = int(raw) - 1
+
+    chosen = accounts[choice_idx]
+    cid = chosen.get("google_ads_customer_id", "")
+    acct_profile_path = ACCOUNTS_DIR / cid.replace("-", "") / "profile.json"
+    if not acct_profile_path.exists():
+        die(f"account profile not found: {acct_profile_path}. Re-run 'onboard' for this account.")
+
+    updated = [dict(a, active=(i == choice_idx)) for i, a in enumerate(accounts)]
+    _save_accounts_registry(updated)
+
+    name = chosen.get("account_name", cid)
+    print(f"\nSwitched to {name} ({cid}).")
+    print(f"  Data:  {account_processed_dir(cid, 'account-network').parent}")
+    print(f"  Wiki:  {account_wiki_dir(cid)}")
+
+
+def list_accounts(args: argparse.Namespace) -> None:
+    accounts = _load_accounts_registry()
+    if not accounts:
+        print("No accounts registered. Run: python3 lib/datapull.py onboard")
+        return
+
+    print(f"\n{'#':<3}  {'Status':<8}  {'Account':<28}  {'Customer ID':<14}  {'Type'}")
+    print("  " + "─" * 70)
+    for i, a in enumerate(accounts, 1):
+        marker = "[ACTIVE]" if a.get("active") else "       "
+        cid = a.get("google_ads_customer_id", "")
+        name = a.get("account_name", cid)[:26]
+        ctype = a.get("campaign_type", "")
+        print(f"  {i:<3}  {marker}  {name:<28}  {cid:<14}  {ctype}")
+    print()
+
+
+def log_pull_cmd(args: argparse.Namespace) -> None:
+    """Write a pull-log entry without hitting the API — used for cache-hit recording."""
+    profile = load_profile(required=False)
+    account = args.account or str(profile.get("google_ads_customer_id", "")).replace("-", "")
+    log_pull(
+        query=args.query,
+        from_date=args.from_date or "",
+        to_date=args.to or "",
+        account=account,
+        run_id_val="",
+        output_file="",
+        reason=args.reason,
+        question=args.question,
+        outcome=args.outcome,
+    )
+    print(f"logged: {args.outcome} — {args.query} {args.from_date or ''}..{args.to or ''}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="bob-data", description="Bob Frm Mktg data pull tools")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    fetch_parser = sub.add_parser("fetch", help="run one GARF query")
+    fetch_parser.add_argument("--query", required=True)
+    fetch_parser.add_argument("--days", type=int)
+    fetch_parser.add_argument("--from", dest="from_date")
+    fetch_parser.add_argument("--to")
+    fetch_parser.add_argument("--account")
+    fetch_parser.add_argument("--config")
+    fetch_parser.add_argument("--run-id")
+    fetch_parser.add_argument("--dry-run", action="store_true")
+    fetch_parser.add_argument("--reason", default="", help="why this data is being fetched — logged to logs/pull-log.jsonl")
+    fetch_parser.add_argument("--question", default="", help="user's exact question — logged for audit trail")
+    fetch_parser.add_argument("--force", action="store_true", help="re-fetch even if file already exists")
+    fetch_parser.set_defaults(func=fetch)
+
+    boot_parser = sub.add_parser("bootstrap", help="run first-pull query set")
+    boot_parser.add_argument("--from", dest="from_date")
+    boot_parser.add_argument("--to")
+    boot_parser.add_argument("--account")
+    boot_parser.add_argument("--config")
+    boot_parser.add_argument("--run-id")
+    boot_parser.add_argument("--dry-run", action="store_true")
+    boot_parser.add_argument("--keep-going", action="store_true")
+    boot_parser.add_argument("--reason", default="", help="why bootstrap is running — logged to logs/pull-log.jsonl")
+    boot_parser.add_argument("--question", default="", help="user's exact question — logged for audit trail")
+    boot_parser.add_argument("--force", action="store_true", help="re-fetch all windows even if files exist")
+    boot_parser.set_defaults(func=bootstrap)
+
+    lp_parser = sub.add_parser("log-pull", help="write a log entry without fetching (for cache hits)")
+    lp_parser.add_argument("--query", required=True)
+    lp_parser.add_argument("--from", dest="from_date", default="")
+    lp_parser.add_argument("--to", default="")
+    lp_parser.add_argument("--account", default="")
+    lp_parser.add_argument("--reason", default="")
+    lp_parser.add_argument("--question", default="")
+    lp_parser.add_argument("--outcome", default="skipped_wiki", choices=["skipped_wiki", "skipped_raw", "fetched"])
+    lp_parser.set_defaults(func=log_pull_cmd)
+
+    agg_parser = sub.add_parser("aggregate", help="create processed aggregates")
+    agg_parser.add_argument("--source")
+    agg_parser.add_argument(
+        "--grain",
+        default="account_daily",
+        choices=[
+            "account_daily",
+            "account_network_period",
+            "campaign_network_period",
+            "adgroup_network_period",
+            "creative_period",
+            "campaign_weekly_trend",
+        ],
+    )
+    agg_parser.add_argument("--input")
+    agg_parser.add_argument("--output")
+    agg_parser.add_argument("--customer")
+    agg_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
+    agg_parser.set_defaults(func=aggregate)
+
+    val_parser = sub.add_parser("validate-manual", help="validate Bob aggregate against manual aggregate")
+    val_parser.add_argument("--bob", required=True)
+    val_parser.add_argument("--manual", required=True)
+    val_parser.add_argument("--mapping")
+    val_parser.add_argument("--grain", default="date")
+    val_parser.add_argument("--output-prefix")
+    val_parser.set_defaults(func=validate_manual)
+
+    cfg_parser = sub.add_parser("check-config", help="check Google Ads config shape without printing secrets")
+    cfg_parser.add_argument("--config")
+    cfg_parser.add_argument("--account")
+    cfg_parser.set_defaults(func=check_config)
+
+    wk_parser = sub.add_parser("compare-weeks", help="compare performance across two ISO calendar weeks")
+    wk_parser.add_argument("--week", type=int, help="current ISO week number (default: last complete week)")
+    wk_parser.add_argument("--vs", type=int, help="baseline ISO week number (default: current - 1)")
+    wk_parser.add_argument("--year", type=int, help="ISO year for current week (default: current year)")
+    wk_parser.add_argument("--grain", default="both", choices=["account", "campaign", "both"])
+    wk_parser.add_argument("--name-contains", help="filter campaigns by name substring")
+    wk_parser.add_argument("--output", help="write campaign comparison CSV to this path")
+    wk_parser.add_argument("--output-account", help="write account comparison CSV to this path")
+    wk_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
+    wk_parser.add_argument("--all-metrics", action="store_true", help="show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%%, CPA)")
+    wk_parser.set_defaults(func=compare_weeks)
+
+    mo_parser = sub.add_parser("compare-months", help="compare MTD or full-month performance across two calendar months")
+    mo_parser.add_argument("--month", type=int, help="current month 1–12 (default: current month)")
+    mo_parser.add_argument("--vs", type=int, help="baseline month 1–12 (default: current - 1)")
+    mo_parser.add_argument("--year", type=int, help="year for the current month (default: current year)")
+    mo_parser.add_argument("--full", action="store_true", help="compare full calendar months instead of MTD")
+    mo_parser.add_argument("--grain", default="both", choices=["account", "campaign", "both"])
+    mo_parser.add_argument("--name-contains", help="filter campaigns by name substring")
+    mo_parser.add_argument("--output", help="write campaign comparison CSV to this path")
+    mo_parser.add_argument("--output-account", help="write account comparison CSV to this path")
+    mo_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
+    mo_parser.add_argument("--all-metrics", action="store_true", help="show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%%, CPA)")
+    mo_parser.set_defaults(func=compare_months)
+
+    slice_parser = sub.add_parser("slice-campaigns", help="compare a name-filtered campaign segment across two periods")
+    slice_parser.add_argument("--name-contains", required=True, help="case-insensitive substring filter on campaign_name")
+    slice_parser.add_argument(
+        "--period",
+        default="yesterday_vs_sdlw",
+        choices=["yesterday_vs_sdlw", "wow", "mom", "mtd"],
+        help="period pair for auto-detecting processed campaign-network files",
+    )
+    slice_parser.add_argument("--current", help="explicit current-period processed campaign-network CSV")
+    slice_parser.add_argument("--baseline", help="explicit baseline processed campaign-network CSV")
+    slice_parser.add_argument("--output", help="write full comparison CSV to this path")
+    slice_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
+    slice_parser.add_argument("--all-metrics", action="store_true", help="show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%%, CPA)")
+    slice_parser.set_defaults(func=slice_campaigns)
+
+    sc_parser = sub.add_parser("slice-creatives", help="flag LOW-label creatives vs campaign averages")
+    sc_parser.add_argument("--min-impressions", type=float, help="minimum impressions threshold (default: profile.creative_min_impressions or 50000)")
+    sc_parser.add_argument("--output", help="write full flagged CSV to this path")
+    sc_parser.set_defaults(func=slice_creatives)
+
+    scc_parser = sub.add_parser("suggest-creative-copy",
+        help="generate copy plan + compact agent prompt for LOW-action vs BEST text assets")
+    scc_parser.add_argument("--min-impressions", type=float, help="minimum impressions (default: profile or 50000)")
+    scc_parser.add_argument("--output-dir", help="directory for plan + prompt files (default: wiki/action-items/)")
+    scc_parser.add_argument("--batch-size", type=int, default=25,
+        help="max assets per batch prompt file (default: 25)")
+    scc_parser.set_defaults(func=suggest_creative_copy)
+
+    cca_parser = sub.add_parser("creative-copy-apply",
+        help="review and apply an approved copy plan: creates new text assets, pauses old ones")
+    cca_parser.add_argument("--plan", required=True, help="path to creative-copy YAML plan")
+    cca_parser.add_argument("--suggestions", help='JSON from agent: [{"id":1,"text":"..."},...]')
+    cca_parser.set_defaults(func=creative_copy_apply)
+
+    bb_rec_parser = sub.add_parser("bid-budget-recommend", help="generate bid/budget recommendations from weekly trend")
+    bb_rec_parser.add_argument("--trend", help="explicit campaign-trend processed CSV (default: newest in data/processed/campaign-trend/)")
+    bb_rec_parser.add_argument("--bid-budget", help="explicit bid_budget_inputs raw CSV (default: newest in garf/outputs/raw/bid_budget_inputs/)")
+    bb_rec_parser.add_argument("--output", help="write recommendation CSV to this path")
+    bb_rec_parser.add_argument("--yaml-output", help="write mutation plan YAML to this path")
+    bb_rec_parser.add_argument("--goal", choices=["installs", "in_app_conversions"], help="override primary goal from profile")
+    bb_rec_parser.add_argument("--cac-ceiling", help="skip campaigns with CPA above this value (default: profile.cac_ceiling or 200)")
+    bb_rec_parser.add_argument("--change-pct", help="bid/budget change magnitude in %% (default: profile.bid_budget_change_pct or 10, capped at 20)")
+    bb_rec_parser.add_argument("--dry-run", action="store_true", help="print recommendation table without writing files")
+    bb_rec_parser.set_defaults(func=bid_budget_recommend)
+
+    bb_apply_parser = sub.add_parser("bid-budget-apply", help="apply a mutation plan YAML to Google Ads")
+    bb_apply_parser.add_argument("--plan", required=True, help="path to bid-budget YAML plan generated by bid-budget-recommend")
+    bb_apply_parser.set_defaults(func=bid_budget_apply)
+
+    bb_retro_parser = sub.add_parser("bid-budget-retrospective", help="evaluate whether applied bid/budget changes are working")
+    bb_retro_parser.add_argument("--plan", required=True, help="path to applied bid-budget YAML plan")
+    bb_retro_parser.set_defaults(func=bid_budget_retrospective)
+
+    rd_parser = sub.add_parser("resolve-dates", help="resolve a period expression to concrete date ranges")
+    rd_parser.add_argument(
+        "--period", required=True,
+        help="period name: yesterday-vs-sdlw, wow, mom, mtd, 3week-rolling, partial-wow",
+    )
+    rd_parser.add_argument(
+        "--n", type=int, default=3,
+        help="number of days for partial-wow (default: 3)",
+    )
+    rd_parser.set_defaults(func=cmd_resolve_dates)
+
+    sw_parser = sub.add_parser("setup-write-credentials",
+        help="one-time OAuth2 flow to generate write credentials for bid-budget-apply")
+    sw_parser.add_argument("--creds", help="path to google-ads-creds.json (default: ~/google-ads-creds.json)")
+    sw_parser.add_argument("--output", help="where to save the write config yaml (default: from profile)")
+    sw_parser.set_defaults(func=setup_write_credentials)
+
+    ob_parser = sub.add_parser("onboard", help="interactive onboarding — set up a new account")
+    ob_parser.add_argument("--account-id", help="pre-fill customer ID (skip prompt)")
+    ob_parser.set_defaults(func=onboard)
+
+    sa_parser = sub.add_parser("switch-account", help="switch the active Google Ads account")
+    sa_parser.add_argument("--account-id", help="customer ID to switch to (skip menu)")
+    sa_parser.set_defaults(func=switch_account)
+
+    la_parser = sub.add_parser("list-accounts", help="list all registered Google Ads accounts")
+    la_parser.set_defaults(func=list_accounts)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

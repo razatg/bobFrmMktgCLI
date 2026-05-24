@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bob Google Ads"
+  short_description: "Answer Bob Frm Mktg Google Ads performance questions from deterministic GARF slices."
+  default_prompt: "Use this skill to answer Bob Frm Mktg Google Ads app campaign questions about performance, diagnosis, recommendations, creatives, and change history."

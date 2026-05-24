@@ -1,0 +1,124 @@
+{
+  "_description": "Metric catalog for Bob Frm Mktg. Defines what we optimize for, the full acquisition funnel, and every metric formula. Read by agents for context; edit primary_goal_context to reflect why in_app_conversions matters for your app.",
+
+  "primary_goal": "in_app_conversions",
+  "primary_goal_label": "Conversions",
+  "primary_goal_context": "We optimize for in-app conversion events (e.g. first order, signup completion) because install volume alone doesn't predict revenue. CPA is therefore the lead efficiency metric; cost and installs are supporting signals.",
+
+  "funnel": [
+    "Reach (unique users)",
+    "→ Impressions (CPM, Frequency)",
+    "→ Clicks (CTR, CPC)",
+    "→ Installs (CTI)",
+    "→ Conversions (Conv%, CPA)"
+  ],
+
+  "significance_thresholds": {
+    "primary_goal_delta_pct": 10,
+    "cost_delta_pct": 15,
+    "ratio_delta_pp": 1,
+    "note": "Any of these triggers auto-escalation to delta diagnosis without waiting for user to ask"
+  },
+
+  "metrics": [
+    {
+      "key": "reach",
+      "label": "Users",
+      "formula": "metrics.unique_users (Google Ads API — not additive across networks)",
+      "kind": "count",
+      "description": "Unique users who saw at least one ad in the period."
+    },
+    {
+      "key": "impressions",
+      "label": "Impressions",
+      "formula": "metrics.impressions",
+      "kind": "count",
+      "description": "Total ad impressions served."
+    },
+    {
+      "key": "cpm",
+      "label": "CPM",
+      "formula": "cost / impressions × 1000",
+      "kind": "cost",
+      "description": "Cost per thousand impressions. Lower = more efficient buying."
+    },
+    {
+      "key": "frequency",
+      "label": "Frequency",
+      "formula": "impressions / reach",
+      "kind": "ratio",
+      "description": "Average number of times each unique user saw an ad. High frequency can signal saturation."
+    },
+    {
+      "key": "clicks",
+      "label": "Clicks",
+      "formula": "metrics.clicks",
+      "kind": "count",
+      "description": "Total ad clicks."
+    },
+    {
+      "key": "ctr_percent",
+      "label": "CTR %",
+      "formula": "clicks / impressions × 100",
+      "kind": "percent",
+      "description": "Click-through rate. Low CTR often points to creative or audience relevance issues."
+    },
+    {
+      "key": "cpc",
+      "label": "CPC",
+      "formula": "cost / clicks",
+      "kind": "cost",
+      "description": "Cost per click."
+    },
+    {
+      "key": "installs",
+      "label": "Installs",
+      "formula": "metrics.biddable_app_install_conversions",
+      "kind": "count",
+      "description": "App installs attributed to ads."
+    },
+    {
+      "key": "cti_percent",
+      "label": "CTI %",
+      "formula": "installs / clicks × 100",
+      "kind": "percent",
+      "description": "Click-to-install rate. Measures post-click landing page + store page quality."
+    },
+    {
+      "key": "goal_conversions",
+      "label": "Conversions",
+      "formula": "installs  (when primary_goal=installs)  OR  in_app_conversions  (when primary_goal=in_app_conversions)",
+      "kind": "count",
+      "description": "The primary goal metric — the number that drives bid optimization."
+    },
+    {
+      "key": "conversion_rate_percent",
+      "label": "Conv %",
+      "formula": "goal_conversions / clicks × 100",
+      "kind": "percent",
+      "description": "Conversion rate from click. Combines CTI and post-install conversion quality."
+    },
+    {
+      "key": "cpa",
+      "label": "CPA",
+      "formula": "cost / goal_conversions",
+      "kind": "cost",
+      "description": "Cost per acquisition (primary goal event). The lead efficiency metric for bid decisions. Lower = better."
+    },
+    {
+      "key": "cpi",
+      "label": "CPI",
+      "formula": "cost / installs",
+      "kind": "cost",
+      "description": "Cost per install. Secondary efficiency metric — always based on installs, regardless of primary_goal. Useful when install volume matters alongside post-install conversion quality."
+    }
+  ],
+
+  "zero_denominator_policy": "All ratio metrics return 'NA' when the denominator is zero. Never return NaN or 0 for ratios.",
+
+  "do_not_select": [
+    "metrics.ctr",
+    "metrics.average_cpc"
+  ],
+  "do_not_select_reason": "Pre-computed API averages are averages-of-averages when aggregated across a period. Always recalculate from raw sums (clicks, impressions, cost)."
+}

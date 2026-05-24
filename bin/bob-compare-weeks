@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Compare performance across two ISO calendar weeks.
+# Usage: bob-compare-weeks [--week N] [--vs M] [--year YYYY] [--grain account|campaign|both]
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/../lib/datapull.py" compare-weeks "$@"
