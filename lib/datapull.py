@@ -152,19 +152,32 @@ DEFAULT_TOLERANCES = {
 
 NETWORK_DISPLAY_NAMES: dict[str, str] = {
     "0": "Unspecified", "1": "Unknown",
-    "2": "Search",      "3": "Search Partners",
-    "4": "Display",     "5": "YouTube Search",
-    "6": "YouTube",     "7": "Mixed",
-    "8": "Play",
-    # Legacy text values from older raw files
-    "SEARCH": "Search", "SEARCH_PARTNERS": "Search Partners",
-    "CONTENT": "Display", "YOUTUBE_SEARCH": "YouTube Search",
+    "2": "Google Search", "3": "Search partners",
+    "4": "Google Display Network", "5": "YouTube Search",
+    "6": "YouTube",     "7": "Mixed",     "8": "YouTube",
+    "9": "Google TV",   "10": "Google Owned Channels",
+    "11": "Gmail",      "12": "Discover",  "13": "Maps",
+    # Text values from raw files and newer Google Ads API enum names
+    "UNSPECIFIED": "Unspecified", "UNKNOWN": "Unknown",
+    "SEARCH": "Google Search", "SEARCH_PARTNERS": "Search partners",
+    "CONTENT": "Google Display Network", "YOUTUBE_SEARCH": "YouTube Search",
     "YOUTUBE_WATCH": "YouTube", "MIXED": "Mixed",
-    "GOOGLE_PLAY": "Play",
+    "YOUTUBE": "YouTube",
+    "GOOGLE_TV": "Google TV", "GOOGLE_OWNED_CHANNELS": "Google Owned Channels",
+    "GMAIL": "Gmail", "DISCOVER": "Discover", "MAPS": "Maps",
+    # Already-canonical historical labels
+    "Search": "Google Search", "Search Partners": "Search partners",
+    "Display": "Google Display Network", "Play": "YouTube",
 }
 
+def _canonical_network(value: Any) -> str:
+    """Return a stable display key for Google Ads network enum values."""
+    text = str(value).strip()
+    return NETWORK_DISPLAY_NAMES.get(text, NETWORK_DISPLAY_NAMES.get(text.upper(), text))
+
+
 def _display_network(code: str) -> str:
-    return NETWORK_DISPLAY_NAMES.get(str(code).strip(), str(code))
+    return _canonical_network(code)
 
 
 _NETWORK_PERIOD_KEY_COLS: dict[str, list[str]] = {
@@ -425,6 +438,35 @@ def newest_raw(query_name: str) -> Path:
     if not files:
         die(f"no raw CSV found for {query_name} in {query_dir}")
     return files[0]
+
+
+def find_raw_file_for_period(
+    query_name: str,
+    start: dt.date,
+    end: dt.date,
+    customer_id: str | None = None,
+) -> Path | None:
+    """Return the newest raw CSV for an exact query/customer/date window."""
+    query_dir = RAW_DIR / query_name
+    if not query_dir.exists():
+        return None
+
+    normalized_customer = customer_id.replace("-", "") if customer_id else ""
+    matches: list[Path] = []
+    for p in query_dir.glob("*.csv"):
+        parts = p.stem.split("_")
+        # filename: {customer_id}_{YYYY-MM-DD}_{YYYY-MM-DD}_{run_id}
+        if len(parts) < 4:
+            continue
+        file_customer, file_start, file_end = parts[0], parts[1], parts[2]
+        if normalized_customer and file_customer.replace("-", "") != normalized_customer:
+            continue
+        if file_start == start.isoformat() and file_end == end.isoformat():
+            matches.append(p)
+
+    if not matches:
+        return None
+    return sorted(matches, key=lambda p: (p.stem.split("_")[-1], p.stat().st_mtime), reverse=True)[0]
 
 
 def find_period_files(query_name: str, n: int) -> list[Path]:
@@ -820,6 +862,24 @@ def _build_comparison_rows(
     primary_goal: str,
 ) -> list[dict[str, Any]]:
     """Aggregate both sets by key_cols, join, and compute delta_pct columns."""
+    def _canonicalize_network_rows(rows: list[dict]) -> list[dict]:
+        if "network" not in key_cols:
+            return rows
+        out = []
+        for row in rows:
+            normalized = dict(row)
+            normalized["network"] = _canonical_network(row.get("network", ""))
+            out.append(normalized)
+        return out
+
+    def _canonicalize_key_cols(row: dict) -> dict:
+        out = {col: row.get(col, "") for col in key_cols}
+        if "network" in out:
+            out["network"] = _canonical_network(out["network"])
+        return out
+
+    current_rows = _canonicalize_network_rows(current_rows)
+    baseline_rows = _canonicalize_network_rows(baseline_rows)
     cur_agg = {
         tuple(r.get(c, "") for c in key_cols): r
         for r in _aggregate_period_rows(current_rows, key_cols, primary_goal)
@@ -833,7 +893,7 @@ def _build_comparison_rows(
         cur = cur_agg.get(key, {})
         base = base_agg.get(key, {})
         rep = cur or base
-        row: dict[str, Any] = {col: rep.get(col, "") for col in key_cols}
+        row: dict[str, Any] = _canonicalize_key_cols(rep)
         for m in _COMPARISON_VOLUME_METRICS:
             c_val = number(cur.get(m, 0))
             b_val = number(base.get(m, 0))
@@ -925,14 +985,33 @@ def _agg_network_period(
     args: argparse.Namespace, profile: dict, grain: str, primary_goal: str
 ) -> None:
     source = args.source or grain
-    input_path = Path(args.input).expanduser() if args.input else newest_raw(source)
+    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    from_date = getattr(args, "from_date", None)
+    to_date = getattr(args, "to", None)
+    if args.input:
+        input_path = Path(args.input).expanduser()
+    elif from_date or to_date:
+        if not from_date or not to_date:
+            die("aggregate period selection requires both --from and --to")
+        try:
+            start = dt.date.fromisoformat(from_date)
+            end = dt.date.fromisoformat(to_date)
+        except ValueError:
+            die("--from and --to must be ISO dates: YYYY-MM-DD")
+        selected = find_raw_file_for_period(source, start, end, customer)
+        if not selected:
+            die(f"no raw CSV found for {source} {start}–{end} for account {customer}")
+        input_path = selected
+    else:
+        input_path = newest_raw(source)
     rows = read_csv(input_path)
+    for row in rows:
+        row["network"] = _canonical_network(row.get("network", ""))
     out_rows = _aggregate_period_rows(rows, _NETWORK_PERIOD_KEY_COLS[grain], primary_goal)
 
     parts = input_path.stem.split("_")
     file_start = parts[1] if len(parts) >= 3 else "unknown"
     file_end = parts[2] if len(parts) >= 3 else "unknown"
-    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
     if args.output:
         output_path = Path(args.output).expanduser()
     else:
@@ -1299,16 +1378,19 @@ def compare_weeks(args: argparse.Namespace) -> None:
 
         if not cur_path or not base_path:
             all_ok = False
-            missing = []
+            missing_windows = []
             if not cur_path:
-                missing.append(f"W{cur_week} ({cur_start}–{cur_end})")
+                missing_windows.append((cur_week, cur_start, cur_end))
             if not base_path:
-                missing.append(f"W{base_week} ({base_start}–{base_end})")
+                missing_windows.append((base_week, base_start, base_end))
+            missing = [f"W{week} ({start}–{end})" for week, start, end in missing_windows]
             print(f"\n[{grain_name}] processed files missing for: {', '.join(missing)}")
             print("Fetch and aggregate:")
-            for start, end in [(cur_start, cur_end), (base_start, base_end)]:
-                print(f"  python3 lib/datapull.py fetch --query {grain_name} --from {start} --to {end}")
-            print(f"  python3 lib/datapull.py aggregate --grain {grain_name}")
+            for _, start, end in missing_windows:
+                raw_path = find_raw_file_for_period(grain_name, start, end, customer_id)
+                if not raw_path:
+                    print(f"  python3 lib/datapull.py fetch --query {grain_name} --from {start} --to {end}")
+                print(f"  python3 lib/datapull.py aggregate --grain {grain_name} --from {start} --to {end}")
             continue
 
         cur_rows = read_csv(cur_path)
@@ -3495,6 +3577,8 @@ def build_parser() -> argparse.ArgumentParser:
         ],
     )
     agg_parser.add_argument("--input")
+    agg_parser.add_argument("--from", dest="from_date", help="select raw period start date (YYYY-MM-DD)")
+    agg_parser.add_argument("--to", help="select raw period end date (YYYY-MM-DD)")
     agg_parser.add_argument("--output")
     agg_parser.add_argument("--customer")
     agg_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])

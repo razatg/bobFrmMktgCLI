@@ -8,6 +8,21 @@ Add entries under **Bug Reports** when Bob did something wrong. Add entries unde
 
 ## Bug Reports
 
+### [BUG] 2026-05-26 — campaign week aggregate skipped W21 raw slice for Rapido Demand
+**User said:** "can you share diffs in top top campaigns for the same period"
+**What happened:** Bob fetched raw `campaign_network_period` files for Rapido Demand for `2026-05-18` to `2026-05-24` and `2026-05-11` to `2026-05-17`, but `aggregate --grain campaign_network_period` only wrote the W20 processed slice and `compare-weeks --week 21 --vs 20 --year 2026 --grain campaign` still reported both weeks as missing.
+**What's needed:** The campaign aggregate and compare-week lookup need to recognise freshly fetched closed-week campaign slices for the active account so Bob can rank top campaign movers.
+
+### [BUG] 2026-05-25 — compare-weeks failed to detect existing W21 processed slice for Rapido Demand
+**User said:** "I meant the last week and last to last week comparsion not this iso week which has just started so iso week 21 vs 20"
+**What happened:** Bob fetched and aggregated `account_network_period` for Rapido Demand W21 (`2026-05-18` to `2026-05-24`), which created `/data/processed/3546923408/account-network/354-692-3408_2026-05-18_2026-05-24.csv`, but `python3 lib/datapull.py compare-weeks --week 21 --vs 20 --year 2026 --grain account` still reported the W21 processed file as missing.
+**What's needed:** `compare-weeks` needs to look up the active account's processed week files correctly so closed-week comparisons work after a successful fetch and aggregate.
+
+### [BUG] 2026-05-25 — Partial week comparison fetch failed for Rapido Demand
+**User said:** "can you compare this week vs the last week"
+**What happened:** Bob switched to the Rapido Demand account and attempted live `account_network_period` fetches for 2026-05-25 and 2026-05-18, but both GARF pulls failed so the comparison could not be produced.
+**What's needed:** Bob needs a reliable path to fetch and compare partial current-week windows for a selected account, or a clearer recoverable error flow when GARF fails on valid account/date requests.
+
 ### [BUG] 2026-05-22 — Approval phrase routed to failsafe instead of bid-budget-apply
 **User said:** "okay go ahead and make live"
 **What happened:** Bob logged this as an unanswerable question instead of recognising it as approval to apply the current bid/budget plan.
