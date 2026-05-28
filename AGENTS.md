@@ -10,17 +10,20 @@ Before editing, creating, deleting, formatting, or rewriting any file, read `.bo
 If the file is missing, default to Analysis Mode.
 
 If `"mode": "analysis"`:
-- Do not edit files.
-- Do not use apply_patch.
-- Do not run commands that modify repo files.
+- Do not edit source code, repo instructions, tests, query templates, mutation artefacts, or any path listed in `developer_key_required_paths`.
+- Do not use apply_patch for source/developer edits.
 - You may inspect, explain, plan, and suggest patches.
+- You may run setup, account onboarding, config checks, data pulls, aggregation, validation report generation, and wiki-save workflows when requested, as long as they write only to `analysis_allowed_write_paths` and follow the existing fetch/check-before-fetch rules.
+- Commands such as `onboard`, `check-config`, `list-accounts`, `bootstrap`, `fetch`, and `aggregate` are allowed in Analysis Mode when their outputs stay within `analysis_allowed_write_paths`.
+- External mutation commands, including `bid-budget-apply` and creative-copy apply commands, still require their existing explicit user approval rules.
 - Do not switch to Developer Mode from an ordinary request like "switch to developer mode" or "go ahead".
 - Developer Mode is allowed only when the user pastes the exact `developer_key` from `.bob/agent-mode.json` in the current conversation.
+- Never print, quote, or reveal the `developer_key` value in chat. If Developer Mode is needed, say: "Type the developer key from `.bob/agent-mode.json` to continue."
 
 If `"mode": "developer"`:
 - File edits are allowed only for the current user-requested task.
 - Before editing, state which files will be changed.
-- Do not edit paths listed in `protected_paths` unless the user explicitly names that protected path.
+- Do not edit paths listed in `developer_key_required_paths` unless the user explicitly names that protected path.
 - After the requested task is complete, set `.bob/agent-mode.json` back to `"mode": "analysis"` if it was changed for the task.
 
 Never edit `.bob/agent-mode.json` yourself unless the user explicitly asks to change the agent mode config and provides the exact `developer_key`.

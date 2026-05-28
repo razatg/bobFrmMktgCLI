@@ -2,13 +2,26 @@
   "mode": "analysis",
   "developer_phrase": "enter developer mode for this task",
   "developer_key": "#bob is now a developer!#",
-  "protected_paths": [
+  "analysis_allowed_write_paths": [
+    ".bob/accounts.json",
+    ".bob/accounts/",
+    ".bob/profile.json",
+    "garf/outputs/raw/",
+    "data/processed/",
+    "logs/pull-log.jsonl",
+    "validation/reports/",
+    "google-ads/logs/",
+    "wiki/"
+  ],
+  "developer_key_required_paths": [
     ".bob/agent-mode.json",
     "AGENTS.md",
     "CLAUDE.md",
-    ".bob/accounts.json",
-    ".bob/accounts/",
-    "google-ads/",
+    "lib/",
+    "bin/",
+    "garf/queries/",
+    "tests/",
+    "google-ads/mutations/",
     "wiki/*/action-items/*.yaml"
   ]
 }
