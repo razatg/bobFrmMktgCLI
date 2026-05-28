@@ -1,0 +1,14 @@
+{
+  "mode": "analysis",
+  "developer_phrase": "enter developer mode for this task",
+  "developer_key": "#bob is now a developer!#",
+  "protected_paths": [
+    ".bob/agent-mode.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".bob/accounts.json",
+    ".bob/accounts/",
+    "google-ads/",
+    "wiki/*/action-items/*.yaml"
+  ]
+}

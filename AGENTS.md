@@ -3,6 +3,28 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 See also: `CLAUDE.md`.
 
+## Agent Mode
+
+Before editing, creating, deleting, formatting, or rewriting any file, read `.bob/agent-mode.json`.
+
+If the file is missing, default to Analysis Mode.
+
+If `"mode": "analysis"`:
+- Do not edit files.
+- Do not use apply_patch.
+- Do not run commands that modify repo files.
+- You may inspect, explain, plan, and suggest patches.
+- Do not switch to Developer Mode from an ordinary request like "switch to developer mode" or "go ahead".
+- Developer Mode is allowed only when the user pastes the exact `developer_key` from `.bob/agent-mode.json` in the current conversation.
+
+If `"mode": "developer"`:
+- File edits are allowed only for the current user-requested task.
+- Before editing, state which files will be changed.
+- Do not edit paths listed in `protected_paths` unless the user explicitly names that protected path.
+- After the requested task is complete, set `.bob/agent-mode.json` back to `"mode": "analysis"` if it was changed for the task.
+
+Never edit `.bob/agent-mode.json` yourself unless the user explicitly asks to change the agent mode config and provides the exact `developer_key`.
+
 ## Project Overview
 
 Bob Frm Mktg is a CLI-first performance marketing automation tool for Google Ads app campaign analysis. It answers natural language questions about campaign performance using deterministic data pulls (via GARF) and reproducible metric calculations.
