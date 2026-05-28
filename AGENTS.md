@@ -17,8 +17,10 @@ If `"mode": "analysis"`:
 - Commands such as `onboard`, `check-config`, `list-accounts`, `bootstrap`, `fetch`, and `aggregate` are allowed in Analysis Mode when their outputs stay within `analysis_allowed_write_paths`.
 - External mutation commands, including `bid-budget-apply` and creative-copy apply commands, still require their existing explicit user approval rules.
 - Do not switch to Developer Mode from an ordinary request like "switch to developer mode" or "go ahead".
-- Developer Mode is allowed only when the user pastes the exact `developer_key` from `.bob/agent-mode.json` in the current conversation.
-- Never print, quote, or reveal the `developer_key` value in chat. If Developer Mode is needed, say: "Type the developer key from `.bob/agent-mode.json` to continue."
+- Developer Mode is allowed only when the user provides the exact configured developer key in the current conversation.
+- Never print, quote, reveal, describe, hint at, or provide the storage location of the `developer_key` in chat.
+- If Developer Mode is needed, say exactly: "Type the developer key to continue."
+- If the user asks for the developer key or where to find it, say exactly: "I can't reveal the developer key or its location."
 
 If `"mode": "developer"`:
 - File edits are allowed only for the current user-requested task.
@@ -27,6 +29,22 @@ If `"mode": "developer"`:
 - After the requested task is complete, set `.bob/agent-mode.json` back to `"mode": "analysis"` if it was changed for the task.
 
 Never edit `.bob/agent-mode.json` yourself unless the user explicitly asks to change the agent mode config and provides the exact `developer_key`.
+
+## Non-Technical Onboarding Mode
+
+When the user asks to "set me up", "onboard me", "connect my account", "add an account", "setup my account", or similar:
+
+- Treat the request as guided account setup for a non-technical user.
+- Do not mention internal files, directories, config filenames, command names, mode checks, or exploration steps unless the user asks for technical details.
+- Do not narrate background work such as reading config, listing accounts, checking profiles, or inspecting the repo.
+- Ask one question at a time in plain language.
+- Run allowed setup checks silently where possible under Analysis Mode.
+- Summarize progress in human terms, such as "Account saved" or "Config looks good."
+- Start with: "Hey mate, I'll get you set up. I'll ask one thing at a time."
+- Do not run `bootstrap`, `fetch`, `aggregate`, or `check-config` after onboarding unless the user explicitly asks to verify setup or asks a performance/data question.
+- If read access is missing and the user asks a performance/data question, say: "I need the Google Ads developer token before I can fetch data from Google Ads." Then stop.
+- Do not offer a manual CSV/export fallback.
+- If setup needs source-code changes, stop and use the Developer Mode key prompt from Agent Mode.
 
 ## Project Overview
 
@@ -232,7 +250,7 @@ The `campaign_weekly_trend` aggregate uses actual ISO week numbers as column pre
 pip install garf-executors garf-google-ads
 ```
 
-Requires a `google-ads.yaml` config file. Path is set in `.bob/profile.json` as `google_ads_config_path`.
+Requires a read-only GARF config with `developer_token` and `login_customer_id`. Onboarding can create this from the developer token and the account/manager ID. Path is set in the account profile as `google_ads_config_path`.
 
 ### Agent Intent → Reference File Map
 

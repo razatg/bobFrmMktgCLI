@@ -551,6 +551,8 @@ def fetch(args: argparse.Namespace) -> None:
         die("google_ads_customer_id missing from profile and --account not provided")
     account = str(account).replace("-", "")
     config = args.config or profile.get("google_ads_config_path")
+    if not config and not args.dry_run:
+        die("I need the Google Ads developer token before I can fetch data from Google Ads.")
     if config:
         config = str(Path(config).expanduser())
 
@@ -1636,7 +1638,9 @@ def validate_manual(args: argparse.Namespace) -> None:
 
 def check_config(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
-    config = args.config or profile.get("google_ads_config_path") or "~/google-ads-garf.yaml"
+    config = args.config or profile.get("google_ads_config_path")
+    if not config:
+        die("I need the Google Ads developer token before I can fetch data from Google Ads.")
     config_path = Path(config).expanduser()
     if not config_path.exists():
         die(f"Google Ads GARF config not found: {config_path}\nExpected at {config_path} — create it or set google_ads_config_path in your account profile (.bob/accounts/<id>/profile.json)")
@@ -1649,8 +1653,8 @@ def check_config(args: argparse.Namespace) -> None:
         key, value = line.split(":", 1)
         keys[key.strip()] = value.strip().strip("\"'")
 
-    # GARF read config — no client_secret or refresh_token required
-    expected = ["developer_token", "client_id", "login_customer_id"]
+    # GARF read config — no OAuth client credentials required
+    expected = ["developer_token", "login_customer_id"]
     print(f"GARF read config: {config_path}")
     for key in expected:
         value = keys.get(key, "")
@@ -3154,7 +3158,6 @@ _GARF_READ_FORMAT = """\
   GARF read config format (google-ads-garf.yaml):
   ┌──────────────────────────────────────────┐
   │ developer_token: YOUR_TOKEN              │
-  │ client_id: YOUR_CLIENT_ID               │
   │ login_customer_id: 1234567890           │  ← MCC ID, no hyphens
   └──────────────────────────────────────────┘"""
 
@@ -3219,12 +3222,26 @@ def _check_config_path(path_str: str, is_write_config: bool = False) -> list[str
             key = line.split(":", 1)[0].strip()
             present.add(key)
     # Write config (bid-budget-apply) requires full OAuth2 credentials
-    # GARF read config only needs developer_token, client_id, login_customer_id
+    # GARF read config only needs developer_token and login_customer_id
     if is_write_config:
         required = {"developer_token", "client_id", "client_secret", "refresh_token", "login_customer_id"}
     else:
-        required = {"developer_token", "client_id", "login_customer_id"}
+        required = {"developer_token", "login_customer_id"}
     return sorted(required - present)
+
+
+def _yaml_scalar(value: str) -> str:
+    return json.dumps(str(value))
+
+
+def _write_garf_read_config(path_str: str, developer_token: str, login_customer_id: str) -> None:
+    path = Path(path_str).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = (
+        f"developer_token: {_yaml_scalar(developer_token)}\n"
+        f"login_customer_id: {_yaml_scalar(login_customer_id.replace('-', ''))}\n"
+    )
+    path.write_text(text)
 
 
 def _print_section(title: str) -> None:
@@ -3285,7 +3302,7 @@ def onboard(args: argparse.Namespace) -> None:
 
     # ── MCC ──────────────────────────────────────────────────────────────────
     _print_section("MCC (Manager Account)")
-    print("  Your MCC ID is the login_customer_id in your google-ads-garf.yaml.")
+    print("  This is usually your manager account ID. Skip it if you do not use one.")
     while True:
         mcc_id = _ob_prompt("MCC ID (e.g. 123-456-7890) — type 'skip' to leave blank")
         if not mcc_id or mcc_id.lower() == "skip":
@@ -3325,37 +3342,55 @@ def onboard(args: argparse.Namespace) -> None:
     currency = cur_key
 
     # ── GOOGLE ADS READ CONFIG ────────────────────────────────────────────────
-    _print_section("Google Ads Read Config (GARF)")
-    print(_GARF_READ_FORMAT)
-    print()
+    _print_section("Google Ads Data Access")
     google_ads_config_path = ""
     while True:
-        raw_path = _ob_prompt("Path to google-ads-garf.yaml (Enter to skip and add later)", "~/google-ads-garf.yaml")
-        if not raw_path:
-            print(f"  No worries — add google_ads_config_path to .bob/accounts/{cid.replace('-','')}/profile.json when you're ready.")
-            break
-        missing = _check_config_path(raw_path)
-        if missing and missing[0] == "FILE NOT FOUND":
-            print(f"  File not found at {Path(raw_path).expanduser()}. Check the path or Enter to skip.")
+        has_token = _ob_prompt("For downloading data from Google Ads I need the developer token. Do you have it? (y/n)", "y").lower()
+        if has_token not in {"y", "yes", "n", "no"}:
+            print("  Reply y or n.")
             continue
-        if missing:
-            print(f"  Config found but missing keys: {', '.join(missing)}. Saving path anyway.")
-        google_ads_config_path = raw_path
+        if has_token in {"n", "no"}:
+            print("  No worries — you can add the developer token later before pulling data.")
+            break
+        developer_token = _ob_prompt("Developer token")
+        if not developer_token:
+            print("  Developer token is required to set up data downloads. Reply n to skip for now.")
+            continue
+        google_ads_config_path = "~/google-ads-garf.yaml"
+        login_customer_id = (mcc_id or cid).replace("-", "")
+        config_path = Path(google_ads_config_path).expanduser()
+        if config_path.exists():
+            replace = _ob_prompt("I found existing Google Ads data access settings. Replace them? (y/n)", "n").lower()
+            if replace not in {"y", "yes"}:
+                print("  Keeping the existing data access settings.")
+                break
+        _write_garf_read_config(google_ads_config_path, developer_token, login_customer_id)
+        print("  Data access settings saved.")
         break
 
     # ── GOOGLE ADS WRITE CONFIG ───────────────────────────────────────────────
-    _print_section("Google Ads Write Config (bid/budget mutations — optional)")
-    print(_WRITE_CONFIG_FORMAT)
-    print()
+    _print_section("Google Ads Write Access (optional)")
     google_ads_write_config_path = ""
-    raw_write = _ob_prompt("Path to write config yaml (Enter to skip)")
-    if raw_write:
-        missing_w = _check_config_path(raw_write, is_write_config=True)
-        if missing_w and missing_w[0] != "FILE NOT FOUND" and missing_w:
-            print(f"  Config found but missing keys: {', '.join(missing_w)}. Saving path anyway.")
-        elif missing_w and missing_w[0] == "FILE NOT FOUND":
-            print(f"  File not found. Saving path anyway — create it later with: python3 lib/datapull.py setup-write-credentials")
-        google_ads_write_config_path = raw_write
+    write_creds_json_path = ""
+    while True:
+        has_api_json = _ob_prompt("I need the Google Ads API keys to write changes back to Google Ads. Do you have the OAuth client JSON? (y/n)", "n").lower()
+        if has_api_json not in {"y", "yes", "n", "no"}:
+            print("  Reply y or n.")
+            continue
+        if has_api_json in {"n", "no"}:
+            print("  No worries — write access can be added later.")
+            break
+        print("  Download it from Google Cloud Console → OAuth 2.0 Client IDs → Download JSON.")
+        print("  Save it somewhere on this machine, then paste the full path here.")
+        raw_creds = _ob_prompt("Path to OAuth client JSON", "~/google-ads-creds.json")
+        creds_path = Path(raw_creds).expanduser()
+        if not creds_path.exists():
+            print("  I can't find that JSON file. Check where you saved it, or reply n to skip for now.")
+            continue
+        google_ads_write_config_path = "~/google-ads-api.yaml"
+        write_creds_json_path = raw_creds
+        print("  Got it — I'll turn that JSON into write access settings after saving the account.")
+        break
 
     # ── OPTIONAL DEFAULTS ─────────────────────────────────────────────────────
     _print_section("Optional Defaults")
@@ -3417,28 +3452,37 @@ def onboard(args: argparse.Namespace) -> None:
 
     print(f"\n  Saved to .bob/accounts/{cid.replace('-','')}/profile.json")
 
+    if write_creds_json_path:
+        print("\n  Setting up Google Ads write access now.")
+        setup_write_credentials(
+            argparse.Namespace(
+                creds=write_creds_json_path,
+                output=google_ads_write_config_path,
+            )
+        )
+
     # ── DONE ──────────────────────────────────────────────────────────────────
-    data_path = account_processed_dir(cid, "account-network")
-    wiki_path = account_wiki_dir(cid)
+    read_status = (
+        "Data access is ready. I'll pull data only when you ask a performance question."
+        if google_ads_config_path
+        else "Data access is not ready yet. I need the Google Ads developer token before I can fetch data from Google Ads."
+    )
+    write_status = (
+        "Write access is ready."
+        if google_ads_write_config_path
+        else "Write access is not set up. No dramas — I can still save recommendations to the wiki for you to apply manually in Google Ads."
+    )
     print(f"""
   Righto, {account_name} is set up.
 
-  Data:  {data_path.parent}
-  Wiki:  {wiki_path}
+  {read_status}
+  {write_status}
 
-  Pull your first data:
-    python3 lib/datapull.py bootstrap
-
-  Then pick a question to start with:
-    1) What happened yesterday?
-       → python3 lib/datapull.py compare-weeks --grain account
-    2) How did last week compare to the week before?
-       → python3 lib/datapull.py compare-weeks
-    3) Which campaigns are underperforming?
-       → python3 lib/datapull.py compare-weeks --grain campaign
-
-  Or verify your config first:
-    python3 lib/datapull.py check-config
+  Good first questions to ask next:
+  1) What happened yesterday?
+  2) How did yesterday compare to the same day last week?
+  3) How did last week compare to the week before?
+  4) Which campaigns are dragging?
 """)
 
 

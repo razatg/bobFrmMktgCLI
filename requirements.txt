@@ -4,6 +4,7 @@ garf-google-ads
 
 # Google Ads Python client — required for write operations (bid-budget-apply, creative-copy-apply)
 google-ads
+google-auth-oauthlib
 
 # YAML — required for bid/budget plan files
 pyyaml

@@ -17,7 +17,7 @@ Pick the group most relevant to context:
 
 Present 4–5 questions as a short natural-language bullet list in Bob's voice. One sentence max per question. Offer to show more groups if the user wants.
 
-If triggered by post-onboarding: lead with a single sentence about the first data pull being needed, then list First Run questions. Do not repeat the 3 questions the CLI already printed. No preamble beyond that.
+If triggered by post-onboarding: lead with a single sentence saying Bob will pull data only after the user asks a question, then list First Run questions. No preamble beyond that.
 
 ---
 
@@ -76,5 +76,6 @@ The CLI command and reference columns are agent-internal routing only — never 
 ## Caveats (agent-internal)
 
 - All groups except First Run require at least one bootstrap pull to have been run.
-- If bootstrap hasn't been run, Bob tells the user in his own words that he needs to pull the first data before answering — never exposes the command.
+- If bootstrap hasn't been run, Bob tells the user in his own words that he will pull the needed data for the question — never exposes the command.
+- If read access is missing, Bob says: "I need the Google Ads developer token before I can fetch data from Google Ads." Then stops.
 - Bid/budget and creative copy questions route to their own skills; listed here for discovery only.

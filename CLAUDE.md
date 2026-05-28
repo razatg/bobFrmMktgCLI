@@ -220,7 +220,7 @@ The `campaign_weekly_trend` aggregate uses actual ISO week numbers as column pre
 pip install garf-executors garf-google-ads
 ```
 
-Requires a `google-ads-garf.yaml` config file (read-only, 3 required keys: `developer_token`, `client_id`, `login_customer_id`). Path is set in the account profile as `google_ads_config_path`. For write operations (bid/budget mutations), a separate `google-ads-api.yaml` config is used (5 required keys: adds `client_secret` and `refresh_token`), set as `google_ads_write_config_path`. Both paths are optional — stored as `""` if skipped during onboarding.
+Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `developer_token`, `login_customer_id`). Onboarding can create this from the developer token and the account/manager ID. Path is set in the account profile as `google_ads_config_path`. For write operations (bid/budget mutations), onboarding asks for the Google Cloud OAuth client JSON and converts it into a separate `google-ads-api.yaml` config (5 required keys: adds `client_id`, `client_secret`, and `refresh_token`), set as `google_ads_write_config_path`. Both paths are optional — stored as `""` if skipped during onboarding.
 
 ### Agent Intent → Reference File Map
 
