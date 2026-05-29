@@ -30,64 +30,66 @@ ls data/processed/<customer_id_no_hyphens>/<subdir>/  # list processed files for
 
 **Run the main data tool:**
 ```bash
-python3 lib/datapull.py <subcommand> [options]
+./bob <subcommand> [options]
 ```
+
+After onboarding, prefer `./bob` for all commands so the project virtual environment is used. Use `python3 lib/datapull.py onboard` only to start onboarding before the launcher exists.
 
 **Common subcommands:**
 ```bash
 # Bootstrap: fetch all default period windows (~16 small API calls)
-python3 lib/datapull.py bootstrap [--account ID] [--dry-run]
+./bob bootstrap [--account ID] [--dry-run]
 
 # Fetch a single query for a specific date range
 # --reason is required by convention — logged to logs/pull-log.jsonl with every live fetch
-python3 lib/datapull.py fetch --query account_network_period --from 2026-05-13 --to 2026-05-19 --reason "TEXT"
-python3 lib/datapull.py fetch --query adgroup_network_period --from DATE --to DATE --reason "TEXT"  # Tier 3
+./bob fetch --query account_network_period --from 2026-05-13 --to 2026-05-19 --reason "TEXT"
+./bob fetch --query adgroup_network_period --from DATE --to DATE --reason "TEXT"  # Tier 3
 
 # Create processed aggregates from raw outputs
-python3 lib/datapull.py aggregate --grain account_network_period
-python3 lib/datapull.py aggregate --grain campaign_network_period
-python3 lib/datapull.py aggregate --grain creative_period
-python3 lib/datapull.py aggregate --grain campaign_weekly_trend  # reads 3 most recent campaign_network_period files
-python3 lib/datapull.py aggregate --grain account_daily --source campaign_daily  # legacy daily grain
+./bob aggregate --grain account_network_period
+./bob aggregate --grain campaign_network_period
+./bob aggregate --grain creative_period
+./bob aggregate --grain campaign_weekly_trend  # reads 3 most recent campaign_network_period files
+./bob aggregate --grain account_daily --source campaign_daily  # legacy daily grain
 
 # Compare two ISO calendar weeks (defaults: last complete week vs prior week)
-python3 lib/datapull.py compare-weeks [--week N] [--vs M] [--year YYYY] [--grain account|campaign|both]
-python3 lib/datapull.py compare-weeks --week 20 --vs 19 --name-contains "Stable"  # with campaign filter
-python3 lib/datapull.py compare-weeks --all-metrics  # show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%, CPA)
+./bob compare-weeks [--week N] [--vs M] [--year YYYY] [--grain account|campaign|both]
+./bob compare-weeks --week 20 --vs 19 --name-contains "Stable"  # with campaign filter
+./bob compare-weeks --all-metrics  # show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%, CPA)
 
 # Compare two calendar months MTD (default) or full months
-python3 lib/datapull.py compare-months [--month N] [--vs M] [--year YYYY] [--full]
-python3 lib/datapull.py compare-months --month 5 --vs 4  # May MTD vs Apr MTD
-python3 lib/datapull.py compare-months --month 5 --vs 4 --all-metrics  # with full metric table
+./bob compare-months [--month N] [--vs M] [--year YYYY] [--full]
+./bob compare-months --month 5 --vs 4  # May MTD vs Apr MTD
+./bob compare-months --month 5 --vs 4 --all-metrics  # with full metric table
 
 # Flag LOW-label creatives vs campaign averages (low-action vs low-watch + pattern analysis)
-python3 lib/datapull.py slice-creatives [--min-impressions N] [--output FILE]
+./bob slice-creatives [--min-impressions N] [--output FILE]
 
 # Copy suggestion + apply for LOW-action TEXT assets
-python3 lib/datapull.py suggest-creative-copy [--min-impressions N]      # copy plan + compact agent-agnostic prompt
-python3 lib/datapull.py creative-copy-apply --plan FILE [--suggestions JSON]  # approval table + push to Google Ads
+./bob suggest-creative-copy [--min-impressions N]      # copy plan + compact agent-agnostic prompt
+./bob creative-copy-apply --plan FILE [--suggestions JSON]  # approval table + push to Google Ads
 
 # Compare a named campaign segment across two periods (network-aggregated, with totals row)
-python3 lib/datapull.py slice-campaigns --name-contains "Stable" [--period yesterday_vs_sdlw|wow|mom|mtd]
-python3 lib/datapull.py slice-campaigns --name-contains "Stable" --output FILE  # save full CSV
-python3 lib/datapull.py slice-campaigns --name-contains "Stable" --all-metrics  # with full metric table
+./bob slice-campaigns --name-contains "Stable" [--period yesterday_vs_sdlw|wow|mom|mtd]
+./bob slice-campaigns --name-contains "Stable" --output FILE  # save full CSV
+./bob slice-campaigns --name-contains "Stable" --all-metrics  # with full metric table
 
 # Bid/budget recommendations — generate, review, apply, evaluate
-python3 lib/datapull.py bid-budget-recommend [--dry-run]                     # generate plan from weekly trend
-python3 lib/datapull.py bid-budget-recommend --cac-ceiling 150 --change-pct 15  # override profile defaults
-python3 lib/datapull.py bid-budget-apply --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml  # apply plan to Google Ads
-python3 lib/datapull.py bid-budget-retrospective --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml  # evaluate changes
+./bob bid-budget-recommend [--dry-run]                     # generate plan from weekly trend
+./bob bid-budget-recommend --cac-ceiling 150 --change-pct 15  # override profile defaults
+./bob bid-budget-apply --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml  # apply plan to Google Ads
+./bob bid-budget-retrospective --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml  # evaluate changes
 
 # Validate against manual exports
-python3 lib/datapull.py validate-manual --bob FILE --manual FILE [--mapping FILE]
+./bob validate-manual --bob FILE --manual FILE [--mapping FILE]
 
 # Check Google Ads YAML config (safe — does not print secrets)
-python3 lib/datapull.py check-config [--config PATH]
+./bob check-config [--config PATH]
 
 # Account management
-python3 lib/datapull.py onboard                # interactive setup for a new account
-python3 lib/datapull.py switch-account         # switch active account context
-python3 lib/datapull.py list-accounts          # list all registered accounts
+python3 lib/datapull.py onboard                # interactive setup before ./bob exists
+./bob switch-account                           # switch active account context
+./bob list-accounts                            # list all registered accounts
 ```
 
 **Pull log** — every live fetch appends one JSON line to `logs/pull-log.jsonl`:
@@ -98,8 +100,8 @@ The `reason` field records why the pull was made. Dry-run fetches do **not** wri
 
 **Dry run** (renders and saves query without executing):
 ```bash
-python3 lib/datapull.py fetch --query account_network_period --from 2026-05-13 --to 2026-05-19 --dry-run
-python3 lib/datapull.py bootstrap --dry-run
+./bob fetch --query account_network_period --from 2026-05-13 --to 2026-05-19 --dry-run
+./bob bootstrap --dry-run
 ```
 
 **Thin bash wrappers** in `bin/` mirror the subcommands (e.g., `bin/bob-fetch`, `bin/bob-fetch-bootstrap`, `bin/bob-onboard`, `bin/bob-switch-account`, `bin/bob-list-accounts`).
@@ -220,7 +222,7 @@ The `campaign_weekly_trend` aggregate uses actual ISO week numbers as column pre
 pip install garf-executors garf-google-ads
 ```
 
-Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `developer_token`, `login_customer_id`). Onboarding can create this from the developer token and the account/manager ID. Path is set in the account profile as `google_ads_config_path`. For write operations (bid/budget mutations), onboarding asks for the Google Cloud OAuth client JSON and converts it into a separate `google-ads-api.yaml` config (5 required keys: adds `client_id`, `client_secret`, and `refresh_token`), set as `google_ads_write_config_path`. Both paths are optional — stored as `""` if skipped during onboarding.
+Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `developer_token`, `login_customer_id`). Onboarding can create this from the Google Ads developer token from Admin > API Center and the account/manager ID. Path is set in the account profile as `google_ads_config_path`. For write operations (bid/budget mutations), onboarding asks for the separate Google Cloud OAuth client JSON and converts it into a `google-ads-api.yaml` config (5 required keys: adds `client_id`, `client_secret`, and `refresh_token`), set as `google_ads_write_config_path`. Both paths are optional — stored as `""` if skipped during onboarding.
 
 ### Agent Intent → Reference File Map
 

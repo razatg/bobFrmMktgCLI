@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import importlib.metadata as importlib_metadata
 import json
 import math
 import os
@@ -427,12 +428,7 @@ def _write_bob_launcher() -> None:
     launcher.chmod(0o755)
 
 
-def ensure_local_setup_for_onboarding() -> None:
-    """Prepare the local Python environment before asking account questions."""
-    if os.environ.get("BOB_ONBOARD_SETUP_DONE") == "1":
-        return
-
-    print("\nGetting Bob ready on this machine...")
+def _install_project_requirements() -> None:
     if not VENV_DIR.exists():
         print("  Creating Bob's local Python environment...")
         subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
@@ -443,8 +439,18 @@ def ensure_local_setup_for_onboarding() -> None:
     subprocess.check_call(pip_cmd + ["install", "--quiet", "--upgrade", "pip"], cwd=ROOT)
     subprocess.check_call(pip_cmd + ["install", "--quiet", "-r", str(ROOT / "requirements.txt")], cwd=ROOT)
     _write_bob_launcher()
+
+
+def ensure_local_setup_for_onboarding() -> None:
+    """Prepare the local Python environment before asking account questions."""
+    if os.environ.get("BOB_ONBOARD_SETUP_DONE") == "1":
+        return
+
+    print("\nGetting Bob ready on this machine...")
+    _install_project_requirements()
     print("  Bob is ready.\n")
 
+    venv_python = _venv_python()
     try:
         current_python = Path(sys.executable).resolve()
         target_python = venv_python.resolve()
@@ -455,6 +461,59 @@ def ensure_local_setup_for_onboarding() -> None:
         env = os.environ.copy()
         env["BOB_ONBOARD_SETUP_DONE"] = "1"
         os.execve(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), "onboard"], env)
+
+
+def _missing_distributions(distribution_names: list[str]) -> list[str]:
+    missing: list[str] = []
+    for name in distribution_names:
+        try:
+            importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            missing.append(name)
+    return missing
+
+
+def _garf_executable_exists() -> bool:
+    exe_name = "garf.exe" if os.name == "nt" else "garf"
+    local_garf = Path(sys.executable).parent / exe_name
+    return local_garf.exists() or shutil.which("garf") is not None
+
+
+def _onboarding_runtime_issues(require_read: bool, require_write: bool) -> list[str]:
+    """Return local dependency issues that would block immediate post-onboarding use."""
+    issues: list[str] = []
+
+    if require_read:
+        missing = _missing_distributions(["garf-executors", "garf-google-ads", "pyyaml"])
+        if missing:
+            issues.append("reporting packages are missing")
+        try:
+            import yaml as _yaml  # noqa: F401
+        except ImportError:
+            issues.append("YAML support is missing")
+        if not _garf_executable_exists():
+            issues.append("the Google Ads reporting runner is missing")
+
+    if require_write:
+        missing = _missing_distributions(["google-ads", "google-auth-oauthlib", "pyyaml"])
+        if missing:
+            issues.append("write-back packages are missing")
+
+    return sorted(set(issues))
+
+
+def _repair_and_check_onboarding_runtime(require_read: bool, require_write: bool) -> list[str]:
+    issues = _onboarding_runtime_issues(require_read, require_write)
+    if not issues:
+        return []
+
+    print("\n  Bob saved the account. Checking local setup before I call it ready...")
+    try:
+        _install_project_requirements()
+    except subprocess.CalledProcessError:
+        return _onboarding_runtime_issues(require_read, require_write) or issues
+
+    return _onboarding_runtime_issues(require_read, require_write)
 
 
 def garf_command(query_path: Path, output_dir: Path, account: str, config: str | None) -> list[str]:
@@ -600,7 +659,7 @@ def fetch(args: argparse.Namespace) -> None:
     account = str(account).replace("-", "")
     config = args.config or profile.get("google_ads_config_path")
     if not config and not args.dry_run:
-        die("I need the Google Ads developer token before I can fetch data from Google Ads.")
+        die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
     if config:
         config = str(Path(config).expanduser())
 
@@ -1688,7 +1747,7 @@ def check_config(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
     config = args.config or profile.get("google_ads_config_path")
     if not config:
-        die("I need the Google Ads developer token before I can fetch data from Google Ads.")
+        die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
     config_path = Path(config).expanduser()
     if not config_path.exists():
         die(f"Google Ads GARF config not found: {config_path}\nExpected at {config_path} — create it or set google_ads_config_path in your account profile (.bob/accounts/<id>/profile.json)")
@@ -3391,30 +3450,30 @@ def onboard(args: argparse.Namespace) -> None:
     currency = cur_key
 
     # ── GOOGLE ADS READ CONFIG ────────────────────────────────────────────────
-    _print_section("Google Ads Data Access")
+    _print_section("Google Ads Reporting Access")
     google_ads_config_path = ""
     while True:
-        has_token = _ob_prompt("For downloading data from Google Ads I need the developer token. Do you have it? (y/n)", "y").lower()
+        has_token = _ob_prompt("To pull reporting data from Google Ads, I need your developer token from Google Ads > Admin > API Center. Do you have it? (y/n)", "y").lower()
         if has_token not in {"y", "yes", "n", "no"}:
             print("  Reply y or n.")
             continue
         if has_token in {"n", "no"}:
-            print("  No worries — you can add the developer token later before pulling data.")
+            print("  No dramas. Setup can continue, but I won't be able to fetch Google Ads data until you add the developer token.")
             break
         developer_token = _ob_prompt("Developer token")
         if not developer_token:
-            print("  Developer token is required to set up data downloads. Reply n to skip for now.")
+            print("  Developer token is required to set up reporting data pulls. Reply n to skip for now.")
             continue
         google_ads_config_path = "~/google-ads-garf.yaml"
         login_customer_id = (mcc_id or cid).replace("-", "")
         config_path = Path(google_ads_config_path).expanduser()
         if config_path.exists():
-            replace = _ob_prompt("I found existing Google Ads data access settings. Replace them? (y/n)", "n").lower()
+            replace = _ob_prompt("I found existing Google Ads reporting access settings. Replace them? (y/n)", "n").lower()
             if replace not in {"y", "yes"}:
-                print("  Keeping the existing data access settings.")
+                print("  Keeping the existing reporting access settings.")
                 break
         _write_garf_read_config(google_ads_config_path, developer_token, login_customer_id)
-        print("  Data access settings saved.")
+        print("  Reporting access settings saved.")
         break
 
     # ── GOOGLE ADS WRITE CONFIG ───────────────────────────────────────────────
@@ -3422,12 +3481,12 @@ def onboard(args: argparse.Namespace) -> None:
     google_ads_write_config_path = ""
     write_creds_json_path = ""
     while True:
-        has_api_json = _ob_prompt("I need the Google Ads API keys to write changes back to Google Ads. Do you have the OAuth client JSON? (y/n)", "n").lower()
+        has_api_json = _ob_prompt("Optional: do you want Bob to make approved changes live in Google Ads? For that I need the Google Cloud OAuth client JSON. Do you have it? (y/n)", "n").lower()
         if has_api_json not in {"y", "yes", "n", "no"}:
             print("  Reply y or n.")
             continue
         if has_api_json in {"n", "no"}:
-            print("  No worries — write access can be added later.")
+            print("  No dramas. Bob can still save bid, budget, and creative recommendations to the wiki for you to apply manually in Google Ads.")
             break
         print("  Download it from Google Cloud Console → OAuth 2.0 Client IDs → Download JSON.")
         print("  Save it somewhere on this machine, then paste the full path here.")
@@ -3499,7 +3558,7 @@ def onboard(args: argparse.Namespace) -> None:
     updated = [dict(a, active=False) for a in existing] + [new_entry]
     _save_accounts_registry(updated)
 
-    print(f"\n  Saved to .bob/accounts/{cid.replace('-','')}/profile.json")
+    print("\n  Account saved.")
 
     if write_creds_json_path:
         print("\n  Setting up Google Ads write access now.")
@@ -3510,11 +3569,26 @@ def onboard(args: argparse.Namespace) -> None:
             )
         )
 
+    runtime_issues = _repair_and_check_onboarding_runtime(
+        require_read=bool(google_ads_config_path),
+        require_write=bool(google_ads_write_config_path),
+    )
+    if runtime_issues:
+        print(f"""
+  {account_name} is saved, but Bob is not ready to answer reporting questions yet.
+
+  Local setup still needs attention:
+  - {'; '.join(runtime_issues)}
+
+  Fix that first, then ask your first performance question.
+""")
+        return
+
     # ── DONE ──────────────────────────────────────────────────────────────────
     read_status = (
         "Data access is ready. I'll pull data only when you ask a performance question."
         if google_ads_config_path
-        else "Data access is not ready yet. I need the Google Ads developer token before I can fetch data from Google Ads."
+        else "Data access is not ready yet. I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads."
     )
     write_status = (
         "Write access is ready."

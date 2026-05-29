@@ -67,7 +67,7 @@ You'll need:
 - A **Mac or Windows** machine
 - One of these AI desktop apps: **[Claude](https://claude.ai/download)**, **[Codex](https://openai.com/codex)**, or **[Antigravity](https://antigravity.ai)** — Bob lives inside whichever one you use. Not sure how to install one? Ask your office IT person — or open any AI chat (ChatGPT, Claude.ai, Gemini) and ask it to walk you through the install.
 - A **Google Ads account** running App Campaigns
-- A **Google Ads developer token** so Bob can download reporting data. Write access is optional and can be added later.
+- A **Google Ads developer token** from **Google Ads > Admin > API Center** so Bob can download reporting data. Write access is optional and can be added later with a separate Google Cloud OAuth client JSON.
 
 ---
 
