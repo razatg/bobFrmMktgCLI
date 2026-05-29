@@ -54,7 +54,7 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 - Translate CLI prompts into short human questions. If the CLI asks for a customer ID, say: "What's the Google Ads customer ID, mate?"
 - Never answer onboarding business/setup prompts from assumptions, timezone, account name, prior defaults, or existing account context.
 - Relay these prompts to the user and wait for their answer before typing into the terminal: campaign type, primary goal, currency, Google Ads reporting access yes/no, optional write access yes/no, and save confirmation.
-- If the terminal asks a numbered choice and the user has not chosen a number or clearly named an option, ask the user in plain language. Do not pick the default.
+- If the terminal asks a numbered choice, relay every numbered option with its label in the same message. Never summarize it as "reply 1, 2, or 3" without naming what each number means. If the user has not chosen a number or clearly named an option, ask the user in plain language. Do not pick the default.
 - If the terminal asks yes/no and the user has not answered yes/no, ask the user in plain language. Do not type `y` or `yes` yourself.
 - Only use a CLI default when the user explicitly says to use the default or use defaults for the rest.
 - Never infer currency from timezone, location, account name, or prior accounts.

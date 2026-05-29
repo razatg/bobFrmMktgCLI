@@ -2,6 +2,7 @@ SELECT
   customer.id AS customer_id,
   customer.descriptive_name AS customer_name,
   segments.ad_network_type AS network,
+  metrics.reach AS reach,
   metrics.impressions AS impressions,
   metrics.clicks AS clicks,
   metrics.cost_micros / 1000000 AS cost,

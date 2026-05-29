@@ -58,6 +58,8 @@ DATE_QUERIES = {
 }
 
 DEFAULT_CREATIVE_MIN_IMPRESSIONS = 50000
+LEGACY_GARF_CONFIG_PATH = "~/google-ads-garf.yaml"
+LEGACY_WRITE_CONFIG_PATH = "~/google-ads-api.yaml"
 
 SUM_METRICS = ["reach", "impressions", "clicks", "cost", "installs", "in_app_conversions"]
 
@@ -852,9 +854,10 @@ def format_float(value: float) -> str:
 def _derive_metrics(g: dict[str, float], primary_goal: str) -> dict[str, str]:
     """Compute derived metrics from summed base metrics."""
     goal = g["installs"] if primary_goal == "installs" else g["in_app_conversions"]
-    reach = g.get("reach", 0.0)
+    has_reach = "reach" in g and g.get("reach") not in (None, "", "NA")
+    reach = g.get("reach", 0.0) if has_reach else None
     return {
-        "reach": format_float(reach),
+        "reach": format_float(reach) if has_reach else "NA",
         "impressions": format_float(g["impressions"]),
         "clicks": format_float(g["clicks"]),
         "cost": format_float(g["cost"]),
@@ -862,7 +865,7 @@ def _derive_metrics(g: dict[str, float], primary_goal: str) -> dict[str, str]:
         "in_app_conversions": format_float(g["in_app_conversions"]),
         "goal_conversions": format_float(goal),
         "cpm": ratio(g["cost"], g["impressions"], 1000),
-        "frequency": ratio(g["impressions"], reach),
+        "frequency": ratio(g["impressions"], reach) if has_reach else "NA",
         "ctr_percent": ratio(g["clicks"], g["impressions"], 100),
         "cpc": ratio(g["cost"], g["clicks"]),
         "cti_percent": ratio(g["installs"], g["clicks"], 100),
@@ -1114,6 +1117,11 @@ def _agg_network_period(
     else:
         input_path = newest_raw(source)
     rows = read_csv(input_path)
+    if grain in {"account_network_period", "campaign_network_period"} and rows and "reach" not in rows[0]:
+        die(
+            f"raw {grain} file missing reach: {input_path}\n"
+            "Refetch this slice with the updated query so Bob can carry Users through correctly."
+        )
     for row in rows:
         row["network"] = _canonical_network(row.get("network", ""))
     out_rows = _aggregate_period_rows(rows, _NETWORK_PERIOD_KEY_COLS[grain], primary_goal)
@@ -1302,10 +1310,21 @@ def _print_grain_results(
 
     _all_metric_keys = [m for _, m, _ in METRIC_DISPLAY_SPEC]
 
-    def _row_to_period_dicts(r: dict) -> tuple[dict, dict]:
+    def _row_to_period_dicts(r: dict, include_reach: bool = True) -> tuple[dict, dict]:
         cur_d = {m: r.get(f"current_{m}", "NA") for m in _all_metric_keys}
         base_d = {m: r.get(f"baseline_{m}", "NA") for m in _all_metric_keys}
+        if not include_reach:
+            for d in (cur_d, base_d):
+                d["reach"] = "NA"
+                d["frequency"] = "NA"
         return cur_d, base_d
+
+    def _mask_network_reach(row: dict) -> dict:
+        masked = dict(row)
+        for key in ("current_reach", "baseline_reach", "delta_reach_pct", "current_frequency", "baseline_frequency"):
+            if key in masked:
+                masked[key] = "NA"
+        return masked
 
     if grain_name == "account_network_period":
         if all_metrics:
@@ -1313,7 +1332,7 @@ def _print_grain_results(
             _print_metric_table(tc, tb, cur_label, base_label, currency_sym)
             for row in rows:
                 network = _display_network(row.get("network", ""))
-                cur_net, base_net = _row_to_period_dicts(row)
+                cur_net, base_net = _row_to_period_dicts(row, include_reach=False)
                 print(f"\nNetwork: {network}")
                 _print_metric_table(cur_net, base_net, cur_label, base_label, currency_sym)
 
@@ -1345,7 +1364,7 @@ def _print_grain_results(
             f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
         )
         if output_account_path:
-            write_csv(Path(output_account_path).expanduser(), rows, ACCOUNT_WEEK_COMPARISON_COLUMNS)
+            write_csv(Path(output_account_path).expanduser(), [_mask_network_reach(r) for r in rows], ACCOUNT_WEEK_COMPARISON_COLUMNS)
             print(f"account comparison written: {output_account_path}")
 
     elif grain_name == "campaign_network_period":
@@ -1745,6 +1764,7 @@ def validate_manual(args: argparse.Namespace) -> None:
 
 def check_config(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
+    migration_notes = [] if args.config else _migrate_legacy_profile_configs(profile)
     config = args.config or profile.get("google_ads_config_path")
     if not config:
         die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
@@ -1759,6 +1779,10 @@ def check_config(args: argparse.Namespace) -> None:
             continue
         key, value = line.split(":", 1)
         keys[key.strip()] = value.strip().strip("\"'")
+
+    if migration_notes:
+        for note in migration_notes:
+            print(f"migrated: {note}")
 
     # GARF read config — no OAuth client credentials required
     expected = ["developer_token", "login_customer_id"]
@@ -1778,9 +1802,9 @@ def check_config(args: argparse.Namespace) -> None:
     if keys.get("login_customer_id") and account and keys["login_customer_id"].replace("-", "") == account:
         print("note: login_customer_id equals target_customer_id; omit login_customer_id unless this is a manager account.")
 
-    write_config = profile.get("google_ads_write_config_path", "")
-    if write_config and write_config != profile.get("google_ads_config_path", ""):
-        write_path = Path(write_config).expanduser()
+    write_path = _resolve_profile_config_path(profile, write=True)
+    write_config = str(profile.get("google_ads_write_config_path", "") or "").strip()
+    if write_config or write_path.exists():
         print(f"\nwrite config (bid-budget-apply): {write_path}")
         if not write_path.exists():
             print("  STATUS: FILE NOT FOUND")
@@ -2228,10 +2252,7 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
         die("google-ads library is required. Install: pip install google-ads")
 
     profile = load_profile(required=False)
-    config_path = str(Path(
-        profile.get("google_ads_write_config_path")
-        or profile.get("google_ads_config_path", "~/google-ads-garf.yaml")
-    ).expanduser())
+    config_path = str(_resolve_profile_config_path(profile, write=True))
     customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
 
     try:
@@ -2781,7 +2802,7 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
     text_map: dict = {}
     try:
         from google.ads.googleads.client import GoogleAdsClient
-        config_path = str(Path(profile.get("google_ads_write_config_path", "~/google-ads-api.yaml")).expanduser())
+        config_path = str(_resolve_profile_config_path(profile, write=True))
         _ga_client = GoogleAdsClient.load_from_storage(config_path)
         text_map = _fetch_asset_texts(_ga_client, customer_id.replace("-", ""), all_asset_ids)
     except ImportError:
@@ -3050,9 +3071,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         die("google-ads library required: pip install google-ads")
 
     profile = load_profile(required=False)
-    config_path = str(Path(
-        profile.get("google_ads_write_config_path") or profile.get("google_ads_config_path", "~/google-ads.yaml")
-    ).expanduser())
+    config_path = str(_resolve_profile_config_path(profile, write=True))
     customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
 
     try:
@@ -3198,22 +3217,21 @@ def setup_write_credentials(args: argparse.Namespace) -> None:
     import yaml as _yaml
     import json as _json
 
+    profile = load_profile(required=False)
+    _migrate_legacy_profile_configs(profile)
+
     creds_json = Path(getattr(args, "creds", None) or "~/google-ads-creds.json").expanduser()
     if not creds_json.exists():
         die(f"client secrets not found: {creds_json}\nDownload it from Google Cloud Console → OAuth 2.0 Client IDs → Download JSON")
 
-    garf_yaml = Path(load_profile(required=False).get("google_ads_config_path") or "~/google-ads-garf.yaml").expanduser()
+    garf_yaml = _resolve_profile_config_path(profile, write=False)
     gads_cfg = _yaml.safe_load(garf_yaml.read_text()) if garf_yaml.exists() else {}
     dev_token = gads_cfg.get("developer_token", "")
     login_cid = str(gads_cfg.get("login_customer_id", "")).replace("-", "")
     if not dev_token:
         die(f"developer_token not found in {garf_yaml}")
 
-    profile = load_profile(required=False)
-    out_path = Path(
-        getattr(args, "output", None)
-        or profile.get("google_ads_write_config_path", "~/google-ads-api.yaml")
-    ).expanduser()
+    out_path = Path(getattr(args, "output", None) or _default_write_config_path(_profile_customer_id(profile))).expanduser()
 
     print("Waiting for browser authorization — local server starting on http://127.0.0.1:8080 …")
     flow = InstalledAppFlow.from_client_secrets_file(
@@ -3299,17 +3317,28 @@ def _ob_prompt(label: str, default: str = "") -> str:
     return val
 
 
+def _ob_prompt_raw(label: str) -> str:
+    """Single-line interactive prompt with no implicit default shortcuts."""
+    try:
+        return input(f"  {label}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        raise SystemExit(0)
+
+
 def _ob_numbered(label: str, options: list[tuple[str, str]], default: int = 1) -> tuple[str, str]:
     """Numbered-choice prompt. Returns (key, display_label)."""
     print(f"\n  {label}")
     for i, (_, display) in enumerate(options, 1):
         marker = " *" if i == default else "  "
         print(f"{marker}  {i}) {display}")
+    inline_options = "  ".join(f"{i}) {display}" for i, (_, display) in enumerate(options, 1))
+    prompt = f"{label} {inline_options}"
     while True:
-        raw = _ob_prompt(f"Choice", str(default))
+        raw = _ob_prompt_raw(prompt)
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return options[int(raw) - 1]
-        print(f"  Enter a number between 1 and {len(options)}.")
+        print(f"  Please choose a number from 1 to {len(options)}.")
 
 
 def _validate_customer_id(cid: str) -> bool:
@@ -3349,6 +3378,98 @@ def _write_garf_read_config(path_str: str, developer_token: str, login_customer_
         f"login_customer_id: {_yaml_scalar(login_customer_id.replace('-', ''))}\n"
     )
     path.write_text(text)
+
+
+def _profile_customer_id(profile: dict[str, Any]) -> str:
+    return str(profile.get("google_ads_customer_id", "")).replace("-", "")
+
+
+def _account_credentials_dir(customer_id: str) -> str:
+    return f"~/.bob/bobFrmMktgCLI/accounts/{customer_id.replace('-', '')}"
+
+
+def _default_read_config_path(customer_id: str) -> str:
+    return f"{_account_credentials_dir(customer_id)}/google-ads-garf.yaml"
+
+
+def _default_write_config_path(customer_id: str) -> str:
+    return f"{_account_credentials_dir(customer_id)}/google-ads-api.yaml"
+
+
+def _resolve_profile_config_path(profile: dict[str, Any], *, write: bool = False) -> Path:
+    customer_id = _profile_customer_id(profile)
+    configured_key = "google_ads_write_config_path" if write else "google_ads_config_path"
+    configured = str(profile.get(configured_key, "") or "").strip()
+    legacy = LEGACY_WRITE_CONFIG_PATH if write else LEGACY_GARF_CONFIG_PATH
+    defaults: list[str] = []
+    if configured and configured != legacy:
+        defaults.append(configured)
+    if customer_id:
+        defaults.append(_default_write_config_path(customer_id) if write else _default_read_config_path(customer_id))
+    if configured and configured == legacy:
+        defaults.append(configured)
+    defaults.append(legacy)
+
+    seen: set[str] = set()
+    for candidate in defaults:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return path
+    fallback = configured
+    if not fallback:
+        fallback = defaults[1] if len(defaults) > 1 else defaults[0]
+    return Path(fallback).expanduser()
+
+
+def _migrate_legacy_profile_configs(profile: dict[str, Any]) -> list[str]:
+    customer_id = _profile_customer_id(profile)
+    if not customer_id:
+        return []
+
+    migrated: list[str] = []
+    read_default = Path(_default_read_config_path(customer_id)).expanduser()
+    write_default = Path(_default_write_config_path(customer_id)).expanduser()
+    legacy_read = Path(LEGACY_GARF_CONFIG_PATH).expanduser()
+    legacy_write = Path(LEGACY_WRITE_CONFIG_PATH).expanduser()
+
+    read_path = str(profile.get("google_ads_config_path", "") or "").strip()
+    if read_path:
+        current_read = Path(read_path).expanduser()
+        if current_read == legacy_read:
+            if read_default.exists():
+                profile["google_ads_config_path"] = str(read_default)
+                migrated.append("updated active account profile with per-account read config")
+            elif legacy_read.exists():
+                read_default.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_read, read_default)
+                profile["google_ads_config_path"] = str(read_default)
+                migrated.append(f"migrated read config to {read_default}")
+    elif read_default.exists():
+        profile["google_ads_config_path"] = str(read_default)
+        migrated.append("set active account profile to per-account read config")
+
+    write_path = str(profile.get("google_ads_write_config_path", "") or "").strip()
+    if write_path:
+        current_write = Path(write_path).expanduser()
+        if current_write == legacy_write:
+            if write_default.exists():
+                profile["google_ads_write_config_path"] = str(write_default)
+                migrated.append("updated active account profile with per-account write config")
+            elif legacy_write.exists():
+                write_default.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_write, write_default)
+                profile["google_ads_write_config_path"] = str(write_default)
+                migrated.append(f"migrated write config to {write_default}")
+    elif write_default.exists():
+        profile["google_ads_write_config_path"] = str(write_default)
+        migrated.append("set active account profile to per-account write config")
+
+    if migrated:
+        _set_active_account(profile)
+    return migrated
 
 
 def _print_section(title: str) -> None:
@@ -3464,11 +3585,11 @@ def onboard(args: argparse.Namespace) -> None:
         if not developer_token:
             print("  Developer token is required to set up reporting data pulls. Reply n to skip for now.")
             continue
-        google_ads_config_path = "~/google-ads-garf.yaml"
+        google_ads_config_path = _default_read_config_path(cid)
         login_customer_id = (mcc_id or cid).replace("-", "")
         config_path = Path(google_ads_config_path).expanduser()
         if config_path.exists():
-            replace = _ob_prompt("I found existing Google Ads reporting access settings. Replace them? (y/n)", "n").lower()
+            replace = _ob_prompt("I found existing reporting access settings for this account. Replace them? (y/n)", "n").lower()
             if replace not in {"y", "yes"}:
                 print("  Keeping the existing reporting access settings.")
                 break
@@ -3495,7 +3616,7 @@ def onboard(args: argparse.Namespace) -> None:
         if not creds_path.exists():
             print("  I can't find that JSON file. Check where you saved it, or reply n to skip for now.")
             continue
-        google_ads_write_config_path = "~/google-ads-api.yaml"
+        google_ads_write_config_path = _default_write_config_path(cid)
         write_creds_json_path = raw_creds
         print("  Got it — I'll turn that JSON into write access settings after saving the account.")
         break

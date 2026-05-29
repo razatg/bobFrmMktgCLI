@@ -9,6 +9,7 @@
     "garf/outputs/raw/",
     "data/processed/",
     "logs/pull-log.jsonl",
+    "logs/backlog.md",
     "validation/reports/",
     "google-ads/logs/",
     "wiki/",

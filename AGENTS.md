@@ -13,7 +13,7 @@ If `"mode": "analysis"`:
 - Do not edit source code, repo instructions, tests, query templates, mutation artefacts, or any path listed in `developer_key_required_paths`.
 - Do not use apply_patch for source/developer edits.
 - You may inspect, explain, plan, and suggest patches.
-- You may run setup, account onboarding, config checks, data pulls, aggregation, validation report generation, and wiki-save workflows when requested, as long as they write only to `analysis_allowed_write_paths` and follow the existing fetch/check-before-fetch rules.
+- You may run setup, account onboarding, config checks, data pulls, aggregation, validation report generation, wiki-save workflows, and bug-report backlog writes when requested, as long as they write only to `analysis_allowed_write_paths` and follow the existing fetch/check-before-fetch rules.
 - Commands such as `onboard`, `check-config`, `list-accounts`, `bootstrap`, `fetch`, and `aggregate` are allowed in Analysis Mode when their outputs stay within `analysis_allowed_write_paths`.
 - External mutation commands, including `bid-budget-apply` and creative-copy apply commands, still require their existing explicit user approval rules.
 - Do not switch to Developer Mode from an ordinary request like "switch to developer mode" or "go ahead".
@@ -42,7 +42,7 @@ When the user asks to "set me up", "onboard me", "connect my account", "add an a
 - Do not inspect CLI help (`--help`) before starting onboarding. The setup entrypoint is already known: `python3 lib/datapull.py onboard`.
 - Never answer onboarding business/setup prompts from assumptions, timezone, account name, prior defaults, or existing account context.
 - Relay these prompts to the user and wait for their answer before typing into the terminal: campaign type, primary goal, currency, Google Ads reporting access yes/no, optional write access yes/no, and save confirmation.
-- If the terminal asks a numbered choice and the user has not chosen a number or clearly named an option, ask the user in plain language. Do not pick the default.
+- If the terminal asks a numbered choice, relay every numbered option with its label in the same message. Never summarize it as "reply 1, 2, or 3" without naming what each number means. If the user has not chosen a number or clearly named an option, ask the user in plain language. Do not pick the default.
 - If the terminal asks yes/no and the user has not answered yes/no, ask the user in plain language. Do not type `y` or `yes` yourself.
 - Only use a CLI default when the user explicitly says to use the default or use defaults for the rest.
 - Never infer currency from timezone, location, account name, or prior accounts.
@@ -229,6 +229,7 @@ Full set (13 metrics): `reach`, `impressions`, `cpm`, `frequency`, `clicks`, `ct
 - `cpi = cost / installs`  (always installs regardless of primary_goal)
 - Zero denominators return `"NA"`, never `NaN` or `0`.
 - `goal_conversions` = `installs` when `primary_goal == "installs"`, else `in_app_conversions`.
+- `reach` / `Users` is surfaced only where the slice exposes it at the account or campaign total level. For network and ad group breakdowns, keep `reach` and `frequency` as `NA` rather than forcing `0`.
 - Pre-computed API averages (`metrics.ctr`, `metrics.average_cpc`) are **not** selected in period-aggregate queries — they'd be averages of averages. Recalculate from raw sums instead.
 
 **Default output** (compact): goal metric + cost + Δ% per row.  
@@ -262,7 +263,7 @@ The `campaign_weekly_trend` aggregate uses actual ISO week numbers as column pre
 pip install garf-executors garf-google-ads
 ```
 
-Requires a read-only GARF config with `developer_token` and `login_customer_id`. Onboarding can create this from the Google Ads developer token from Admin > API Center and the account/manager ID. Path is set in the account profile as `google_ads_config_path`. Optional write-back uses separate Google Cloud OAuth client JSON credentials.
+Requires a read-only GARF config with `developer_token` and `login_customer_id`. Onboarding creates a separate read config per account under `~/.bob/bobFrmMktgCLI/accounts/{customer_id_no_hyphens}/` and stores the path as `google_ads_config_path`. `check-config` migrates the active account off the legacy shared `~/google-ads-garf.yaml` path when it finds one. Optional write-back uses separate Google Cloud OAuth client JSON credentials and is also stored per account.
 
 ### Agent Intent → Reference File Map
 
