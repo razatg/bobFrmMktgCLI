@@ -651,6 +651,27 @@ def write_metadata(path: Path, metadata: dict[str, Any]) -> None:
         f.write("\n")
 
 
+def garf_failure_message(query_name: str, meta_file: Path, stdout: str, stderr: str) -> str:
+    combined_output = f"{stdout}\n{stderr}".lower()
+    network_error_patterns = (
+        "could not contact dns servers",
+        "hostname lookup error",
+        "address lookup failed",
+        "errors resolving googleads.googleapis.com",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "nodename nor servname",
+    )
+    if any(pattern in combined_output for pattern in network_error_patterns):
+        host = "googleads.googleapis.com" if "googleads.googleapis.com" in combined_output else "the Google Ads API"
+        return (
+            f"Bob can't reach Google Ads from this environment ({host}). "
+            "Check internet access, DNS, VPN/firewall/proxy, or whether the agent/terminal has network permissions. "
+            f"See {meta_file}"
+        )
+    return f"GARF failed for {query_name}. See {meta_file}"
+
+
 def fetch(args: argparse.Namespace) -> None:
     ensure_dirs()
     profile = load_profile(required=not bool(args.account))
@@ -724,8 +745,11 @@ def fetch(args: argparse.Namespace) -> None:
         metadata["stdout"] = result.stdout[-4000:]
         metadata["stderr"] = result.stderr[-4000:]
         if result.returncode != 0:
+            failure_message = garf_failure_message(query_name, meta_file, result.stdout, result.stderr)
+            if failure_message.startswith("Bob can't reach Google Ads"):
+                metadata["diagnosis"] = "network_or_dns_unreachable"
             write_metadata(meta_file, metadata)
-            die(f"GARF failed for {query_name}. See {meta_file}")
+            die(failure_message)
 
         produced = sorted(tmp_dir.glob("*.csv"))
         if not produced:
