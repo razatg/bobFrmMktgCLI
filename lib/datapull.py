@@ -23,6 +23,7 @@ BOB_DIR = ROOT / ".bob"
 PROFILE_PATH = BOB_DIR / "profile.json"
 ACCOUNTS_DIR = BOB_DIR / "accounts"
 ACCOUNTS_REGISTRY = BOB_DIR / "accounts.json"
+VENV_DIR = ROOT / ".venv"
 QUERIES_DIR = ROOT / "garf" / "queries"
 RAW_DIR = ROOT / "garf" / "outputs" / "raw"
 PROCESSED_DIR = ROOT / "data" / "processed"
@@ -407,6 +408,53 @@ def render_query(query_name: str, start: dt.date, end: dt.date) -> str:
 def ensure_dirs() -> None:
     for path in [RAW_DIR, PROCESSED_DIR, REPORTS_DIR, ACCOUNTS_DIR]:
         path.mkdir(parents=True, exist_ok=True)
+
+
+def _venv_python() -> Path:
+    if os.name == "nt":
+        return VENV_DIR / "Scripts" / "python.exe"
+    return VENV_DIR / "bin" / "python3"
+
+
+def _write_bob_launcher() -> None:
+    launcher = ROOT / "bob"
+    launcher.write_text(
+        "#!/bin/bash\n"
+        "# bob — convenience launcher that uses the project's virtual environment\n"
+        'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'exec "$DIR/.venv/bin/python3" "$DIR/lib/datapull.py" "$@"\n'
+    )
+    launcher.chmod(0o755)
+
+
+def ensure_local_setup_for_onboarding() -> None:
+    """Prepare the local Python environment before asking account questions."""
+    if os.environ.get("BOB_ONBOARD_SETUP_DONE") == "1":
+        return
+
+    print("\nGetting Bob ready on this machine...")
+    if not VENV_DIR.exists():
+        print("  Creating Bob's local Python environment...")
+        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
+
+    venv_python = _venv_python()
+    pip_cmd = [str(venv_python), "-m", "pip"]
+    print("  Installing what Bob needs...")
+    subprocess.check_call(pip_cmd + ["install", "--quiet", "--upgrade", "pip"], cwd=ROOT)
+    subprocess.check_call(pip_cmd + ["install", "--quiet", "-r", str(ROOT / "requirements.txt")], cwd=ROOT)
+    _write_bob_launcher()
+    print("  Bob is ready.\n")
+
+    try:
+        current_python = Path(sys.executable).resolve()
+        target_python = venv_python.resolve()
+    except OSError:
+        current_python = Path(sys.executable)
+        target_python = venv_python
+    if current_python != target_python and venv_python.exists():
+        env = os.environ.copy()
+        env["BOB_ONBOARD_SETUP_DONE"] = "1"
+        os.execve(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), "onboard"], env)
 
 
 def garf_command(query_path: Path, output_dir: Path, account: str, config: str | None) -> list[str]:
@@ -3249,6 +3297,7 @@ def _print_section(title: str) -> None:
 
 
 def onboard(args: argparse.Namespace) -> None:
+    ensure_local_setup_for_onboarding()
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
     existing = _load_accounts_registry()
 

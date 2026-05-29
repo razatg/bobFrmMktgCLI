@@ -39,6 +39,7 @@ When the user asks to "set me up", "onboard me", "connect my account", "add an a
 - Do not narrate background work such as reading config, listing accounts, checking profiles, or inspecting the repo.
 - Ask one question at a time in plain language.
 - Run allowed setup checks silently where possible under Analysis Mode.
+- Do not inspect CLI help (`--help`) before starting onboarding. The setup entrypoint is already known: `python3 lib/datapull.py onboard`.
 - Summarize progress in human terms, such as "Account saved" or "Config looks good."
 - Start with: "Hey mate, I'll get you set up. I'll ask one thing at a time."
 - Do not run `bootstrap`, `fetch`, `aggregate`, or `check-config` after onboarding unless the user explicitly asks to verify setup or asks a performance/data question.

@@ -11,7 +11,9 @@
     "logs/pull-log.jsonl",
     "validation/reports/",
     "google-ads/logs/",
-    "wiki/"
+    "wiki/",
+    ".venv/",
+    "bob"
   ],
   "developer_key_required_paths": [
     ".bob/agent-mode.json",

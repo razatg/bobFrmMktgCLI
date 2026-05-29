@@ -67,7 +67,7 @@ You'll need:
 - A **Mac or Windows** machine
 - One of these AI desktop apps: **[Claude](https://claude.ai/download)**, **[Codex](https://openai.com/codex)**, or **[Antigravity](https://antigravity.ai)** — Bob lives inside whichever one you use. Not sure how to install one? Ask your office IT person — or open any AI chat (ChatGPT, Claude.ai, Gemini) and ask it to walk you through the install.
 - A **Google Ads account** running App Campaigns
-- A **Google Ads API credentials file** — a `.yaml` file that gives Bob read access to your account. Your developer can set this up, or follow the [Google Ads API quickstart](https://developers.google.com/google-ads/api/docs/get-started/introduction). Bob never stores your credentials — it reads the file fresh each time.
+- A **Google Ads developer token** so Bob can download reporting data. Write access is optional and can be added later.
 
 ---
 
@@ -94,11 +94,11 @@ Once the folder is open, the AI reads the project instructions automatically and
 **Step 3 — Say "set me up"**
 
 Just type that in the chat. Bob will:
-- Install everything needed on your machine (Python, dependencies)
+- Get itself ready on your machine
 - Walk you through connecting your Google Ads account
-- Pull your first data snapshot
+- Suggest useful first questions
 
-You don't need to run anything yourself — Bob handles it all and talks you through each step conversationally.
+You don't need to run setup scripts yourself — Bob handles setup and talks you through each step conversationally. Bob only pulls Google Ads data after you ask a performance question.
 
 ---
 
