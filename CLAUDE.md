@@ -11,6 +11,8 @@ Bob Frm Mktg is a CLI-first performance marketing automation tool for Google Ads
 
 **No data overfitting**: Never write logic that assumes the naming conventions, structural patterns, or data values of the current account or platform. All parsing, classification, and grouping must be derived from the data as it arrives — not from hardcoded keywords, thresholds, or patterns observed in this specific instance. This applies across any ad platform (Google Ads, Meta Ads, or others added in future).
 
+**No advertiser overfitting**: Never anchor instructions, templates, or creative strategy to one advertiser's brand, products, colors, landmarks, or naming patterns. Creative guidance must generalize across advertisers and industries; account-specific examples are examples only, not reusable assumptions.
+
 **No environment-specific paths**: Never hardcode paths tied to a specific AI runtime or developer tool (e.g. `~/.cache/codex-runtimes/`, Gemini CLI paths, Cursor paths). Binary resolution must use `shutil.which()` or `Path(sys.executable).parent` so the code runs identically regardless of which assistant or machine invoked it.
 
 ## Working in this repo

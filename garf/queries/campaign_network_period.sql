@@ -4,7 +4,6 @@ SELECT
   campaign.name AS campaign_name,
   campaign.status AS campaign_status,
   segments.ad_network_type AS network,
-  metrics.reach AS reach,
   metrics.impressions AS impressions,
   metrics.clicks AS clicks,
   metrics.cost_micros / 1000000 AS cost,

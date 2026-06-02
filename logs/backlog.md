@@ -8,6 +8,11 @@ Add entries under **Bug Reports** when Bob did something wrong. Add entries unde
 
 ## Bug Reports
 
+### [BUG] 2026-06-01 — W22 vs W21 comparison fetch failed for Rapido Demand
+**User said:** "pls compare week 22 vs week w21 all metrics for Rapido Demand account"
+**What happened:** Bob switched to the Rapido Demand account and attempted live `account_network_period` fetch for W22 (2026-05-25 to 2026-05-31), but the GARF pull failed with exit code 1.
+**What's needed:** A fix or update to ensure that the Google Ads API credentials or fetching environment for the Rapido Demand account can execute live queries successfully.
+
 ### [BUG] 2026-05-26 — campaign week aggregate skipped W21 raw slice for Rapido Demand
 **User said:** "can you share diffs in top top campaigns for the same period"
 **What happened:** Bob fetched raw `campaign_network_period` files for Rapido Demand for `2026-05-18` to `2026-05-24` and `2026-05-11` to `2026-05-17`, but `aggregate --grain campaign_network_period` only wrote the W20 processed slice and `compare-weeks --week 21 --vs 20 --year 2026 --grain campaign` still reported both weeks as missing.
@@ -48,8 +53,8 @@ Add entries under **Bug Reports** when Bob did something wrong. Add entries unde
 **What happened:** Analysis mode blocked appending a bug report even though the Bob skill expects backlog logging for bugs and feature requests.
 **What's needed:** Add `logs/backlog.md` to the analysis-mode write allowlist so bug reports can be recorded without developer mode.
 
----
 
-## Feature Requests
-
-(none yet)
+### [FEATURE] 2026-06-01 — Include Cost in `--all-metrics` table output
+**User said:** "the cost metric is not added"
+**What happened:** `./bob compare-weeks --all-metrics` prints a metric table that includes impressions/clicks/CTR/etc but omits `cost`, even though cost is shown in the compact tables (e.g. Account × Network and Campaign tables).
+**What's needed:** Add `cost` to the metric table display spec so `--all-metrics` includes Cur Cost, Base Cost, and Δ% alongside the other metrics.
