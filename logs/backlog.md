@@ -48,6 +48,8 @@ Add entries under **Bug Reports** when Bob did something wrong. Add entries unde
 **What happened:** Bob’s account/campaign comparison path showed `Users` as `0` because the raw network-period slices were not carrying `reach` through into the total account/campaign rows, while the network/ad group slices should not surface `reach` at all.
 **What's needed:** Select `reach` for the account/campaign total query path, keep it `NA` for network/ad group breakdowns, and fail fast on stale raw slices that predate the reach fix.
 
+## Feature Requests
+
 ### [FEATURE] 2026-05-29 — allow analysis-mode backlog writes
 **User said:** "analysis mode should be allowed to write a bug report in logs/backlog.md"
 **What happened:** Analysis mode blocked appending a bug report even though the Bob skill expects backlog logging for bugs and feature requests.

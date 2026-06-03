@@ -2,5 +2,9 @@
 # Compare a name-filtered campaign segment across two periods.
 # Usage: bob-slice-campaign --name-contains TEXT [--period PERIOD] [--output FILE]
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$SCRIPT_DIR/../lib/datapull.py" slice-campaigns "$@"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -x "$ROOT/bob" ]; then
+  exec "$ROOT/bob" slice-campaigns "$@"
+else
+  exec python3 "$ROOT/lib/datapull.py" slice-campaigns "$@"
+fi

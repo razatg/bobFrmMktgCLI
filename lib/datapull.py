@@ -517,33 +517,67 @@ def _missing_distributions(distribution_names: list[str]) -> list[str]:
     return missing
 
 
+def _project_venv_bin() -> Path:
+    return ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _project_venv_garf() -> Path:
+    return _project_venv_bin() / ("garf.exe" if os.name == "nt" else "garf")
+
+
 def _garf_executable_exists() -> bool:
-    exe_name = "garf.exe" if os.name == "nt" else "garf"
-    local_garf = Path(sys.executable).parent / exe_name
-    return local_garf.exists() or shutil.which("garf") is not None
+    """True if garf is callable from the project's venv or system PATH.
+
+    Anchored to the project venv first so the check works regardless of which
+    Python interpreter ran this script (system python vs. the launcher).
+    """
+    return _project_venv_garf().exists() or shutil.which("garf") is not None
 
 
 def _onboarding_runtime_issues(require_read: bool, require_write: bool) -> list[str]:
-    """Return local dependency issues that would block immediate post-onboarding use."""
+    """Return local dependency issues that would block immediate post-onboarding use.
+
+    Checks are anchored to the project venv. If the venv exists, dependency
+    presence is inferred from the canonical install artefacts (garf binary)
+    rather than from the running interpreter's site-packages — this avoids
+    false negatives when onboarding is invoked via system python.
+    """
     issues: list[str] = []
+    venv_present = _project_venv_bin().parent.exists()
 
     if require_read:
-        missing = _missing_distributions(["garf-executors", "garf-google-ads", "pyyaml"])
-        if missing:
-            issues.append("reporting packages are missing")
-        try:
-            import yaml as _yaml  # noqa: F401
-        except ImportError:
-            issues.append("YAML support is missing")
+        if not venv_present:
+            missing = _missing_distributions(["garf-executors", "garf-google-ads", "pyyaml"])
+            if missing:
+                issues.append("the reporting tools aren't installed yet")
         if not _garf_executable_exists():
-            issues.append("the Google Ads reporting runner is missing")
+            issues.append("the Google Ads data tool isn't installed yet")
 
     if require_write:
-        missing = _missing_distributions(["google-ads", "google-auth-oauthlib", "pyyaml"])
-        if missing:
-            issues.append("write-back packages are missing")
+        if not venv_present:
+            missing = _missing_distributions(["google-ads", "google-auth-oauthlib", "pyyaml"])
+            if missing:
+                issues.append("the live-changes tools aren't installed yet")
 
     return sorted(set(issues))
+
+
+def _install_with_log(log_path: Path) -> bool:
+    """Run _install_project_requirements with verbose output captured to log_path.
+
+    Returns True on success, False on failure. Used as the second-attempt retry.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    venv_python = _venv_python()
+    pip_cmd = [str(venv_python), "-m", "pip", "install", "-v", "-r", str(ROOT / "requirements.txt")]
+    try:
+        with open(log_path, "w") as logf:
+            subprocess.check_call(pip_cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+    except FileNotFoundError:
+        return False
 
 
 def _repair_and_check_onboarding_runtime(require_read: bool, require_write: bool) -> list[str]:
@@ -555,8 +589,15 @@ def _repair_and_check_onboarding_runtime(require_read: bool, require_write: bool
     try:
         _install_project_requirements()
     except subprocess.CalledProcessError:
-        return _onboarding_runtime_issues(require_read, require_write) or issues
+        pass
 
+    issues = _onboarding_runtime_issues(require_read, require_write)
+    if not issues:
+        return []
+
+    # Second attempt: verbose install with output captured for diagnosis.
+    print("  First install didn't take. Trying once more...")
+    _install_with_log(ROOT / "logs" / "setup.log")
     return _onboarding_runtime_issues(require_read, require_write)
 
 
@@ -803,6 +844,17 @@ def fetch(args: argparse.Namespace) -> None:
     log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(output_file), reason, question, outcome="fetched")
     print(f"raw output written: {output_file}")
     print(f"metadata written: {meta_file}")
+    try:
+        with open(output_file, newline="") as _f:
+            _row_count = sum(1 for _ in csv.reader(_f)) - 1
+    except Exception:
+        _row_count = -1
+    if _row_count == 0:
+        print(
+            f"WARNING: 0 rows for {account} / {query_name} / {start.isoformat()}..{end.isoformat()}. "
+            f"The account may have no activity in this window.",
+            file=sys.stderr,
+        )
 
 
 def bootstrap(args: argparse.Namespace) -> None:
@@ -955,6 +1007,7 @@ CURRENCY_SYMBOLS: dict[str, str] = {
 METRIC_DISPLAY_SPEC: list[tuple[str, str, str]] = [
     ("Users",        "reach",                   "count"),
     ("Impressions",  "impressions",              "count"),
+    ("Cost",         "cost",                     "cost"),
     ("CPM",          "cpm",                      "cost"),
     ("Frequency",    "frequency",                "ratio"),
     ("Clicks",       "clicks",                   "count"),
@@ -1102,14 +1155,22 @@ def _aggregate_period_rows(
     primary_goal: str,
 ) -> list[dict]:
     """Group by key_cols, sum SUM_METRICS, recalculate derived metrics."""
+    # reach (unique_users) is summed only when the source actually provides it
+    # — i.e. the reach grain, which has no network split. Network/adgroup grains
+    # never fetch unique_users, so reach stays absent here → NA in _derive_metrics,
+    # preserving the "no reach for network/adgroup breakdowns" rule.
+    reach_present = any(
+        str(r.get("reach", "")).upper() not in ("", "NA", "NONE") for r in rows
+    )
+    sum_metrics = SUM_METRICS + (["reach"] if reach_present else [])
     grouped: dict[tuple, dict[str, Any]] = {}
     for row in rows:
         key = tuple(row.get(col, "") for col in key_cols)
         if key not in grouped:
             grouped[key] = {col: row.get(col, "") for col in key_cols}
-            for m in SUM_METRICS:
+            for m in sum_metrics:
                 grouped[key][m] = 0.0
-        for m in SUM_METRICS:
+        for m in sum_metrics:
             grouped[key][m] += number(row.get(m))
     out = []
     for key in sorted(grouped):
@@ -1168,13 +1229,19 @@ def _agg_account_daily(
         output_path = account_processed_dir(customer, "account") / f"account_daily_{customer}_{start}_{end}.csv"
     write_csv(output_path, out_rows, ACCOUNT_DAILY_COLUMNS)
     print(f"processed aggregate written: {output_path}")
+    if not out_rows:
+        print("WARNING: aggregate account_daily produced 0 rows.", file=sys.stderr)
 
 
 def _agg_network_period(
     args: argparse.Namespace, profile: dict, grain: str, primary_goal: str
 ) -> None:
     source = args.source or grain
-    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    # Normalize to the hyphen-stripped form used by the processed dir, the raw
+    # files, and find_processed_files_for_period — otherwise a hyphenated prefix
+    # creates a duplicate file for the same window and the date-keyed selector
+    # picks one at random.
+    customer = (args.customer or profile.get("google_ads_customer_id") or "unknown").replace("-", "")
     from_date = getattr(args, "from_date", None)
     to_date = getattr(args, "to", None)
     if args.input:
@@ -1210,6 +1277,11 @@ def _agg_network_period(
         output_path = account_processed_dir(customer, subdir) / f"{customer}_{file_start}_{file_end}.csv"
     write_csv(output_path, out_rows, _NETWORK_PERIOD_COLUMNS[grain])
     print(f"processed aggregate written: {output_path}")
+    if not out_rows:
+        print(
+            f"WARNING: aggregate {grain} produced 0 rows from {input_path.name}.",
+            file=sys.stderr,
+        )
 
 
 def _agg_creative_period(
@@ -1239,6 +1311,11 @@ def _agg_creative_period(
         output_path = account_processed_dir(customer, "creative") / f"{customer}_{file_start}_{file_end}.csv"
     write_csv(output_path, out_rows, CREATIVE_PERIOD_COLUMNS)
     print(f"processed aggregate written: {output_path} ({len(out_rows)} creatives >= {min_imp} impressions)")
+    if not out_rows:
+        print(
+            f"WARNING: aggregate creative_period produced 0 rows above {min_imp} impressions.",
+            file=sys.stderr,
+        )
 
 
 def _agg_campaign_weekly_trend(
@@ -1341,6 +1418,11 @@ def _agg_campaign_weekly_trend(
     trend_cols = _weekly_trend_columns([w0_iso, w1_iso, w2_iso])
     write_csv(output_path, out_rows, trend_cols)
     print(f"processed aggregate written: {output_path} ({len(out_rows)} campaigns)")
+    if not out_rows:
+        print(
+            "WARNING: aggregate campaign_weekly_trend produced 0 rows.",
+            file=sys.stderr,
+        )
 
 
 def correlate_change_history(
@@ -1528,15 +1610,32 @@ def slice_campaigns(args: argparse.Namespace) -> None:
                 "Run: python3 lib/datapull.py aggregate --grain campaign_network_period"
             )
 
-    cur_rows = [r for r in read_csv(current_path) if pattern in r.get("campaign_name", "").lower()]
-    base_rows = [r for r in read_csv(baseline_path) if pattern in r.get("campaign_name", "").lower()]
-
-    if not cur_rows and not base_rows:
-        print(f"no campaigns matching {args.name_contains!r}")
-        return
-
+    all_cur = read_csv(current_path)
+    all_base = read_csv(baseline_path)
     cur_label = _date_label(current_path)
     base_label = _date_label(baseline_path)
+    if not all_cur or not all_base:
+        empty_sides = []
+        if not all_cur:
+            empty_sides.append(cur_label)
+        if not all_base:
+            empty_sides.append(base_label)
+        print(
+            f"No data for {', '.join(empty_sides)} (account {customer_id}). "
+            f"Nothing to compare.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    cur_rows = [r for r in all_cur if pattern in r.get("campaign_name", "").lower()]
+    base_rows = [r for r in all_base if pattern in r.get("campaign_name", "").lower()]
+
+    if not cur_rows and not base_rows:
+        print(
+            f"No campaigns matching {args.name_contains!r} in either period.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     print(f"\nCampaign slice: name contains '{args.name_contains}'")
     print(f"Current: {cur_label}  |  Baseline: {base_label}")
 
@@ -1614,9 +1713,29 @@ def compare_weeks(args: argparse.Namespace) -> None:
 
         cur_rows = read_csv(cur_path)
         base_rows = read_csv(base_path)
+        if not cur_rows or not base_rows:
+            empty_sides = []
+            if not cur_rows:
+                empty_sides.append(cur_label)
+            if not base_rows:
+                empty_sides.append(base_label)
+            print(
+                f"\n[{grain_name}] No data for {', '.join(empty_sides)} "
+                f"(account {customer_id}). Nothing to compare.",
+                file=sys.stderr,
+            )
+            all_ok = False
+            continue
         if grain_name == "campaign_network_period" and name_filter:
             cur_rows = [r for r in cur_rows if name_filter in r.get("campaign_name", "").lower()]
             base_rows = [r for r in base_rows if name_filter in r.get("campaign_name", "").lower()]
+            if not cur_rows and not base_rows:
+                print(
+                    f"\n[{grain_name}] no campaigns matching '{args.name_contains}' in either week.",
+                    file=sys.stderr,
+                )
+                all_ok = False
+                continue
 
         # Optional: reach-only grain for campaign segment metric table.
         cur_reach_rows = None
@@ -1740,10 +1859,30 @@ def compare_months(args: argparse.Namespace) -> None:
 
         cur_rows = read_csv(cur_path)
         base_rows = read_csv(base_path)
+        if not cur_rows or not base_rows:
+            empty_sides = []
+            if not cur_rows:
+                empty_sides.append(cur_label)
+            if not base_rows:
+                empty_sides.append(base_label)
+            print(
+                f"\n[{grain_name}] No data for {', '.join(empty_sides)} "
+                f"(account {customer_id}). Nothing to compare.",
+                file=sys.stderr,
+            )
+            all_ok = False
+            continue
 
         if grain_name == "campaign_network_period" and name_filter:
             cur_rows = [r for r in cur_rows if name_filter in r.get("campaign_name", "").lower()]
             base_rows = [r for r in base_rows if name_filter in r.get("campaign_name", "").lower()]
+            if not cur_rows and not base_rows:
+                print(
+                    f"\n[{grain_name}] no campaigns matching '{args.name_contains}' in either month.",
+                    file=sys.stderr,
+                )
+                all_ok = False
+                continue
 
         cur_reach_rows = None
         base_reach_rows = None
@@ -2621,6 +2760,13 @@ def slice_creatives(args: argparse.Namespace) -> None:
 
     creative_path = newest_processed("creative", customer_id)
     rows = read_csv(creative_path)
+    if not rows:
+        print(
+            f"No creative data in {creative_path.name} (account {customer_id}). "
+            f"Nothing to slice.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     # Step 1: filter to min impressions only
     eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
@@ -4523,11 +4669,11 @@ def _ob_prompt(label: str, default: str = "") -> str:
     so the prompt works reliably when relayed through a terminal emulator or agent.
     """
     if default:
-        hint = f" [default: {default} — type 'y' to keep]"
+        prompt_line = f"  {label} — default is {default}, type 'y' to accept or enter a value: "
     else:
-        hint = ""
+        prompt_line = f"  {label}: "
     try:
-        val = input(f"  {label}{hint}: ").strip()
+        val = input(prompt_line).strip()
     except (EOFError, KeyboardInterrupt):
         print("\nAborted.")
         raise SystemExit(0)
@@ -4915,12 +5061,8 @@ def onboard(args: argparse.Namespace) -> None:
     )
     if runtime_issues:
         print(f"""
-  {account_name} is saved, but Bob is not ready to answer reporting questions yet.
-
-  Local setup still needs attention:
-  - {'; '.join(runtime_issues)}
-
-  Fix that first, then ask your first performance question.
+  {account_name} is saved, mate. One thing didn't install cleanly on the first try —
+  ask me to "fix setup" and I'll have another go.
 """)
         return
 
@@ -4941,6 +5083,9 @@ def onboard(args: argparse.Namespace) -> None:
   {read_status}
   {write_status}
 
+  From now on, run commands as ./bob <subcommand>.
+  Type ./bob to see what's available, or ./bob <name> --help for any one.
+
   Good first questions to ask next:
   1) What happened yesterday?
   2) How did yesterday compare to the same day last week?
@@ -4949,29 +5094,49 @@ def onboard(args: argparse.Namespace) -> None:
 """)
 
 
+def _resolve_account_target(accounts: list[dict], target: str) -> int:
+    """Resolve a positional target to an index into `accounts`.
+
+    Order: (1) exact Customer ID match, hyphens optional; (2) unique
+    case-insensitive substring of account_name. Raises SystemExit on no match
+    or ambiguous name match.
+    """
+    target_clean = target.strip()
+    target_digits = target_clean.replace("-", "")
+    for i, a in enumerate(accounts):
+        cid = a.get("google_ads_customer_id", "")
+        if cid == target_clean or cid.replace("-", "") == target_digits:
+            return i
+    needle = target_clean.lower()
+    name_hits = [
+        i for i, a in enumerate(accounts)
+        if needle in a.get("account_name", "").lower()
+    ]
+    if len(name_hits) == 1:
+        return name_hits[0]
+    if len(name_hits) > 1:
+        names = ", ".join(accounts[i].get("account_name", "") for i in name_hits)
+        die(f"'{target}' matches multiple accounts: {names}. Use the Customer ID instead.")
+    die(f"no account matches '{target}'. Run 'list-accounts' to see registered accounts.")
+
+
 def switch_account(args: argparse.Namespace) -> None:
     accounts = _load_accounts_registry()
     if not accounts:
         print("No accounts registered. Run: python3 lib/datapull.py onboard")
         return
 
-    print("\nRegistered accounts:\n")
-    for i, a in enumerate(accounts, 1):
-        marker = "[ACTIVE]" if a.get("active") else "       "
-        cid = a.get("google_ads_customer_id", "")
-        name = a.get("account_name", cid)
-        ctype = a.get("campaign_type", "")
-        print(f"  {i}) {marker}  {name} — {cid}  ({ctype})")
-
-    target_id = getattr(args, "account_id", None)
-    if target_id:
-        choice_idx = next(
-            (i for i, a in enumerate(accounts) if a.get("google_ads_customer_id") == target_id),
-            None
-        )
-        if choice_idx is None:
-            die(f"account {target_id} not registered. Run 'onboard' to add it.")
+    target = getattr(args, "target", None) or getattr(args, "account_id", None)
+    if target:
+        choice_idx = _resolve_account_target(accounts, target)
     else:
+        print("\nRegistered accounts:\n")
+        for i, a in enumerate(accounts, 1):
+            marker = "[ACTIVE]" if a.get("active") else "       "
+            cid = a.get("google_ads_customer_id", "")
+            name = a.get("account_name", cid)
+            ctype = a.get("campaign_type", "")
+            print(f"  {i}) {marker}  {name} — {cid}  ({ctype})")
         raw = _ob_prompt("\nSwitch to (number)")
         if not raw.isdigit() or not (1 <= int(raw) <= len(accounts)):
             print("No change.")
@@ -4991,6 +5156,36 @@ def switch_account(args: argparse.Namespace) -> None:
     print(f"\nSwitched to {name} ({cid}).")
     print(f"  Data:  {account_processed_dir(cid, 'account-network').parent}")
     print(f"  Wiki:  {account_wiki_dir(cid)}")
+
+
+def repair_setup(args: argparse.Namespace) -> None:
+    """Reinstall project dependencies and recheck local readiness.
+
+    Agent-facing entry triggered by user phrases like "fix setup", "rerun setup",
+    or "setup failed". No account prompts — strictly a dependency repair path.
+    """
+    print("\n  Reinstalling Bob's local tools...")
+    try:
+        _install_project_requirements()
+    except subprocess.CalledProcessError:
+        pass
+
+    issues = _onboarding_runtime_issues(require_read=True, require_write=False)
+    if not issues:
+        print("  Setup looks good.")
+        return
+
+    print("  First install didn't take. Trying once more with verbose output...")
+    _install_with_log(ROOT / "logs" / "setup.log")
+    issues = _onboarding_runtime_issues(require_read=True, require_write=False)
+    if not issues:
+        print("  Setup looks good.")
+        return
+
+    print("\n  Still not right:")
+    for issue in issues:
+        print(f"  - {issue}")
+    print(f"\n  Full install log: {ROOT / 'logs' / 'setup.log'}")
 
 
 def list_accounts(args: argparse.Namespace) -> None:
@@ -5216,16 +5411,63 @@ def build_parser() -> argparse.ArgumentParser:
     ob_parser.set_defaults(func=onboard)
 
     sa_parser = sub.add_parser("switch-account", help="switch the active Google Ads account")
-    sa_parser.add_argument("--account-id", help="customer ID to switch to (skip menu)")
+    sa_parser.add_argument("target", nargs="?", help="customer ID (with or without hyphens) or unique account-name substring")
+    sa_parser.add_argument("--account-id", help="customer ID to switch to (legacy flag; positional 'target' is preferred)")
     sa_parser.set_defaults(func=switch_account)
 
     la_parser = sub.add_parser("list-accounts", help="list all registered Google Ads accounts")
     la_parser.set_defaults(func=list_accounts)
 
+    rs_parser = sub.add_parser("repair-setup", help="reinstall project dependencies and recheck readiness")
+    rs_parser.set_defaults(func=repair_setup)
+
     return parser
 
 
+_COMMAND_MAP = """Bob — Performance Marketing Analyst CLI
+
+SETUP
+  onboard                       First-run setup for a new Google Ads account
+  switch-account                Change active account (positional ID or name supported)
+  list-accounts                 Show registered accounts
+  check-config                  Verify Google Ads credentials
+  repair-setup                  Reinstall local dependencies if setup didn't take
+  setup-write-credentials       One-time OAuth for bid/budget mutation credentials
+
+DATA
+  fetch                         Pull one GARF query from Google Ads
+  bootstrap                     Pull the default set of period windows
+  aggregate                     Build a processed grain from raw outputs
+
+ANALYSIS
+  compare-weeks                 Two ISO weeks (default: last complete vs prior)
+  compare-months                Two calendar months (MTD or full)
+  slice-campaigns               Compare a name-filtered campaign segment
+  slice-creatives               Flag underperforming creative assets
+
+ACTIONS
+  bid-budget-recommend          Generate a bid/budget plan from weekly trend
+  bid-budget-apply              Apply an approved plan to Google Ads
+  bid-budget-retrospective      Evaluate W+1/W+2 outcomes of an applied plan
+  suggest-creative-copy         Build copy plan + prompt for LOW text assets
+  suggest-static-banners        Build the quarterly static-banner design guide
+  creative-copy-apply           Push approved copy changes to Google Ads
+
+UTILITIES
+  resolve-dates                 Resolve a period name to concrete date ranges
+  validate-manual               Compare a Bob aggregate against a manual export
+  log-pull                      Write a pull-log entry without fetching
+
+For any subcommand: ./bob <name> --help
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        sys.stdout.write(_COMMAND_MAP)
+        return 0
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)

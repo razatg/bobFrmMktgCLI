@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec python3 "$ROOT/lib/datapull.py" aggregate "$@"
+if [ -x "$ROOT/bob" ]; then
+  exec "$ROOT/bob" aggregate "$@"
+else
+  exec python3 "$ROOT/lib/datapull.py" aggregate "$@"
+fi

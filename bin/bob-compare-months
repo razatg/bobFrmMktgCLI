@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Compare MTD or full-month performance across two calendar months.
-# Usage: bob-compare-months [--month N] [--vs M] [--year YYYY] [--full]
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$SCRIPT_DIR/../lib/datapull.py" compare-months "$@"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -x "$ROOT/bob" ]; then
+  exec "$ROOT/bob" compare-months "$@"
+else
+  exec python3 "$ROOT/lib/datapull.py" compare-months "$@"
+fi

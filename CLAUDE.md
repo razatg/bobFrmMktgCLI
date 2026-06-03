@@ -35,7 +35,7 @@ ls data/processed/<customer_id_no_hyphens>/<subdir>/  # list processed files for
 ./bob <subcommand> [options]
 ```
 
-After onboarding, prefer `./bob` for all commands so the project virtual environment is used. Use `python3 lib/datapull.py onboard` only to start onboarding before the launcher exists.
+After onboarding, run commands as `./bob <subcommand>` — the launcher uses the project virtualenv. Use `python3 lib/datapull.py onboard` only to start onboarding before `./bob` exists. Do not call `bin/bob-*` directly except as fallback shortcuts (they proxy through `./bob`). When a question doesn't match any reference file, run `./bob` for the command map and `./bob <subcommand> --help` for flags — never invent a subcommand name.
 
 **Common subcommands:**
 ```bash
@@ -99,6 +99,8 @@ python3 lib/datapull.py onboard                # interactive setup before ./bob 
 {"timestamp":"...","query":"...","from_date":"...","to_date":"...","account":"...","reason":"...","run_id":"...","output_file":"..."}
 ```
 The `reason` field records why the pull was made. Dry-run fetches do **not** write to the log.
+
+**Read the log first.** Before any `./bob fetch`, before any `ls garf/outputs/raw/`, before any grep over CSVs — read `logs/pull-log.jsonl` and filter to the active account's customer ID (no hyphens). That single file is the canonical answer to "what's been pulled, when, and why for this account." Only fall back to `ls`/`grep` if you need to confirm a specific file on disk after consulting the log.
 
 **Dry run** (renders and saves query without executing):
 ```bash
