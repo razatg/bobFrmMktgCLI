@@ -10,6 +10,7 @@
     "data/processed/",
     "logs/pull-log.jsonl",
     "logs/backlog.md",
+    "logs/session-signals.jsonl",
     "validation/reports/",
     "google-ads/logs/",
     "wiki/",

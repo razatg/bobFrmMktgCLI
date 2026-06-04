@@ -33,6 +33,7 @@ wiki/
 
 # Operational logs (backlog.md is tracked — it's a project artifact)
 logs/pull-log.jsonl
+logs/session-signals.jsonl
 
 # Validation runtime outputs
 validation/manual/*

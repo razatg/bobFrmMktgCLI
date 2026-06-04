@@ -278,6 +278,28 @@ The question must then be appended to `logs/backlog.md` under `## Bug Reports` o
 ```
 Use **BUG** when Bob routed or responded incorrectly. Use **FEATURE** when the capability is genuinely missing. Full rules are in `.agents/skills/bob-google-ads/SKILL.md` → Failsafe section.
 
+## Self-Improvement
+
+Bob learns from its own stumbles through a three-layer, fully **agent-agnostic** loop — nothing
+depends on Claude Code internals (no hooks, no transcript scraping), so it runs identically under
+any agent:
+
+1. **Capture (two halves, both agent-agnostic).** *Hard signals* are logged automatically by the
+   CLI — `datapull.py` self-instruments, so any failed `./bob` subcommand records a `tool_error`
+   and a fetch for an on-disk window records a `redundant_fetch`, with no agent cooperation.
+   *Soft signals* live only in the conversation (the CLI can't see it), so the agent flags them via
+   `./bob log-signal --type <failsafe|user_correction|plan_rejection|retry|friction> --note "…"
+   [--severity …]`. The contract lives in `AGENTS.md` → "Signal logging". Log once per stumble;
+   don't narrate it. A failsafe both writes `logs/backlog.md` and logs a `failsafe` signal.
+2. **Storage.** `log-signal` appends one JSON line to `logs/session-signals.jsonl` (gitignored,
+   machine-local), mirroring the pull-log. Allowed in analysis mode.
+3. **Synthesis (manual, proposal-only).** When the user asks Bob to review its mistakes, run
+   `./bob self-improve` (prep summary + file pointers — no LLM), then the `bob-self-improve` skill
+   clusters the signal log + `logs/backlog.md` by root cause, ranks by frequency × severity, traces
+   each pitfall to a responsible artifact, and writes a **proposal-only** action plan to
+   `wiki/_self-improve/action-plan-YYYY-MM-DD.md`. It never edits source or skills — a human
+   approves and applies each item. See `.agents/skills/bob-self-improve/`.
+
 ## Current Build Status (from PLAN.md)
 
 **Complete**: skeleton, profile/config, all GARF period-aggregate queries, fetch/bootstrap/aggregate/validate/check-config commands, all aggregate grains including `mtd` period and `campaign_weekly_trend`, metric definitions, all 6 MVP intent reference files with CLI commands + auto-escalation + wiki artefact templates.

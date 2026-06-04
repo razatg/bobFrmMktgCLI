@@ -32,6 +32,8 @@ RAW_DIR = ROOT / "garf" / "outputs" / "raw"
 PROCESSED_DIR = ROOT / "data" / "processed"
 REPORTS_DIR = ROOT / "validation" / "reports"
 PULL_LOG_PATH = ROOT / "logs" / "pull-log.jsonl"
+SIGNAL_LOG_PATH = ROOT / "logs" / "session-signals.jsonl"
+SELF_IMPROVE_DIR = ROOT / "wiki" / "_self-improve"
 
 DEFAULT_BOOTSTRAP = [
     {"query": "account_network_period", "period": "yesterday_vs_sdlw"},
@@ -728,6 +730,63 @@ def log_pull(
         f.write("\n")
 
 
+def log_signal(
+    event_type: str,
+    note: str,
+    account: str = "",
+    user_text: str = "",
+    intent: str = "",
+    artifact: str = "",
+    severity: str = "",
+) -> dict:
+    """Append one self-improvement signal to logs/session-signals.jsonl.
+
+    Records only friction moments (a stumble, retry, correction, failsafe) — never
+    the full conversation. Agent-agnostic: any agent (Claude, Gemini, Codex) captures
+    signal by calling `./bob log-signal`, so this depends on no runtime internals.
+    Absent optional fields are omitted (not null), matching log_pull style.
+    """
+    SIGNAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry: dict[str, Any] = {
+        "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "event_type": event_type,
+        "note": note,
+    }
+    if user_text:
+        entry["user_text"] = user_text[:280]
+    if intent:
+        entry["intent"] = intent
+    if artifact:
+        entry["artifact"] = artifact
+    if severity:
+        entry["severity"] = severity
+    if account:
+        entry["account"] = account
+    agent = os.getenv("BOB_AGENT", "")
+    if agent:
+        entry["agent"] = agent
+    with SIGNAL_LOG_PATH.open("a") as f:
+        json.dump(entry, f)
+        f.write("\n")
+    return entry
+
+
+def _read_signal_log() -> list[dict]:
+    """Read logs/session-signals.jsonl into a list of dicts, tolerant of bad lines."""
+    if not SIGNAL_LOG_PATH.exists():
+        return []
+    out = []
+    for line in SIGNAL_LOG_PATH.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 def write_metadata(path: Path, metadata: dict[str, Any]) -> None:
     with path.open("w") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
@@ -787,6 +846,18 @@ def fetch(args: argparse.Namespace) -> None:
         if existing:
             print(f"skipping {query_name} {start}..{end} — already have {existing[-1].name}")
             log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(existing[-1]), reason, question, outcome="skipped_raw")
+            # Self-instrumentation: a fetch for a window already on disk is a redundant
+            # fetch. Logged by the CLI itself — no agent cooperation required.
+            try:
+                log_signal(
+                    event_type="redundant_fetch",
+                    note=f"fetch {query_name} {start}..{end} but raw file already on disk ({existing[-1].name})",
+                    account=account,
+                    intent="fetch",
+                    severity="friction",
+                )
+            except Exception:
+                pass
             return
 
     rendered_query = render_query(query_name, start, end)
@@ -5223,6 +5294,57 @@ def log_pull_cmd(args: argparse.Namespace) -> None:
     print(f"logged: {args.outcome} — {args.query} {args.from_date or ''}..{args.to or ''}")
 
 
+def log_signal_cmd(args: argparse.Namespace) -> None:
+    """Append one self-improvement signal — a friction moment in this session."""
+    profile = load_profile(required=False)
+    account = args.account or str(profile.get("google_ads_customer_id", "")).replace("-", "")
+    entry = log_signal(
+        event_type=args.type,
+        note=args.note,
+        account=account,
+        user_text=args.user_text,
+        intent=args.intent,
+        artifact=args.artifact,
+        severity=args.severity,
+    )
+    print(f"signal logged: {entry['event_type']} — {entry['note']}")
+
+
+def self_improve(args: argparse.Namespace) -> None:
+    """Prep step for a self-improvement pass. Summarises logged signals and points the
+    agent at the files to read. Does NOT call any model — clustering and the proposal
+    are the agent's job (see the bob-self-improve skill). Manual, proposal-only."""
+    signals = _read_signal_log()
+    backlog = ROOT / "logs" / "backlog.md"
+    if not signals:
+        print("No signals logged yet (logs/session-signals.jsonl is empty or missing).")
+        print("Nothing to synthesize. Signals accumulate as agents call `./bob log-signal`.")
+        return
+    by_type: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    for s in signals:
+        et = s.get("event_type", "?")
+        by_type[et] = by_type.get(et, 0) + 1
+        sev = s.get("severity")
+        if sev:
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+    print(f"Self-improvement signals: {len(signals)} total\n")
+    print("By event type:")
+    for k in sorted(by_type, key=lambda x: -by_type[x]):
+        print(f"  {by_type[k]:>4}  {k}")
+    if by_severity:
+        print("\nBy severity:")
+        for k in sorted(by_severity, key=lambda x: -by_severity[x]):
+            print(f"  {by_severity[k]:>4}  {k}")
+    print("\nRead these to cluster pitfalls and write the proposal:")
+    print(f"  signals : {SIGNAL_LOG_PATH}")
+    if backlog.exists():
+        print(f"  backlog : {backlog}")
+    plan_path = SELF_IMPROVE_DIR / f"action-plan-{today().isoformat()}.md"
+    print(f"\nWrite the proposal-only action plan to: {plan_path}")
+    print("Nothing is changed by this command. See the bob-self-improve skill for the synthesis steps.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bob-data", description="Bob Frm Mktg data pull tools")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -5263,6 +5385,19 @@ def build_parser() -> argparse.ArgumentParser:
     lp_parser.add_argument("--question", default="")
     lp_parser.add_argument("--outcome", default="skipped_wiki", choices=["skipped_wiki", "skipped_raw", "fetched"])
     lp_parser.set_defaults(func=log_pull_cmd)
+
+    sig_parser = sub.add_parser("log-signal", help="record a self-improvement signal (a friction moment) — agent-agnostic")
+    sig_parser.add_argument("--type", required=True, help="event type: failsafe|tool_error|retry|user_correction|plan_rejection|redundant_fetch|friction (free-form allowed)")
+    sig_parser.add_argument("--note", required=True, help="one-line description of the stumble")
+    sig_parser.add_argument("--user-text", dest="user_text", default="", help="the triggering user input (truncated to 280)")
+    sig_parser.add_argument("--intent", default="", help="intent/route involved, e.g. compare-weeks")
+    sig_parser.add_argument("--artifact", default="", help="best guess at the responsible file/rule")
+    sig_parser.add_argument("--severity", default="", help="blocked|wrong|friction|cosmetic — feeds ranking")
+    sig_parser.add_argument("--account", default="", help="override active account (defaults to active profile)")
+    sig_parser.set_defaults(func=log_signal_cmd)
+
+    si_parser = sub.add_parser("self-improve", help="summarise logged signals + point to files for a self-improvement pass")
+    si_parser.set_defaults(func=self_improve)
 
     agg_parser = sub.add_parser("aggregate", help="create processed aggregates")
     agg_parser.add_argument("--source")
@@ -5457,9 +5592,35 @@ UTILITIES
   resolve-dates                 Resolve a period name to concrete date ranges
   validate-manual               Compare a Bob aggregate against a manual export
   log-pull                      Write a pull-log entry without fetching
+  log-signal                    Record a self-improvement signal (a friction moment)
+  self-improve                  Summarise signals for a self-improvement pass
 
 For any subcommand: ./bob <name> --help
 """
+
+
+def _auto_log_cli_failure(command: str, argv: list[str], detail: str) -> None:
+    """Self-instrumentation: record a tool_error signal when a CLI command fails.
+
+    Agent-agnostic — fires regardless of who invoked ./bob, with no agent cooperation,
+    so the hard signals land even when an agent stays quiet. Best-effort: signal logging
+    must never mask or replace the original error. Skips the self-improvement commands
+    themselves to avoid noise/recursion.
+    """
+    if command in ("log-signal", "self-improve"):
+        return
+    try:
+        profile = load_profile(required=False)
+        account = str(profile.get("google_ads_customer_id", "")).replace("-", "")
+        log_signal(
+            event_type="tool_error",
+            note=f"bob {' '.join(argv)} failed: {detail}"[:280],
+            account=account,
+            intent=command,
+            severity="friction",
+        )
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5470,7 +5631,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    command = getattr(args, "command", argv[0])
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        raise
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        if code != 0:
+            _auto_log_cli_failure(command, argv, f"exited with code {code}")
+        raise
+    except Exception as e:
+        _auto_log_cli_failure(command, argv, f"{type(e).__name__}: {e}")
+        raise
     return 0
 
 

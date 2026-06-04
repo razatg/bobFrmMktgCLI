@@ -89,6 +89,46 @@ Then append to `logs/backlog.md`:
 
 Use **BUG** when Bob routed or responded incorrectly. Use **FEATURE** when the capability is genuinely missing.
 
+A failsafe is also a stumble — after writing the backlog entry, record a signal too (see below):
+`./bob log-signal --type failsafe --note "<short>" --user-text "<exact question>" --severity blocked`.
+
+## Signal logging — learning from your own stumbles
+
+Bob improves itself by collecting the moments where it stumbled, then periodically turning them
+into an improvement plan. Capture is **agent-agnostic** — it works identically under Claude, Gemini,
+or Codex and depends on no runtime internals — and splits into two halves:
+
+**Hard signals — logged automatically by the CLI; you don't need to do anything.** `datapull.py`
+self-instruments: any `./bob` subcommand that fails records a `tool_error` signal (with the command
+and exit detail), and a `fetch` for a window already on disk records a `redundant_fetch`. These fire
+regardless of who invoked `./bob`, so they land even if you say nothing.
+
+**Soft signals — only the conversation reveals these, so you (or the user) must flag them.** The CLI
+can't see the chat. When one happens, record it:
+
+```
+./bob log-signal --type <event_type> --note "<one line>" [--user-text "…"] [--intent …] [--artifact …] [--severity blocked|wrong|friction|cosmetic]
+```
+
+Log **once per distinct stumble** — not per tool call. Keep `--note` short. **Don't narrate the
+logging to the user** — it's silent bookkeeping, like the pull-log. Soft signals to record yourself:
+
+- `failsafe` — a question was genuinely unanswerable (also write `logs/backlog.md`, as above).
+- `user_correction` — the user corrected a wrong route or answer mid-conversation ("no", "I meant", "actually").
+- `plan_rejection` — the user rejected a plan or action you proposed.
+- `retry` — you re-ran essentially the same command after working around a failure.
+- `friction` — anything else where Bob made the user repeat themselves or took the long way round.
+
+(`tool_error` and `redundant_fetch` are handled by the CLI — don't log them by hand.)
+
+Set `--severity` honestly (`blocked` > `wrong` > `friction` > `cosmetic`) and, when you can, name
+the likely responsible file in `--artifact` (a reference doc, a routing rule, a CLI behaviour).
+These feed the ranking when the user later runs a self-improvement pass.
+
+This is capture only. The synthesis pass — clustering signals into a proposal-only action plan —
+is **manual**: the user triggers it, and it never changes code or skills on its own. See
+`.agents/skills/bob-self-improve/` (Claude) or run `./bob self-improve` for the prep summary.
+
 ## Further reading
 
 - `CLAUDE.md` — Claude-specific extensions (skill routing, voice patterns).
