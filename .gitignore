@@ -22,18 +22,25 @@ env/
 .bob/accounts.json
 .bob/accounts/
 
+# Team sync config (./bob sync) — per-machine shared-folder path, never in the public repo
+.bob/sync.json
+
 # Raw API outputs
 garf/outputs/raw/
 
 # Processed data
 data/processed/
 
-# Wiki analyses (generated per session, per account — not for sharing)
+# Wiki analyses — kept out of the PUBLIC repo. Shared with teammates via `./bob sync`
+# (a shared folder, e.g. synced Dropbox — no git), never pushed to GitHub origin.
 wiki/
 
-# Operational logs (backlog.md is tracked — it's a project artifact)
+# Operational logs — pull-log is machine-local; session-signals + backlog are shared with the
+# team via `./bob sync` (a shared folder), NOT the public repo. backlog.md was previously tracked
+# and is now untracked (git rm --cached) so user bug/feature quotes stay out of the public repo.
 logs/pull-log.jsonl
 logs/session-signals.jsonl
+logs/backlog.md
 
 # Validation runtime outputs
 validation/manual/*

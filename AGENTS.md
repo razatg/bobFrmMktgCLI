@@ -27,6 +27,13 @@ If a question doesn't match any reference file in `.agents/skills/`, run `./bob`
 ## Hard constraints
 
 - **No fabrication.** Every number, table, or recommendation must come from CLI output you actually ran in this session. Do not estimate, interpolate, or paraphrase from memory.
+- **Pad wiki tables for raw-text readability.** Wiki files are read as plain text, so any table written to `wiki/` must have its columns aligned without a markdown renderer. Pad every cell with spaces to its column's widest value — label/text columns left-aligned, numeric columns (counts, costs, %, Δ) right-aligned so digits line up — and make the separator-row dashes span the full column width (`---`/`:---` = left, `---:` = right). Never truncate table rows in a wiki file. Example:
+  ```
+  | Metric      |  May 2026 |  Apr 2026 |      Δ |
+  | ----------- | --------: | --------: | -----: |
+  | Impressions | 2,272.74M | 1,674.38M | +35.7% |
+  | Cost        |  ₹126.51M |  ₹112.38M | +12.6% |
+  ```
 - **No scratch scripts.** Don't write Python, pandas, shell, or any ad-hoc analysis code. Work only from columns already in processed CSV outputs. If a computation has no CLI subcommand, use the failsafe response.
 - **No data overfitting.** Don't write logic that assumes the naming conventions, structural patterns, or values of the current account or platform. Parsing, classification, and grouping must be derived from the data as it arrives.
 - **No advertiser overfitting.** Don't anchor instructions or creative guidance to one advertiser's brand, products, colors, or naming patterns. Account-specific examples are examples only.
@@ -128,6 +135,36 @@ These feed the ranking when the user later runs a self-improvement pass.
 This is capture only. The synthesis pass — clustering signals into a proposal-only action plan —
 is **manual**: the user triggers it, and it never changes code or skills on its own. See
 `.agents/skills/bob-self-improve/` (Claude) or run `./bob self-improve` for the prep summary.
+
+## Sharing across machines
+
+When several people use Bob, the `wiki/` knowledge base, `logs/session-signals.jsonl`, and
+`logs/backlog.md` are shared via **`./bob sync`** — a plain **shared folder** (e.g. synced Dropbox),
+**no git required** and **never the public GitHub `origin`** (all stay gitignored in the main repo so
+they can't leak to the public repo; `backlog.md` was previously tracked and is now untracked to keep
+user bug/feature quotes out of the public repo). Only `pull-log.jsonl` is out of scope (machine-local).
+Run `./bob sync` to reconcile with the shared folder: the append-only signal log, each `Index.md`, and
+`backlog.md`'s `### ` entry blocks are unioned (concurrent additions never conflict, nothing lost),
+other wiki files are copied newer-wins with a `.bak` safety copy. Re-running is idempotent — unchanged
+files aren't rewritten. One-time per machine: `./bob sync --set-dir <shared folder path>`; making that
+folder available (install/sign into Dropbox, keep it offline-available) is the user's step.
+
+**"Hey sync" flow** — when the user says "hey sync", "hey Bob sync", "share my analyses", "pull the
+team's updates", or similar (Claude routes this via the `bob-sync` skill in `.agents/skills/bob-sync/`;
+other agents follow these steps directly):
+
+1. **Check setup** — read `.bob/sync.json`.
+   - **Not set up** (missing, or no non-empty `shared_dir`): tell the user sync isn't wired up yet and
+     what they need — the **Dropbox desktop app** installed + signed in, with a folder both they and
+     teammates can see (Shared with the team, kept **available offline** so files are real local files,
+     not online-only placeholders; any synced/shared/network folder works). Then **ask for the path**
+     (e.g. `~/Dropbox/bob-shared`) and, on their reply, run `./bob sync --set-dir "<path>"` (records it
+     + does the first sync). Report the summary.
+   - **Already set up**: skip to step 2 — do **not** ask for the path again.
+2. **Sync** — run `./bob sync` and report the one-line summary. Honour an explicit direction: "just
+   pull" → `--pull`, "just push" → `--push`, "preview"/"what would change" → `--dry-run`.
+3. **On error** (e.g. "shared folder not found — is it available / your cloud drive mounted?") surface
+   the message; it usually means Dropbox isn't running or the folder hasn't finished downloading.
 
 ## Further reading
 

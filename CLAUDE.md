@@ -92,7 +92,16 @@ After onboarding, run commands as `./bob <subcommand>` — the launcher uses the
 python3 lib/datapull.py onboard                # interactive setup before ./bob exists
 ./bob switch-account                           # switch active account context
 ./bob list-accounts                            # list all registered accounts
+
+# Team sync — share wiki/ + logs/session-signals.jsonl across machines (no git)
+./bob sync --set-dir ~/Dropbox/bob-shared      # one-time: record the shared folder
+./bob sync                                     # reconcile both ways with the shared folder
+./bob sync --pull                              # only pull teammates' changes
+./bob sync --push                              # only push your changes
+./bob sync --dry-run                           # show what would sync; change nothing
 ```
+
+**Team sync** (`./bob sync`) shares the `wiki/` knowledge base, `logs/session-signals.jsonl`, and `logs/backlog.md` with teammates through a **plain shared folder** (e.g. a synced Dropbox folder) — **no git required**. It never touches the public GitHub `origin`; all three stay gitignored in the main repo (`backlog.md` was previously tracked and is now untracked so user bug/feature quotes stay out of the public repo). Out of scope: only `pull-log.jsonl` (machine-local). The append-only signal log, each `Index.md`'s bullet lists, and `backlog.md`'s `### ` entry blocks are **unioned** (so concurrent additions never conflict and nothing is lost — even stray Dropbox "conflicted copy" log files are folded in); other wiki files are copied **newer-wins**, with the older version kept as a `.bak` safety copy. Re-running is idempotent — unchanged files are not rewritten. Setup is one-time per machine (`--set-dir` points at that machine's synced shared-folder path); the user just makes the folder available (install/sign into Dropbox and keep it offline-available, or any shared/network folder).
 
 **Pull log** — every live fetch appends one JSON line to `logs/pull-log.jsonl`:
 ```json
@@ -152,6 +161,7 @@ Bootstrap fetches ~16 small queries (each returning <100 rows) instead of 90 day
 - `.agents/skills/bob-google-ads/references/` — 6 reference files, one per intent. Each contains: required inputs, working CLI commands, significance thresholds + auto-escalation rules, and a wiki artefact template.
 - `.agents/skills/bob-bid-budget/SKILL.md` — Bid/budget skill: algorithm, mutation plan, apply, and retrospective routing.
 - `.agents/skills/bob-bid-budget/references/` — 3 reference files: `algorithm.md` (4-scenario decision matrix), `mutation-plan.md` (review + apply workflow), `retrospective.md` (W+1/W+2 evaluation).
+- `.agents/skills/bob-sync/SKILL.md` — Team-sync skill: routes "hey sync" / "hey Bob sync"; checks the shared-folder setup (`.bob/sync.json`), guides one-time `--set-dir` setup if missing, otherwise runs `./bob sync`.
 - `ARCHITECTURE.md` — Full system design doc.
 - `PLAN.md` — MVP build roadmap with phase completion status.
 
@@ -241,6 +251,7 @@ Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `deve
 | What did the team work on / change history | `change-history-summary.md` |
 | Compare a named campaign group ("Stable campaigns", "Brand campaigns") | `campaign-segment-comparison.md` |
 | Compare two ISO weeks or calendar months ("W20 vs W19", "May MTD vs April") | `calendar-period-comparison.md` |
+| Sync / share wiki + signals with teammates ("hey sync", "hey Bob sync", "share my analyses") | `bob-sync` skill — see `.agents/skills/bob-sync/` |
 
 **Auto-escalation rule** (in yesterday and period comparison references): if primary goal changes >10%, cost >15%, or any ratio >1 pp, the agent automatically proceeds to delta diagnosis without waiting for the user to ask.
 
@@ -252,6 +263,13 @@ Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `deve
 1. **Use conversation output only.** Copy numbers and tables from what's already on screen. Do NOT re-run CLI commands, do NOT run `--output`, do NOT read any CSV, do NOT use pandas. **Never truncate wiki content** — write every row of every table. No "… and N more" or "top 10 shown". Truncation in the chat is fine; truncation in the wiki file is not.
 2. **Update `wiki/{customer_id_no_hyphens}/Index.md`.** Add one line under `## Analyses` or `## Action Items`. Create the file if it doesn't exist (heading: `# Bob — Wiki Index`, sections: `## Analyses`, `## Action Items`, `## Backlog`).
 3. **Backlink.** Every wiki file starts with `← [Wiki Index](../Index.md)` after frontmatter.
+4. **Pad every table for raw-text readability.** Wiki tables are read as plain text, so columns must align without a markdown renderer. Pad every cell with spaces to its column's widest value: **label/text columns left-aligned, numeric columns (counts, costs, %, Δ) right-aligned** so digits and decimals line up. The separator row encodes the alignment (`---` or `:---` = left, `---:` = right) and its dashes span the full column width. Example:
+   ```
+   | Metric      |  May 2026 |  Apr 2026 |      Δ |
+   | ----------- | --------: | --------: | -----: |
+   | Impressions | 2,272.74M | 1,674.38M | +35.7% |
+   | Cost        |  ₹126.51M |  ₹112.38M | +12.6% |
+   ```
 
 `wiki/{customer_id_no_hyphens}/Index.md` is the per-account navigation hub — every wiki file links back to it, and it links to every wiki file.
 
