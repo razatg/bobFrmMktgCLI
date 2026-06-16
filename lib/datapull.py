@@ -565,7 +565,9 @@ def ensure_local_setup_for_onboarding() -> None:
     if current_python != target_python and venv_python.exists():
         env = os.environ.copy()
         env["BOB_ONBOARD_SETUP_DONE"] = "1"
-        os.execve(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), "onboard"], env)
+        # Forward the original onboard args (e.g. --answers, --dry-run) through the
+        # venv re-exec — hardcoding ["onboard"] here would silently drop them.
+        os.execve(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]], env)
 
 
 def _missing_distributions(distribution_names: list[str]) -> list[str]:
@@ -5393,6 +5395,235 @@ def _print_section(title: str) -> None:
     print(f"\n  ── {title} {'─' * max(0, 46 - len(title))}")
 
 
+def _print_onboard_summary(profile: dict[str, Any]) -> None:
+    """Print the confirm summary. Shared by interactive confirm and non-interactive dry-run."""
+    ct_display = dict(CAMPAIGN_TYPES).get(profile["campaign_type"], profile["campaign_type"])
+    print("\n  ── Confirm ──────────────────────────────────────────────────────")
+    print(f"  Account:       {profile['account_name']} ({profile['google_ads_customer_id']})")
+    mcc_id = profile.get("google_ads_mcc_id", "")
+    mcc_name = profile.get("google_ads_mcc_name", "")
+    if mcc_id:
+        print(f"  MCC:           {mcc_name} ({mcc_id})" if mcc_name else f"  MCC:           {mcc_id}")
+    print(f"  Campaign type: {ct_display.split('[')[0].strip()}")
+    if profile["campaign_type"] == "app":
+        print(f"  Primary goal:  {profile['primary_goal']}")
+    print(f"  Currency:      {profile['currency']}")
+    print(f"  Read access:   {'ready' if profile['google_ads_read_config_path'] else 'not set'}")
+    print(f"  Write access:  {'ready' if profile['google_ads_write_config_path'] else 'not set'}")
+    print(
+        f"  CAC ceiling:   {profile['cac_ceiling']}  |  Change %: "
+        f"{profile['bid_budget_change_pct']}  |  Cooldown: {profile['bid_budget_cooldown_days']}d"
+    )
+
+
+def _finalize_onboard(profile: dict[str, Any], write_creds_json_path: str, existing: list[dict]) -> None:
+    """Save the account and run post-save setup. Shared by interactive and non-interactive paths.
+
+    Assumes the profile is fully built and the read config (if any) is already written.
+    """
+    cid = profile["google_ads_customer_id"]
+    account_name = profile["account_name"]
+    campaign_type = profile["campaign_type"]
+    google_ads_read_config_path = profile["google_ads_read_config_path"]
+    google_ads_write_config_path = profile["google_ads_write_config_path"]
+
+    _set_active_account(profile)
+    new_entry = {
+        "google_ads_customer_id": cid,
+        "account_name": account_name,
+        "campaign_type": campaign_type,
+        "active": True,
+    }
+    updated = [dict(a, active=False) for a in existing] + [new_entry]
+    _save_accounts_registry(updated)
+
+    print("\n  Account saved.")
+
+    if write_creds_json_path:
+        print("\n  Setting up Google Ads write access now.")
+        setup_write_credentials(
+            argparse.Namespace(
+                creds=write_creds_json_path,
+                output=google_ads_write_config_path,
+            )
+        )
+
+    runtime_issues = _repair_and_check_onboarding_runtime(
+        require_read=bool(google_ads_read_config_path),
+        require_write=bool(google_ads_write_config_path),
+    )
+    if runtime_issues:
+        print(f"""
+  {account_name} is saved, mate. One thing didn't install cleanly on the first try —
+  ask me to "fix setup" and I'll have another go.
+""")
+        return
+
+    read_status = (
+        "Data access is ready. I'll pull data only when you ask a performance question."
+        if google_ads_read_config_path
+        else "Data access is not ready yet. I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads."
+    )
+    write_status = (
+        "Write access is ready."
+        if google_ads_write_config_path
+        else "Write access is not set up. No dramas — I can still save recommendations to the wiki for you to apply manually in Google Ads."
+    )
+    print(f"""
+  Righto, {account_name} is set up.
+
+  {read_status}
+  {write_status}
+
+  From now on, run commands as ./bob <subcommand>.
+  Type ./bob to see what's available, or ./bob <name> --help for any one.
+
+  Good first questions to ask next:
+  1) What happened yesterday?
+  2) How did yesterday compare to the same day last week?
+  3) How did last week compare to the week before?
+  4) Which campaigns are dragging?
+""")
+
+
+def _normalize_customer_id(raw: str) -> str:
+    """Reformat a 10-digit string to DDD-DDD-DDDD; otherwise return stripped input unchanged."""
+    raw = str(raw).strip()
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 10:
+        return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+    return raw
+
+
+def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> None:
+    """Non-interactive onboarding: validate a JSON answers blob, then save (or --dry-run preview).
+
+    The agent gathers answers conversationally and submits them here in one call — no input()
+    round-trips (which deadlock when an agent runs the script non-interactively). All validation
+    problems are reported together so the agent can re-ask only the bad fields and resubmit.
+    """
+    try:
+        data = json.loads(args.answers)
+    except (ValueError, json.JSONDecodeError) as e:
+        die(f"--answers must be valid JSON: {e}")
+    if not isinstance(data, dict):
+        die("--answers must be a JSON object, e.g. '{\"customer_id\": \"123-456-7890\", ...}'")
+
+    errors: list[str] = []
+
+    # Customer ID (required)
+    cid_raw = str(data.get("customer_id", "")).strip()
+    cid = _normalize_customer_id(cid_raw)
+    if not cid:
+        errors.append("customer_id is required (format DDD-DDD-DDDD)")
+    elif not _validate_customer_id(cid):
+        errors.append(f"customer_id '{cid_raw}' is invalid — expected 10 digits / DDD-DDD-DDDD")
+    elif any(a.get("google_ads_customer_id") == cid for a in existing):
+        errors.append(f"customer_id {cid} is already registered — use switch-account instead")
+
+    # Campaign type (required enum)
+    valid_ct = {k for k, _ in CAMPAIGN_TYPES}
+    campaign_type = str(data.get("campaign_type", "")).strip().lower()
+    if not campaign_type:
+        errors.append(f"campaign_type is required — one of {sorted(valid_ct)}")
+    elif campaign_type not in valid_ct:
+        errors.append(f"campaign_type '{data.get('campaign_type')}' is invalid — one of {sorted(valid_ct)}")
+
+    # Primary goal (enum, app only)
+    primary_goal = str(data.get("primary_goal", "in_app_conversions")).strip().lower()
+    campaign_goal_type = "app_in_app_conversions"
+    if campaign_type == "app":
+        if primary_goal not in CAMPAIGN_GOAL_TYPES:
+            errors.append(
+                f"primary_goal '{data.get('primary_goal')}' is invalid — one of {sorted(CAMPAIGN_GOAL_TYPES)}"
+            )
+        else:
+            campaign_goal_type = CAMPAIGN_GOAL_TYPES[primary_goal]["campaign_goal_type"]
+    else:
+        primary_goal = "in_app_conversions"
+
+    # Currency (required, 3-letter)
+    currency = str(data.get("currency", "")).strip().upper()
+    if not currency:
+        errors.append("currency is required (3-letter code, e.g. INR)")
+    elif not (len(currency) == 3 and currency.isalpha()):
+        errors.append(f"currency '{data.get('currency')}' is invalid — use a 3-letter code like INR or USD")
+
+    # MCC (optional)
+    mcc_id_raw = str(data.get("mcc_id", "")).strip()
+    mcc_id = ""
+    if mcc_id_raw and mcc_id_raw.lower() != "skip":
+        mcc_id = _normalize_customer_id(mcc_id_raw)
+        if not _validate_customer_id(mcc_id):
+            errors.append(f"mcc_id '{mcc_id_raw}' is invalid — expected DDD-DDD-DDDD")
+    mcc_name = str(data.get("mcc_name", "")).strip()
+
+    # Optional numeric defaults
+    def _int_field(key: str, default: int, cap: int | None = None) -> int:
+        if key not in data or data.get(key) in ("", None):
+            return default
+        try:
+            iv = int(data[key])
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be a whole number")
+            return default
+        return min(iv, cap) if cap is not None else iv
+
+    cac_ceiling = _int_field("cac_ceiling", 200)
+    bid_budget_change_pct = _int_field("bid_budget_change_pct", 10, cap=20)
+    bid_budget_cooldown_days = _int_field("bid_budget_cooldown_days", 14)
+
+    account_name = str(data.get("account_name", "")).strip() or cid
+
+    # Optional write credentials (OAuth client JSON path)
+    write_creds_json_path = ""
+    google_ads_write_config_path = ""
+    oauth_path = str(data.get("oauth_client_json_path", "")).strip()
+    if oauth_path:
+        if not Path(oauth_path).expanduser().exists():
+            errors.append(f"oauth_client_json_path '{oauth_path}' not found on this machine")
+        elif cid and _validate_customer_id(cid):
+            write_creds_json_path = oauth_path
+            google_ads_write_config_path = _default_write_config_path(cid)
+
+    developer_token = str(data.get("developer_token", "")).strip()
+    google_ads_read_config_path = (
+        _default_read_config_path(cid) if developer_token and cid and _validate_customer_id(cid) else ""
+    )
+
+    if errors:
+        die("onboarding answers have problems — fix these and resubmit:\n  - " + "\n  - ".join(errors))
+
+    profile: dict[str, Any] = {
+        "google_ads_customer_id": cid,
+        "account_name": account_name,
+        "google_ads_mcc_id": mcc_id,
+        "google_ads_mcc_name": mcc_name,
+        "campaign_type": campaign_type,
+        "primary_goal": primary_goal,
+        "currency": currency,
+        "campaign_goal_type": campaign_goal_type,
+        "google_ads_read_config_path": google_ads_read_config_path,
+        "google_ads_write_config_path": google_ads_write_config_path,
+        "creative_min_impressions": 50000,
+        "cac_ceiling": cac_ceiling,
+        "bid_budget_change_pct": bid_budget_change_pct,
+        "bid_budget_cooldown_days": bid_budget_cooldown_days,
+    }
+
+    if getattr(args, "dry_run", False):
+        print("\n  (dry run — validated, nothing saved)")
+        _print_onboard_summary(profile)
+        return
+
+    if developer_token:
+        login_customer_id = (mcc_id or cid).replace("-", "")
+        _write_garf_read_config(google_ads_read_config_path, developer_token, login_customer_id)
+
+    _print_onboard_summary(profile)
+    _finalize_onboard(profile, write_creds_json_path, existing)
+
+
 def onboard(args: argparse.Namespace) -> None:
     ensure_local_setup_for_onboarding()
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -5417,6 +5648,13 @@ def onboard(args: argparse.Namespace) -> None:
             with (acct_dir / "profile.json").open("w") as f:
                 json.dump(legacy, f, indent=2)
                 f.write("\n")
+
+    # Non-interactive path: the agent gathered answers in chat and submitted them as JSON.
+    # This avoids driving the blocking input() prompts below, which deadlock when an agent
+    # runs the script as a one-shot command.
+    if getattr(args, "answers", None):
+        _onboard_from_answers(args, existing)
+        return
 
     if existing:
         active = next((a for a in existing if a.get("active")), None)
@@ -5646,17 +5884,7 @@ def onboard(args: argparse.Namespace) -> None:
         "bid_budget_cooldown_days": bid_budget_cooldown_days,
     }
 
-    print("\n  ── Confirm ──────────────────────────────────────────────────────")
-    print(f"  Account:       {account_name} ({cid})")
-    if mcc_id:
-        print(f"  MCC:           {mcc_name} ({mcc_id})" if mcc_name else f"  MCC:           {mcc_id}")
-    print(f"  Campaign type: {ct_display.split('[')[0].strip()}")
-    if campaign_type == "app":
-        print(f"  Primary goal:  {primary_goal}")
-    print(f"  Currency:      {currency}")
-    print(f"  Read access:   {'ready' if google_ads_read_config_path else 'not set'}")
-    print(f"  Write access:  {'ready' if google_ads_write_config_path else 'not set'}")
-    print(f"  CAC ceiling:   {cac_ceiling}  |  Change %: {bid_budget_change_pct}  |  Cooldown: {bid_budget_cooldown_days}d")
+    _print_onboard_summary(profile)
 
     confirm = _ob_prompt_help(
         "\n  Save this? (y/n)",
@@ -5668,66 +5896,7 @@ def onboard(args: argparse.Namespace) -> None:
         print("No worries. Nothing saved.")
         return
 
-    # Write files
-    _set_active_account(profile)
-    # Update registry
-    new_entry = {
-        "google_ads_customer_id": cid,
-        "account_name": account_name,
-        "campaign_type": campaign_type,
-        "active": True,
-    }
-    updated = [dict(a, active=False) for a in existing] + [new_entry]
-    _save_accounts_registry(updated)
-
-    print("\n  Account saved.")
-
-    if write_creds_json_path:
-        print("\n  Setting up Google Ads write access now.")
-        setup_write_credentials(
-            argparse.Namespace(
-                creds=write_creds_json_path,
-                output=google_ads_write_config_path,
-            )
-        )
-
-    runtime_issues = _repair_and_check_onboarding_runtime(
-        require_read=bool(google_ads_read_config_path),
-        require_write=bool(google_ads_write_config_path),
-    )
-    if runtime_issues:
-        print(f"""
-  {account_name} is saved, mate. One thing didn't install cleanly on the first try —
-  ask me to "fix setup" and I'll have another go.
-""")
-        return
-
-    # ── DONE ──────────────────────────────────────────────────────────────────
-    read_status = (
-        "Data access is ready. I'll pull data only when you ask a performance question."
-        if google_ads_read_config_path
-        else "Data access is not ready yet. I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads."
-    )
-    write_status = (
-        "Write access is ready."
-        if google_ads_write_config_path
-        else "Write access is not set up. No dramas — I can still save recommendations to the wiki for you to apply manually in Google Ads."
-    )
-    print(f"""
-  Righto, {account_name} is set up.
-
-  {read_status}
-  {write_status}
-
-  From now on, run commands as ./bob <subcommand>.
-  Type ./bob to see what's available, or ./bob <name> --help for any one.
-
-  Good first questions to ask next:
-  1) What happened yesterday?
-  2) How did yesterday compare to the same day last week?
-  3) How did last week compare to the week before?
-  4) Which campaigns are dragging?
-""")
+    _finalize_onboard(profile, write_creds_json_path, existing)
 
 
 def _resolve_account_target(accounts: list[dict], target: str) -> int:
@@ -6506,8 +6675,20 @@ def build_parser() -> argparse.ArgumentParser:
     sw_parser.add_argument("--output", help="where to save the write config yaml (default: from profile)")
     sw_parser.set_defaults(func=setup_write_credentials)
 
-    ob_parser = sub.add_parser("onboard", help="interactive onboarding — set up a new account")
+    ob_parser = sub.add_parser("onboard", help="onboarding — set up a new account (interactive, or --answers for agents)")
     ob_parser.add_argument("--account-id", help="pre-fill customer ID (skip prompt)")
+    ob_parser.add_argument(
+        "--answers",
+        help="non-interactive: a JSON object of onboarding answers gathered in chat "
+        "(keys: customer_id, account_name, campaign_type, primary_goal, currency, "
+        "mcc_id, mcc_name, developer_token, oauth_client_json_path, cac_ceiling, "
+        "bid_budget_change_pct, bid_budget_cooldown_days). Skips all interactive prompts.",
+    )
+    ob_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --answers: validate and print the confirm summary, write nothing",
+    )
     ob_parser.set_defaults(func=onboard)
 
     sa_parser = sub.add_parser("switch-account", help="switch the active Google Ads account")

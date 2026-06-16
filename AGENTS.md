@@ -63,23 +63,22 @@ Never edit `.bob/agent-mode.json` yourself without an explicit user request that
 
 ## Non-Technical Onboarding Mode
 
-When the user says "set me up", "onboard me", "connect my account", "add an account", or similar:
+When the user says "set me up", "onboard me", "connect my account", "add an account", or similar, treat it as guided account setup for a non-technical user.
 
-- Treat it as guided account setup for a non-technical user.
-- Don't mention internal files, directories, config filenames, command names, or exploration steps unless asked.
-- Don't narrate background work (reading config, listing accounts, etc.).
-- Ask one question at a time, in plain language.
-- Run allowed setup checks silently where possible.
-- Never answer onboarding prompts from assumptions, timezone, account name, or prior accounts. Relay these prompts to the user: campaign type, primary goal, currency, Google Ads read access yes/no, optional write access yes/no, save confirmation.
-- **Defaults must be named in every relay.** When the CLI prompt carries a default value, the user-facing relay must include that value. Never say "type y for the default" — say "type y to use 200" (or whatever the value is). A user can't accept a default they've never been shown.
-- If the terminal asks a numbered choice, relay every option with its label. Don't summarize as "reply 1, 2, or 3" without naming what each number means.
-- If the terminal asks yes/no and the user hasn't said yes/no, ask in plain language. Don't type `y` yourself.
-- Only use a CLI default when the user explicitly says "use the default" or "use defaults for the rest".
-- Don't say "All set" or "You're set up" until local setup verifies the GARF runner is installed. If the account is saved but local setup is broken, say so plainly.
-- Keep credentials clear: the **Google Ads developer token** from Admin > API Center is for reading/reporting data. The **Google Cloud OAuth client JSON** is optional and only for approved write-backs.
-- Never call the write-back credentials the "developer token".
-- If read access is missing and the user asks a performance question, say: "I need the Google Ads developer token from Admin > API Center before I can fetch data from Google Ads." Then stop.
-- Don't offer a manual CSV/export fallback.
+**Gather the answers in chat, then submit them in one command — never drive the script's interactive prompts.** Running `onboard` with no arguments starts a blocking `input()` loop an agent can't answer, so the session hangs. Instead collect the answers conversationally and pass them as JSON:
+
+```
+python3 lib/datapull.py onboard --dry-run --answers '{"customer_id":"123-456-7890","campaign_type":"app","primary_goal":"installs","currency":"INR", ...}'
+```
+
+`--dry-run` validates and prints a confirm summary without saving; run the **same command without `--dry-run`** to save. If validation fails it lists every bad field at once — re-ask only those and resubmit. Keys: `customer_id`, `account_name`, `campaign_type` (`app`|`search`|`performance_max`), `primary_goal` (`installs`|`in_app_conversions`), `currency`, `mcc_id`, `mcc_name`, `developer_token`, `oauth_client_json_path`, `cac_ceiling`, `bid_budget_change_pct`, `bid_budget_cooldown_days`. Customer ID, campaign type, and currency are required; omit any other key to take its default.
+
+- Ask one plain-language question at a time. Don't mention internal files, config filenames, or command names; don't narrate background work.
+- Name every default in the question ("keep 200?", not "keep the default?"). Use a default only when the user says so.
+- Never infer campaign type, primary goal, or currency from timezone, account name, or prior accounts — ask. You normalise the user's plain answer (e.g. "rupees" → `INR`) into the JSON; the user never sees it.
+- Keep credentials clear: the **Google Ads developer token** (Admin > API Center) is for reading/reporting; the **Google Cloud OAuth client JSON** is optional and only for approved write-backs. Never call the write-back credentials the "developer token".
+- Don't say "All set" until the save reports the local runtime is installed. If the account saved but setup is broken, say so plainly.
+- If read access is missing and the user later asks a performance question, say: "I need the Google Ads developer token from Admin > API Center before I can fetch data from Google Ads." Then stop. Don't offer a manual CSV/export fallback.
 
 ## Failsafe — when no CLI tool fits
 

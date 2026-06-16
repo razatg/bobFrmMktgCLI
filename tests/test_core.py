@@ -14,7 +14,11 @@ If one of these assertions fails, either a real regression slipped in, or a
 formula/window was changed on purpose -- in which case update the expected
 value here deliberately (that is the point of the failure).
 """
+import argparse
+import contextlib
 import datetime as dt
+import io
+import json
 import os
 import sys
 import unittest
@@ -213,6 +217,73 @@ class TestAggregation(unittest.TestCase):
         ]
         out = dp._aggregate_period_rows(rows, ["network"], "installs")
         self.assertEqual([r["network"] for r in out], ["a", "z"])  # sorted by key
+
+
+class TestNormalizeCustomerId(unittest.TestCase):
+    """dp._normalize_customer_id — 10 digits reformat to DDD-DDD-DDDD; else stripped passthrough."""
+
+    def test_reformats_ten_digits(self):
+        self.assertEqual(dp._normalize_customer_id("9998887777"), "999-888-7777")
+        self.assertEqual(dp._normalize_customer_id("999 888 7777"), "999-888-7777")
+        self.assertEqual(dp._normalize_customer_id("999-888-7777"), "999-888-7777")
+
+    def test_passthrough_when_not_ten_digits(self):
+        self.assertEqual(dp._normalize_customer_id("  abc  "), "abc")
+        self.assertEqual(dp._normalize_customer_id("12345"), "12345")
+
+
+class TestOnboardAnswers(unittest.TestCase):
+    """dp._onboard_from_answers — non-interactive onboarding validation (dry-run, no writes).
+
+    Called with explicit `existing` so it never touches the real account registry, and
+    dry_run=True so it only validates + prints (no files written, no setup run).
+    """
+
+    def _dry_run(self, answers_dict, existing=None):
+        args = argparse.Namespace(answers=json.dumps(answers_dict), dry_run=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp._onboard_from_answers(args, existing or [])
+        return out.getvalue()
+
+    def _expect_die(self, answers, existing=None):
+        # answers may be a dict or a raw (possibly malformed) string
+        raw = answers if isinstance(answers, str) else json.dumps(answers)
+        args = argparse.Namespace(answers=raw, dry_run=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            dp._onboard_from_answers(args, existing or [])
+        return err.getvalue()
+
+    def test_valid_dry_run_normalizes_input(self):
+        # fuzzy input ("999 888 7777", "App", "inr") is normalized in the summary
+        out = self._dry_run({
+            "customer_id": "999 888 7777",
+            "campaign_type": "App",
+            "primary_goal": "installs",
+            "currency": "inr",
+        })
+        self.assertIn("999-888-7777", out)   # reformatted
+        self.assertIn("INR", out)            # upper-cased
+        self.assertIn("App Campaigns", out)  # enum resolved to display label
+        self.assertIn("dry run", out.lower())
+
+    def test_invalid_reports_all_problems_at_once(self):
+        msg = self._expect_die({"campaign_type": "banana", "currency": "rupees"})
+        self.assertIn("customer_id", msg)    # missing required field
+        self.assertIn("campaign_type", msg)  # bad enum
+        self.assertIn("currency", msg)       # bad currency — all three in one message
+
+    def test_malformed_json_raises(self):
+        self._expect_die("{not valid json")
+
+    def test_already_registered_rejected(self):
+        msg = self._expect_die(
+            {"customer_id": "999-888-7777", "campaign_type": "app",
+             "primary_goal": "installs", "currency": "INR"},
+            existing=[{"google_ads_customer_id": "999-888-7777"}],
+        )
+        self.assertIn("already registered", msg)
 
 
 if __name__ == "__main__":
