@@ -111,7 +111,7 @@ The `--output` CSV includes all metrics: impressions, clicks, cost, installs, in
 
 ## Wiki / Artefact
 
-After user confirms the analysis is useful, offer to save:
+Once the analysis is on screen, proactively offer to save — don't wait to be asked:
 
 ```
 Save to wiki? → wiki/analyses/week-comparison-W<N>-vs-W<M>-<YYYY-MM-DD>.md

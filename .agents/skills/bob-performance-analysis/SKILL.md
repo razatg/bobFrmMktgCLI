@@ -65,6 +65,7 @@ Use this structure unless the specific reference says otherwise:
 3. Main drivers or flags.
 4. Caveats, only when material.
 5. Suggested next action.
+6. **Offer to save to the wiki.** Proactively ask — e.g. "Want me to save this to your wiki?" — don't wait for the user to first confirm the analysis is useful. On yes, follow the **Wiki Save Rules** below. Skip the offer only when Step 0 already surfaced a fresh wiki entry for this exact analysis.
 
 ## Required Checks
 

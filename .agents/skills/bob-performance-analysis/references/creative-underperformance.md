@@ -103,7 +103,7 @@ Then show the low-action table from the CLI output.
 
 ## Wiki / Artefact
 
-After user confirms there are actionable findings, offer:
+Once the findings are on screen, proactively offer to save — don't wait to be asked:
 
 ```
 Save creative report to wiki? → wiki/analyses/creative-underperformance-<YYYY-MM-DD>.md

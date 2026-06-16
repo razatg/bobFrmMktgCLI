@@ -72,7 +72,7 @@ python3 lib/datapull.py aggregate --grain campaign_network_period
 
 ## Wiki / Artefact
 
-After user confirms the analysis is useful, offer to save:
+Once the analysis is on screen, proactively offer to save — don't wait to be asked:
 
 ```
 Save segment comparison to wiki? → wiki/analyses/campaign-segment-<name>-<period>-<YYYY-MM-DD>.md

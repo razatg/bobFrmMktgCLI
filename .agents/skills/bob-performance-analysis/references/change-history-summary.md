@@ -66,7 +66,7 @@ Do not assert causality from timing alone — say "change coincides with shift" 
 
 ## Wiki / Artefact
 
-After user confirms useful, offer one or both:
+Once the summary is on screen, proactively offer to save — don't wait to be asked (offer one or both):
 
 ```
 Save change summary?   → wiki/analyses/change-history-<period>-<YYYY-MM-DD>.md

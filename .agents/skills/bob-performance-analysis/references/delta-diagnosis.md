@@ -90,7 +90,7 @@ For every campaign identified in Steps 3–4, call `correlate_change_history()` 
 
 ## Wiki / Artefact
 
-After user confirms the diagnosis, offer to save:
+Once the diagnosis is on screen, proactively offer to save — don't wait to be asked:
 
 ```
 Save diagnosis to wiki? → wiki/analyses/delta-<period>-<YYYY-MM-DD>.md

@@ -58,7 +58,7 @@ Apply the shared significance thresholds and auto-escalation rule in `references
 
 ## Wiki / Artefact
 
-After the user confirms the analysis is useful, offer to save:
+Once the analysis is on screen, proactively offer to save — don't wait to be asked:
 
 ```
 Save this to wiki? → wiki/analyses/account-yesterday-<YYYY-MM-DD>.md
