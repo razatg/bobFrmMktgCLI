@@ -285,6 +285,30 @@ class TestOnboardAnswers(unittest.TestCase):
         )
         self.assertIn("already registered", msg)
 
+    # --- developer-token completeness gate ---
+
+    def test_dry_run_warns_when_token_missing(self):
+        out = self._dry_run({
+            "customer_id": "999-888-7777", "campaign_type": "app",
+            "primary_goal": "installs", "currency": "INR",
+        })
+        self.assertIn("No developer token", out)  # loud warning, but dry-run still passes
+
+    def test_real_save_without_token_is_blocked(self):
+        # dry_run=False + no token + no skip → die BEFORE _finalize_onboard, so nothing is written.
+        args = argparse.Namespace(
+            answers=json.dumps({
+                "customer_id": "999-888-7777", "campaign_type": "app",
+                "primary_goal": "installs", "currency": "INR",
+            }),
+            dry_run=False,
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                dp._onboard_from_answers(args, [])
+        self.assertIn("developer token", err.getvalue().lower())
+
 
 if __name__ == "__main__":
     unittest.main()

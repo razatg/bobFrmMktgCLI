@@ -5587,12 +5587,26 @@ def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> Non
             google_ads_write_config_path = _default_write_config_path(cid)
 
     developer_token = str(data.get("developer_token", "")).strip()
+    skip_read_access = bool(data.get("skip_read_access"))
     google_ads_read_config_path = (
         _default_read_config_path(cid) if developer_token and cid and _validate_customer_id(cid) else ""
     )
 
     if errors:
         die("onboarding answers have problems — fix these and resubmit:\n  - " + "\n  - ".join(errors))
+
+    # Completeness gate: a real save with no developer token produces an account that can't fetch
+    # any data ("data access not ready"). Block it unless the agent explicitly confirms — after
+    # asking the user — that there's no token yet. Runs before any write, so a blocked save has no
+    # side effects.
+    token_missing = not developer_token and not skip_read_access
+    if token_missing and not getattr(args, "dry_run", False):
+        die(
+            "no Google Ads developer token provided — Bob can't fetch any data without it. "
+            "Ask the user for it (Google Ads > Admin > API Center) and resubmit with "
+            '"developer_token". Only if the user says they don\'t have one yet, resubmit with '
+            '"skip_read_access": true.'
+        )
 
     profile: dict[str, Any] = {
         "google_ads_customer_id": cid,
@@ -5614,6 +5628,12 @@ def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> Non
     if getattr(args, "dry_run", False):
         print("\n  (dry run — validated, nothing saved)")
         _print_onboard_summary(profile)
+        if token_missing:
+            print(
+                "\n  ⚠ No developer token — Bob WON'T be able to fetch any data after saving.\n"
+                "    Ask the user for it (Google Ads > Admin > API Center) before the real run.\n"
+                "    Only pass \"skip_read_access\": true if they genuinely don't have one yet."
+            )
         return
 
     if developer_token:
@@ -6681,8 +6701,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--answers",
         help="non-interactive: a JSON object of onboarding answers gathered in chat "
         "(keys: customer_id, account_name, campaign_type, primary_goal, currency, "
-        "mcc_id, mcc_name, developer_token, oauth_client_json_path, cac_ceiling, "
-        "bid_budget_change_pct, bid_budget_cooldown_days). Skips all interactive prompts.",
+        "mcc_id, mcc_name, developer_token, skip_read_access, oauth_client_json_path, "
+        "cac_ceiling, bid_budget_change_pct, bid_budget_cooldown_days). A real save requires "
+        "developer_token unless skip_read_access is true. Skips all interactive prompts.",
     )
     ob_parser.add_argument(
         "--dry-run",
