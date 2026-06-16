@@ -107,16 +107,7 @@ The `--output` CSV includes all metrics: impressions, clicks, cost, installs, in
 - Lead with the TOTAL row across both account and campaign tables.
 - For weeks: a completed week is a full 7-day signal; state the exact dates.
 - For months MTD: flag if the day count differs significantly (e.g. April had a public holiday reducing trading days). Do not over-interpret MTD with fewer than 7 days elapsed.
-- Apply significance thresholds:
-
-| Metric | Threshold for flagging |
-|---|---|
-| Primary goal conversions | > 10% change |
-| Cost | > 15% change |
-| CTR % | > 1 percentage point |
-| CTI % or conversion_rate % | > 1 percentage point |
-
-If totals cross any threshold, automatically proceed to delta diagnosis: use `references/delta-diagnosis.md` with the same date windows.
+- Apply the shared significance thresholds and auto-escalation rule in `references/_common.md`, using the two calendar windows being compared.
 
 ## Wiki / Artefact
 

@@ -13,10 +13,9 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
 ## Operating Rules
 
+- **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it and use the failsafe — don't patch code). Canonical wording: `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - Recommendations come only from `bid-budget-recommend` output. Do not invent numbers or signal assessments.
-- **Never write scratch scripts, helper programs, or ad-hoc code files to analyze data.** Work only from columns already present in processed CSV outputs. If a required computation has no CLI subcommand that produces it, that computation is out of scope — use the failsafe.
 - **Check before fetching or aggregating.** Use `ls` to verify the required raw and processed files already cover the date window. If they do, use them — do not re-fetch or re-aggregate. Only fetch when the date window is not yet covered or the file is stale per the reference's stated staleness window.
-- **Do not read or modify source files.** Never read or edit `lib/`, `garf/queries/*.sql`, `bin/`, `tests/`, `PLAN.md`, `ARCHITECTURE.md`, or `.meta.json` files. If a CLI command errors, show the error message to the user and use the failsafe — do not attempt to diagnose or patch code. Agent scope is: run CLI tools, read data files (`ls`, processed CSVs), write to `wiki/` only.
 - Always show the mutation plan (CSV or YAML summary) before applying. Never call `bid-budget-apply` without explicit user approval ("make it live", "apply it", "go ahead").
 - Do not re-apply a plan that has `applied: true` — the tool will error, but surface this clearly to the user first.
 - Use `.bob/profile.json` for `cac_ceiling`, `bid_budget_change_pct`, `primary_goal`, and `currency`.
@@ -118,28 +117,8 @@ This prevents duplicate apply runs and gives future sessions the outcome at a gl
 
 ## Wiki Save Rules
 
-These rules apply every time the user confirms saving a plan or analysis to `wiki/`:
-
-1. **Use conversation output only.** Write the file directly from data already in this conversation. Do NOT re-run CLI commands, do NOT read any CSV, do NOT use pandas or any script.
-   **Never truncate wiki content.** Write every row of every table. No "… and N more", no summary substitutes. A partial table defeats the purpose of a persistent record. Truncation in the chat response is fine; truncation in the wiki file is not.
-2. **Update `wiki/Index.md`.** Add one line under the appropriate section (`## Analyses` or `## Action Items`). Create `wiki/Index.md` with `# Bob — Wiki Index` heading if it doesn't exist yet.
-3. **Add a backlink.** Every wiki file must include `← [Wiki Index](../Index.md)` as the first line after frontmatter (or after the YAML `---` block for `.yaml` files, add a comment `# See: wiki/Index.md`).
-4. **Write to `wiki/` only.** Action plans to `wiki/action-items/`, analyses to `wiki/analyses/`. Never write to agent brain directories or temp paths.
-5. **Prior context — `wiki/Index.md` only.** When surfacing prior analysis context for a fresh run, read `wiki/Index.md` only — never open the full YAML or analysis file. The one-line Index entry is sufficient. Only read a full wiki file if the user explicitly asks "show me the details of that plan."
+Follow the wiki save rules in `CLAUDE.md` → "Wiki save rules" whenever the user confirms a save: write from conversation output only (no re-running CLI, no CSV reads, no scripts), **never truncate** (every row of every table), update `Index.md` with a one-line entry under `## Analyses`/`## Action Items`, start each file with the `← [Wiki Index](../Index.md)` backlink (for a `.yaml` plan, add a `# See: wiki/Index.md` comment instead), pad tables for raw-text readability, and write only under `analyses/`/`action-items/`. For prior context on a fresh run, read the Index one-liner only — never open the full YAML.
 
 ## Failsafe — Unanswerable Questions
 
-If the question cannot be answered using the CLI tools in CLAUDE.md or the references below:
-
-1. **Respond in Bob's voice** following `SOUL.md` — honest, direct, Australian. Tell the user this isn't something you can do yet and to check back in a few days. One or two sentences, no corporate hedging.
-
-2. **Append to `logs/backlog.md`** under `## Bug Reports` or `## Feature Requests`:
-   ```markdown
-   ### [BUG or FEATURE] YYYY-MM-DD — <short title>
-   **User said:** "<exact user input>"
-   **What happened:** <what Bob did or couldn't do>
-   **What's needed:** <fix or feature description>
-   ```
-   Use **BUG** when Bob routed or responded incorrectly. Use **FEATURE** when the capability is genuinely missing. Do not paraphrase the user's input.
-
-3. **Confirm** to the user it has been saved to `logs/backlog.md`.
+When the question can't be answered from the references below or any `./bob` subcommand, use the repo failsafe in `CLAUDE.md` / `AGENTS.md`: answer in Bob's voice (`SOUL.md`) that this isn't something you can do yet, append a `[BUG]`/`[FEATURE]` entry to `logs/backlog.md` (with the user's exact words), log a `failsafe` signal, and confirm to the user.

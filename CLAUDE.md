@@ -17,7 +17,7 @@ Bob Frm Mktg is a CLI-first performance marketing automation tool for Google Ads
 
 ## Working in this repo
 
-**Do not read or modify source files.** This covers `lib/datapull.py`, `garf/queries/*.sql`, `bin/`, `tests/`, `PLAN.md`, `ARCHITECTURE.md`, and `.meta.json` sidecars. All commands, columns, and behavior are documented in this file and the skill reference files. Run CLI commands directly; use `ls` to find data files. If a CLI command errors, surface the error to the user — do not patch code. Agent scope is CLI tools + `wiki/` writes only.
+**Do not read or modify source files.** This covers `lib/datapull.py`, `garf/queries/*.sql`, `bin/`, `tests/`, and `.meta.json` sidecars. All commands, columns, and behavior are documented in this file and the skill reference files. Run CLI commands directly; use `ls` to find data files. If a CLI command errors, surface the error to the user — do not patch code. Agent scope is CLI tools + `wiki/` writes only.
 
 To find available data files, use `ls`:
 ```bash
@@ -146,7 +146,7 @@ Bootstrap fetches ~16 small queries (each returning <100 rows) instead of 90 day
 
 4. **Validation layer** (`lib/datapull.py: validate-manual`) — Tolerance-based diff of Bob aggregates vs user-provided manual exports.
 
-5. **Agent skill layer** (`.agents/skills/bob-google-ads/`) — Intent routing and per-intent reference docs. Each reference file specifies the exact CLI commands to run, significance thresholds that trigger auto-escalation, and the wiki artefact structure to write on user acceptance. Not executable code.
+5. **Agent skill layer** (`.agents/skills/bob-performance-analysis/`) — Intent routing and per-intent reference docs. Each reference file specifies the exact CLI commands to run, significance thresholds that trigger auto-escalation, and the wiki artefact structure to write on user acceptance. Not executable code.
 
 ### Key files
 
@@ -157,13 +157,15 @@ Bootstrap fetches ~16 small queries (each returning <100 rows) instead of 90 day
 - `.bob/profile.example.json` — Blank-value copy of the full profile schema for reference.
 - `.bob/metrics-reference-{campaign_type}.json` — Metric catalog for a specific campaign type (e.g. `metrics-reference-app.json` for App Campaigns). Contains: primary goal rationale, full acquisition funnel, formula for every metric, and the `do_not_select` policy for pre-computed API averages. Load the file matching the active account's `campaign_type`. When a new campaign type is added (Search, Performance Max), add a new reference file — do not merge into the existing one. Edit `primary_goal_context` to reflect why your primary goal matters for that type.
 - `SOUL.md` — Bob's personality: voice, tone, analysis style, and response patterns. Read at the start of every conversation. Kept separate so it can evolve independently of the data layer.
-- `.agents/skills/bob-google-ads/SKILL.md` — Agent routing rules and operating constraints for performance analysis.
-- `.agents/skills/bob-google-ads/references/` — 6 reference files, one per intent. Each contains: required inputs, working CLI commands, significance thresholds + auto-escalation rules, and a wiki artefact template.
+- `.agents/skills/bob-performance-analysis/SKILL.md` — Agent routing rules and operating constraints for performance analysis. Common rules (failsafe, wiki-save, source-edit ban, check-before-fetch) live in `AGENTS.md`/`CLAUDE.md`; the skill points to them rather than restating them.
+- `.agents/skills/bob-performance-analysis/references/` — Per-intent reference files. Each contains: required inputs, working CLI commands, significance thresholds + auto-escalation rules, and a wiki artefact template.
+- `.agents/skills/bob-accounts/SKILL.md` — Account setup & management skill: onboarding ("set me up", "add an account"), switch/list accounts, check/repair config. The Claude routing + voice layer over `AGENTS.md` → "Non-Technical Onboarding Mode". (Onboarding routing was previously inside bob-performance-analysis.)
 - `.agents/skills/bob-bid-budget/SKILL.md` — Bid/budget skill: algorithm, mutation plan, apply, and retrospective routing.
 - `.agents/skills/bob-bid-budget/references/` — 3 reference files: `algorithm.md` (4-scenario decision matrix), `mutation-plan.md` (review + apply workflow), `retrospective.md` (W+1/W+2 evaluation).
+- `.agents/skills/bob-creative-copy/SKILL.md` — LOW text-asset copy review/replace skill (sequential per-batch subagent flow); `references/copy-rules.md` holds the app-campaign copy constraints.
+- `.agents/skills/bob-static-banners/SKILL.md` — Static banner skill: routes to `references/design-guide.md` (quarterly design-guide refresh) and `references/low-variant.md` (LOW static image replacement variants + apply flow).
+- `.agents/skills/bob-self-improve/SKILL.md` — Self-improvement skill (proposal-only): clusters `logs/session-signals.jsonl` + `logs/backlog.md` into a ranked action plan; `references/signal-taxonomy.md` documents the signal record shape.
 - `.agents/skills/bob-sync/SKILL.md` — Team-sync skill: routes "hey sync" / "hey Bob sync"; checks the shared-folder setup (`.bob/sync.json`), guides one-time `--set-dir` setup if missing, otherwise runs `./bob sync`.
-- `ARCHITECTURE.md` — Full system design doc.
-- `PLAN.md` — MVP build roadmap with phase completion status.
 
 ### Key functions in `lib/datapull.py`
 
@@ -243,15 +245,19 @@ Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `deve
 
 | User question | Reference file |
 |---|---|
+| Set me up / onboard / add, switch, or list accounts / check or fix config | `bob-accounts` skill — see `.agents/skills/bob-accounts/` |
 | What happened yesterday / yesterday vs SDLW | `account-yesterday-vs-sdlw.md` |
 | WoW / MoM / MTD performance | `account-period-comparison.md` |
 | What caused the change (network → campaign → ad group) | `delta-diagnosis.md` |
 | What to do with bids and budgets | `bob-bid-budget` skill — see `.agents/skills/bob-bid-budget/` |
-| Which creatives are underperforming | `creative-underperformance.md` |
+| Which creatives are underperforming (diagnosis) | `creative-underperformance.md` |
+| Review or replace LOW text-asset copy | `bob-creative-copy` skill — see `.agents/skills/bob-creative-copy/` |
+| Static banner design guide / LOW static image replacement variants | `bob-static-banners` skill — see `.agents/skills/bob-static-banners/` |
 | What did the team work on / change history | `change-history-summary.md` |
 | Compare a named campaign group ("Stable campaigns", "Brand campaigns") | `campaign-segment-comparison.md` |
 | Compare two ISO weeks or calendar months ("W20 vs W19", "May MTD vs April") | `calendar-period-comparison.md` |
 | Sync / share wiki + signals with teammates ("hey sync", "hey Bob sync", "share my analyses") | `bob-sync` skill — see `.agents/skills/bob-sync/` |
+| Review Bob's own mistakes / run a self-improvement pass | `bob-self-improve` skill — see `.agents/skills/bob-self-improve/` |
 
 **Auto-escalation rule** (in yesterday and period comparison references): if primary goal changes >10%, cost >15%, or any ratio >1 pp, the agent automatically proceeds to delta diagnosis without waiting for the user to ask.
 
@@ -273,6 +279,8 @@ Requires a `google-ads-garf.yaml` config file (read-only, 2 required keys: `deve
 
 `wiki/{customer_id_no_hyphens}/Index.md` is the per-account navigation hub — every wiki file links back to it, and it links to every wiki file.
 
+A completed wiki write is also Bob's natural **success beat** for self-improvement capture: if this session had friction, offer once — in voice (`SOUL.md` → "Getting Sharper") — to note where you got stuck, and on the user's say-so batch it into a single `./bob session-debrief` call. A clean session gets no offer. See the **Self-Improvement** section below.
+
 **Wiki cache check**: Before running any analysis or recommendation, read `wiki/{customer_id_no_hyphens}/Index.md`. If a recent entry for the same intent is within the cache window (creative/bid-budget = 7 days; all other intents = 1 day), surface the link and ask the user if they want a fresh run. For fresh runs, prepend one line of prior context from the Index one-liner only — never open the full wiki file.
 
 ### creative_period: performance_label
@@ -281,7 +289,7 @@ The `creative_period.sql` query returns `performance_label` directly from the Go
 
 ## Failsafe — Unanswerable Questions
 
-Every Bob answer must come from a CLI tool listed in this file or a reference file in `.agents/skills/bob-google-ads/references/`. If no tool can produce the required data, the agent must **not** guess, fabricate, or write ad-hoc scripts.
+Every Bob answer must come from a CLI tool listed in this file or a reference file in `.agents/skills/bob-performance-analysis/references/`. If no tool can produce the required data, the agent must **not** guess, fabricate, or write ad-hoc scripts.
 
 **Never write scratch scripts, helper programs, or ad-hoc code files to analyze data.** Work only from columns already present in processed CSV outputs. If a required computation (e.g. medians, cross-file joins) has no CLI subcommand that produces it, use the failsafe response instead.
 
@@ -294,7 +302,7 @@ The question must then be appended to `logs/backlog.md` under `## Bug Reports` o
 **What happened:** <what Bob did or couldn't do>
 **What's needed:** <fix or feature description>
 ```
-Use **BUG** when Bob routed or responded incorrectly. Use **FEATURE** when the capability is genuinely missing. Full rules are in `.agents/skills/bob-google-ads/SKILL.md` → Failsafe section.
+Use **BUG** when Bob routed or responded incorrectly. Use **FEATURE** when the capability is genuinely missing. Full rules are in `.agents/skills/bob-performance-analysis/SKILL.md` → Failsafe section.
 
 ## Self-Improvement
 
@@ -304,13 +312,19 @@ any agent:
 
 1. **Capture (two halves, both agent-agnostic).** *Hard signals* are logged automatically by the
    CLI — `datapull.py` self-instruments, so any failed `./bob` subcommand records a `tool_error`
-   and a fetch for an on-disk window records a `redundant_fetch`, with no agent cooperation.
-   *Soft signals* live only in the conversation (the CLI can't see it), so the agent flags them via
-   `./bob log-signal --type <failsafe|user_correction|plan_rejection|retry|friction> --note "…"
-   [--severity …]`. The contract lives in `AGENTS.md` → "Signal logging". Log once per stumble;
-   don't narrate it. A failsafe both writes `logs/backlog.md` and logs a `failsafe` signal.
-2. **Storage.** `log-signal` appends one JSON line to `logs/session-signals.jsonl` (gitignored,
-   machine-local), mirroring the pull-log. Allowed in analysis mode.
+   and a fetch for an on-disk window records a `redundant_fetch`, with no agent cooperation
+   (tagged `source: "cli"`). *Soft signals* live only in the conversation, so Bob **tracks** them
+   as it works and, at a success beat (e.g. just after a wiki write) where it actually fumbled,
+   offers in voice to record them — batching the whole session's friction into one
+   `./bob session-debrief --signals '[…]'` call **only on the user's say-so** (tagged
+   `source: "debrief"`). `log-signal` is reserved for immediate criticals — chiefly `failsafe`,
+   which also writes `logs/backlog.md` (tagged `source: "inline"`). The full contract lives in
+   `AGENTS.md` → "Signal logging"; the offer's voice in `SOUL.md` → "Getting Sharper". Don't narrate
+   the write.
+2. **Storage.** Both `log-signal` and `session-debrief` append JSON lines to
+   `logs/session-signals.jsonl` (gitignored, machine-local) through one shared writer, mirroring the
+   pull-log; each line carries a `source` field (`cli` | `inline` | `debrief`) so a pass can see
+   which path fired. Allowed in analysis mode.
 3. **Synthesis (manual, proposal-only).** When the user asks Bob to review its mistakes, run
    `./bob self-improve` (prep summary + file pointers — no LLM), then the `bob-self-improve` skill
    clusters the signal log + `logs/backlog.md` by root cause, ranks by frequency × severity, traces
@@ -318,7 +332,7 @@ any agent:
    `wiki/_self-improve/action-plan-YYYY-MM-DD.md`. It never edits source or skills — a human
    approves and applies each item. See `.agents/skills/bob-self-improve/`.
 
-## Current Build Status (from PLAN.md)
+## Current Build Status
 
 **Complete**: skeleton, profile/config, all GARF period-aggregate queries, fetch/bootstrap/aggregate/validate/check-config commands, all aggregate grains including `mtd` period and `campaign_weekly_trend`, metric definitions, all 6 MVP intent reference files with CLI commands + auto-escalation + wiki artefact templates.
 

@@ -13,9 +13,7 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
 ## Operating Rules
 
-- **Do not read or modify source files.** Agent scope: run CLI tools, read data files, write to `wiki/` only.
-- **Check before fetching.** Use `ls` to verify raw and processed files cover the date window before fetching.
-- **Always pass `--reason` when calling `fetch`.** Log what triggered the pull.
+- **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, read `logs/pull-log.jsonl` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - **Never call `creative-copy-apply` without explicit user approval** at the approval table.
 - Never generate copy suggestions yourself inline. The subagent in Step 2 does this — always.
 
@@ -109,15 +107,4 @@ rm wiki/action-items/creative-copy-YYYY-MM-DD-suggestions.json
 
 ## Failsafe — Unanswerable Questions
 
-If the question cannot be answered using the CLI tools above:
-
-1. **Respond in Bob's voice** following `SOUL.md` — honest, direct, Australian. Tell the user this isn't something you can do yet and to check back in a few days. One or two sentences, no corporate hedging.
-2. **Append to `logs/backlog.md`** under `## Bug Reports` or `## Feature Requests`:
-   ```markdown
-   ### [BUG or FEATURE] YYYY-MM-DD — <short title>
-   **User said:** "<exact user input>"
-   **What happened:** <what Bob did or couldn't do>
-   **What's needed:** <fix or feature description>
-   ```
-   Use **BUG** when Bob routed or responded incorrectly. Use **FEATURE** when the capability is genuinely missing.
-3. Confirm to the user it was saved to `logs/backlog.md`.
+When the question can't be answered from the steps above or any `./bob` subcommand, use the repo failsafe in `CLAUDE.md` / `AGENTS.md`: answer in Bob's voice (`SOUL.md`) that this isn't something you can do yet, append a `[BUG]`/`[FEATURE]` entry to `logs/backlog.md` (with the user's exact words), log a `failsafe` signal, and confirm to the user.

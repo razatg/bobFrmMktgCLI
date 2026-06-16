@@ -56,4 +56,4 @@ The command:
 pip install google-ads pyyaml
 ```
 
-Google Ads credentials path is set in `.bob/profile.json` → `google_ads_config_path`.
+Google Ads read credentials path is set in `.bob/accounts/{customer_id}/profile.json` → `google_ads_read_config_path`; write credentials use `google_ads_write_config_path`.

@@ -73,9 +73,11 @@ You'll need:
 
 ## Getting started
 
-**Step 1 — Download the project**
+**Step 1 — Download Bob**
 
-Click the green **Code** button on this page → **Download ZIP**. Unzip it somewhere easy to find (Desktop is fine).
+Download the full Bob release ZIP for your computer, then unzip it somewhere easy to find (Desktop is fine).
+
+Do not use GitHub's **Code → Download ZIP** source-code button unless you are a developer. The source ZIP may not include Bob's bundled runtime.
 
 ---
 
@@ -189,3 +191,27 @@ It's your running record of what you checked and when — searchable, shareable,
 **Data looks stale** — Tell Bob "pull fresh data".
 
 **Something Bob can't answer** — Bob will say so in plain English and log it for future improvement. Logged questions live in `logs/backlog.md`.
+
+---
+
+## Development
+
+*For contributors working on Bob's code — end users can ignore this section.*
+
+`lib/datapull.py` is the engine. A lightweight smoke test pins its deterministic core (metric formulas, the zero-denominator → `NA` rule, period-date windows, and aggregation) so those invariants can't drift silently.
+
+**Run the test** (pure stdlib, no extra dependencies, runs offline):
+
+```
+./.venv/bin/python tests/test_core.py      # or: python -m unittest -v tests.test_core
+```
+
+**Enable the pre-commit hook** (one-time, per clone) so the test runs automatically on every commit and blocks it on failure:
+
+```
+git config core.hooksPath scripts/hooks
+```
+
+The hook (`scripts/hooks/pre-commit`) is sub-second and uses `.venv/bin/python` if present, falling back to system `python3`. Bypass in an emergency with `git commit --no-verify`.
+
+The test locks *stable, documented contracts* — not implementation details — so ordinary edits won't trip it. If you change a formula or period window **on purpose**, update the matching expected value in `tests/test_core.py`; the failing assertion is the deliberate checkpoint. Each assertion is commented with the formula it guards (see `CLAUDE.md`).

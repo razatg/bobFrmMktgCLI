@@ -14,8 +14,9 @@ log-signal` (see the "Signal logging" section in `AGENTS.md`) and stored one-per
   "note": "routed 'this week vs last' to compare-weeks but user meant closed ISO weeks",
   "user_text": "I meant iso week 21 vs 20",
   "intent": "compare-weeks",
-  "artifact": ".agents/skills/bob-google-ads/references/calendar-period-comparison.md",
+  "artifact": ".agents/skills/bob-performance-analysis/references/calendar-period-comparison.md",
   "severity": "wrong",
+  "source": "debrief",
   "account": "3546923408"
 }
 ```
@@ -23,13 +24,19 @@ log-signal` (see the "Signal logging" section in `AGENTS.md`) and stored one-per
 Only `timestamp`, `event_type`, and `note` are always present. Other fields are best-effort and may
 be absent — never treat a missing field as meaningful.
 
+The `source` field records how a signal was captured: `cli` = self-instrumented by `datapull.py`
+(fires automatically, no agent cooperation — reliable); `debrief` = batched from a
+`./bob session-debrief` at a session success beat, on the user's say-so; `inline` = an immediate
+`./bob log-signal` (chiefly `failsafe`). `debrief`/`inline` are flagged from the conversation, which
+the CLI can't see — less complete, so absence is not proof a stumble didn't happen. Signals logged
+before this field existed simply have no `source`.
+
 ## Event types
 
-`source` shows where a signal comes from: **CLI** = self-instrumented by `datapull.py` (fires
-automatically, no agent cooperation — reliable); **agent/human** = flagged from the conversation,
-which the CLI can't see (less complete — absence is not proof it didn't happen).
+The **origin** column below says whether each `event_type` is auto-logged by the CLI (`source: cli`)
+or flagged from the conversation (`source: debrief`/`inline`).
 
-| event_type | source | meaning | typical root cause to look for |
+| event_type | origin | meaning | typical root cause to look for |
 |---|---|---|---|
 | `tool_error` | CLI | a `./bob` subcommand failed (auto-logged with command + exit detail) | brittle command, stale file lookup, bad date window, credential/env issue |
 | `redundant_fetch` | CLI | a `fetch` hit a window already on disk | the "check before fetching" rule wasn't followed — a SKILL/AGENTS reinforcement gap |

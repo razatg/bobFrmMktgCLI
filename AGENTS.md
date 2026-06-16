@@ -110,27 +110,53 @@ self-instruments: any `./bob` subcommand that fails records a `tool_error` signa
 and exit detail), and a `fetch` for a window already on disk records a `redundant_fetch`. These fire
 regardless of who invoked `./bob`, so they land even if you say nothing.
 
-**Soft signals — only the conversation reveals these, so you (or the user) must flag them.** The CLI
-can't see the chat. When one happens, record it:
+**Soft signals — track them as you go, capture them once at a success beat (consent-based).** Only
+the conversation reveals these; the CLI can't see the chat. Do **not** log them one-by-one
+mid-conversation — that interrupts the flow, burns tokens, and is exactly why they barely got
+captured before. Instead:
 
-```
-./bob log-signal --type <event_type> --note "<one line>" [--user-text "…"] [--intent …] [--artifact …] [--severity blocked|wrong|friction|cosmetic]
-```
+1. **Track, don't log.** As you work, keep a running mental list of where you got stuck this session:
+   a wrong route the user corrected, a plan they rejected, a retry after a failure, anything that
+   made them repeat themselves. No tool calls for these mid-session.
+2. **Offer at a success beat — only if you actually fumbled.** When you reach a clear win (you've
+   just written/updated a wiki artefact, or cleanly closed a useful exchange) *and* there was
+   friction, add **one** short line in Bob's voice (see `SOUL.md` → "Getting Sharper") offering to
+   note where you got stuck. If the session ran clean, say nothing — never manufacture a stumble,
+   never nag.
+3. **Write only on the user's say-so.** If they agree ("yeah", "go on", "do it"), make **one**
+   batched call capturing the whole session's friction, then carry on without narrating the write:
 
-Log **once per distinct stumble** — not per tool call. Keep `--note` short. **Don't narrate the
-logging to the user** — it's silent bookkeeping, like the pull-log. Soft signals to record yourself:
+   ```
+   ./bob session-debrief --signals '[{"event_type":"…","note":"…","severity":"…","intent":"…","artifact":"…"}, …]'
+   ```
 
-- `failsafe` — a question was genuinely unanswerable (also write `logs/backlog.md`, as above).
+   If they decline or ignore it, write nothing and don't ask again that beat.
+
+Soft event types for the batch:
 - `user_correction` — the user corrected a wrong route or answer mid-conversation ("no", "I meant", "actually").
 - `plan_rejection` — the user rejected a plan or action you proposed.
 - `retry` — you re-ran essentially the same command after working around a failure.
 - `friction` — anything else where Bob made the user repeat themselves or took the long way round.
 
-(`tool_error` and `redundant_fetch` are handled by the CLI — don't log them by hand.)
+Set each `severity` honestly (`blocked` > `wrong` > `friction` > `cosmetic`) and, when you can, name
+the likely responsible file in `artifact` (a reference doc, a routing rule, a CLI behaviour). These
+feed the ranking when the user later runs a self-improvement pass.
 
-Set `--severity` honestly (`blocked` > `wrong` > `friction` > `cosmetic`) and, when you can, name
-the likely responsible file in `--artifact` (a reference doc, a routing rule, a CLI behaviour).
-These feed the ranking when the user later runs a self-improvement pass.
+**`log-signal` is for immediate criticals only — chiefly `failsafe`.** A genuinely unanswerable
+question is logged the instant it happens (and also written to `logs/backlog.md`, as above),
+independent of any success-beat offer:
+
+```
+./bob log-signal --type failsafe --note "<short>" --user-text "<exact question>" --severity blocked
+```
+
+That keeps the two channels disjoint — criticals through `log-signal` now, routine session friction
+through one `session-debrief` later — so nothing is double-logged. (`tool_error` and
+`redundant_fetch` are still handled automatically by the CLI — don't log them by hand.)
+
+Every signal carries a `source` the CLI sets for you — `cli` (auto-logged), `debrief` (a
+`session-debrief` batch), or `inline` (an immediate `log-signal`) — so a later `./bob self-improve`
+pass can see which capture path fired. You never set it yourself.
 
 This is capture only. The synthesis pass — clustering signals into a proposal-only action plan —
 is **manual**: the user triggers it, and it never changes code or skills on its own. See
@@ -169,8 +195,8 @@ other agents follow these steps directly):
 ## Further reading
 
 - `CLAUDE.md` — Claude-specific extensions (skill routing, voice patterns).
-- `.agents/skills/bob-google-ads/` — Per-intent reference files with exact CLI commands, significance thresholds, and wiki templates.
+- `.agents/skills/bob-performance-analysis/` — Per-intent reference files for performance analysis/diagnosis (period/segment/calendar comparisons, delta diagnosis, change history, creative-underperformance, question suggestions) with exact CLI commands, significance thresholds, and wiki templates.
+- `.agents/skills/bob-accounts/` — Account setup & management: onboarding, switch/list accounts, check/repair config.
 - `.agents/skills/bob-bid-budget/` — Bid/budget algorithm, mutation plan, retrospective.
 - `SOUL.md` — Bob's personality and voice.
-- `ARCHITECTURE.md` — Full system design.
 - `./bob --help` and `./bob <subcommand> --help` — Always the canonical answer for "what command does X".

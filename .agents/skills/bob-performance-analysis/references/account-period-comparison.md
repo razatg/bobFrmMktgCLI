@@ -54,16 +54,7 @@ python3 lib/datapull.py aggregate --grain account_network_period
 
 ## Significance Threshold and Auto-Escalation
 
-Compute automatically. If any threshold is crossed, **proceed to delta diagnosis without waiting for the user to ask**:
-
-| Metric | Threshold |
-|---|---|
-| Primary goal conversions | > 10% change |
-| Cost | > 15% change |
-| CTR % | > 1 percentage point |
-| CTI % or conversion_rate % | > 1 percentage point |
-
-When escalating, follow `references/delta-diagnosis.md` using the same period's date windows.
+Apply the shared significance thresholds and auto-escalation rule in `references/_common.md`, using the requested period's date windows.
 
 ## Wiki / Artefact
 

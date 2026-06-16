@@ -58,16 +58,7 @@ The `--output` CSV includes all metrics: impressions, clicks, cost, installs, in
 - Lead with the TOTAL row — it gives the aggregate picture the user asked for.
 - Then highlight individual campaigns with meaningful divergence from the group trend.
 - A campaign present in current but not baseline (or vice versa) signals a status change — flag it.
-- Apply the same significance thresholds as other period comparisons:
-
-| Metric | Threshold for flagging |
-|---|---|
-| Primary goal conversions | > 10% change |
-| Cost | > 15% change |
-| CTR % | > 1 percentage point |
-| CTI % or conversion_rate % | > 1 percentage point |
-
-If the segment total crosses any threshold, automatically proceed to delta diagnosis on the matched campaigns: use `references/delta-diagnosis.md` for the same period windows, filtering to the implicated campaign IDs.
+- Apply the shared significance thresholds and auto-escalation rule in `references/_common.md`. If the segment total crosses any threshold, escalate to delta diagnosis on the matched campaign IDs for the same period windows.
 
 ## When Processed Files Are Missing for the Period
 

@@ -479,9 +479,56 @@ def _write_bob_launcher() -> None:
     launcher = ROOT / "bob"
     launcher.write_text(
         "#!/bin/bash\n"
-        "# bob — convenience launcher that uses the project's virtual environment\n"
+        "# bob - launcher that prefers Bob's local environment, then a bundled runtime.\n"
+        "set -e\n"
+        "\n"
         'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-        'exec "$DIR/.venv/bin/python3" "$DIR/lib/datapull.py" "$@"\n'
+        "\n"
+        "find_python() {\n"
+        '    if [ -x "$DIR/.venv/bin/python3" ]; then\n'
+        '        printf \'%s\\n\' "$DIR/.venv/bin/python3"\n'
+        "        return 0\n"
+        "    fi\n"
+        '    if [ -x "$DIR/.venv/Scripts/python.exe" ]; then\n'
+        '        printf \'%s\\n\' "$DIR/.venv/Scripts/python.exe"\n'
+        "        return 0\n"
+        "    fi\n"
+        "\n"
+        "    for candidate in \\\n"
+        '        "$DIR/runtime/python/bin/python3" \\\n'
+        '        "$DIR/runtime/python/bin/python" \\\n'
+        '        "$DIR/runtime/python/python.exe" \\\n'
+        '        "$DIR/runtime/python/Scripts/python.exe" \\\n'
+        '        "$DIR/.runtime/python/bin/python3" \\\n'
+        '        "$DIR/.runtime/python/bin/python" \\\n'
+        '        "$DIR/.runtime/python/python.exe" \\\n'
+        '        "$DIR/.runtime/python/Scripts/python.exe"\n'
+        "    do\n"
+        '        if [ -x "$candidate" ]; then\n'
+        '            printf \'%s\\n\' "$candidate"\n'
+        "            return 0\n"
+        "        fi\n"
+        "    done\n"
+        "\n"
+        "    if command -v python3 >/dev/null 2>&1; then\n"
+        "        command -v python3\n"
+        "        return 0\n"
+        "    fi\n"
+        "\n"
+        "    return 1\n"
+        "}\n"
+        "\n"
+        'PYTHON="$(find_python || true)"\n'
+        'if [ -z "$PYTHON" ]; then\n'
+        "    cat <<'EOF'\n"
+        "Bob can't start because this folder does not include a Python runtime.\n"
+        "\n"
+        "Use the full Bob release package for your computer, then open that folder in your AI app and say: set me up\n"
+        "EOF\n"
+        "    exit 1\n"
+        "fi\n"
+        "\n"
+        'exec "$PYTHON" "$DIR/lib/datapull.py" "$@"\n'
     )
     launcher.chmod(0o755)
 
@@ -750,12 +797,16 @@ def log_signal(
     intent: str = "",
     artifact: str = "",
     severity: str = "",
+    source: str = "",
 ) -> dict:
     """Append one self-improvement signal to logs/session-signals.jsonl.
 
     Records only friction moments (a stumble, retry, correction, failsafe) — never
     the full conversation. Agent-agnostic: any agent (Claude, Gemini, Codex) captures
-    signal by calling `./bob log-signal`, so this depends on no runtime internals.
+    signal by calling `./bob log-signal` or `./bob session-debrief`, so this depends on
+    no runtime internals. `source` records how the signal was captured — "cli"
+    (self-instrumented), "inline" (a mid-session log-signal), or "debrief" (a batched
+    session-debrief at a success beat) — so a self-improve pass can see which path fired.
     Absent optional fields are omitted (not null), matching log_pull style.
     """
     SIGNAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -772,6 +823,8 @@ def log_signal(
         entry["artifact"] = artifact
     if severity:
         entry["severity"] = severity
+    if source:
+        entry["source"] = source
     if account:
         entry["account"] = account
     agent = os.getenv("BOB_AGENT", "")
@@ -867,6 +920,7 @@ def fetch(args: argparse.Namespace) -> None:
                     account=account,
                     intent="fetch",
                     severity="friction",
+                    source="cli",
                 )
             except Exception:
                 pass
@@ -5172,6 +5226,17 @@ def _ob_prompt(label: str, default: str = "") -> str:
     return val
 
 
+def _ob_context(why: str, where: str = "") -> None:
+    print(f"  Why this matters: {why}")
+    if where:
+        print(f"  Where to find it: {where}")
+
+
+def _ob_prompt_help(label: str, why: str, where: str = "", default: str = "") -> str:
+    _ob_context(why, where)
+    return _ob_prompt(label, default)
+
+
 def _ob_prompt_raw(label: str) -> str:
     """Single-line interactive prompt with no implicit default shortcuts."""
     try:
@@ -5181,9 +5246,17 @@ def _ob_prompt_raw(label: str) -> str:
         raise SystemExit(0)
 
 
-def _ob_numbered(label: str, options: list[tuple[str, str]], default: int = 1) -> tuple[str, str]:
+def _ob_numbered(
+    label: str,
+    options: list[tuple[str, str]],
+    default: int = 1,
+    why: str = "",
+    where: str = "",
+) -> tuple[str, str]:
     """Numbered-choice prompt. Returns (key, display_label)."""
     print(f"\n  {label}")
+    if why:
+        _ob_context(why, where)
     for i, (_, display) in enumerate(options, 1):
         marker = " *" if i == default else "  "
         print(f"{marker}  {i}) {display}")
@@ -5357,7 +5430,11 @@ def onboard(args: argparse.Namespace) -> None:
     # ── ACCOUNT ──────────────────────────────────────────────────────────────
     _print_section("Google Ads Account")
     while True:
-        cid = _ob_prompt("Customer ID (e.g. 123-456-7890)")
+        cid = _ob_prompt_help(
+            "Customer ID (e.g. 123-456-7890)",
+            "This tells Bob exactly which Google Ads account to analyze.",
+            "Google Ads account selector or the top bar of the account.",
+        )
         if not cid:
             print("  Customer ID is required.")
             continue
@@ -5369,13 +5446,20 @@ def onboard(args: argparse.Namespace) -> None:
             continue
         break
 
-    account_name = _ob_prompt("Account name (e.g. Acme App, Brand iOS)")
+    account_name = _ob_prompt_help(
+        "Account name (e.g. Acme App, Brand iOS)",
+        "This is just the local nickname Bob shows when you switch accounts.",
+        "Use the brand, app, market, or any name your team recognizes.",
+    )
     if not account_name:
         account_name = cid
 
     # ── MCC ──────────────────────────────────────────────────────────────────
     _print_section("MCC (Manager Account)")
-    print("  This is usually your manager account ID. Skip it if you do not use one.")
+    _ob_context(
+        "Bob uses this only when your Google Ads access goes through a manager account.",
+        "Google Ads manager account selector or top bar. Type 'skip' if you do not use one.",
+    )
     while True:
         mcc_id = _ob_prompt("MCC ID (e.g. 123-456-7890) — type 'skip' to leave blank")
         if not mcc_id or mcc_id.lower() == "skip":
@@ -5385,11 +5469,25 @@ def onboard(args: argparse.Namespace) -> None:
             print("  Format must be DDD-DDD-DDDD. Type 'skip' to leave blank.")
             continue
         break
-    mcc_name = _ob_prompt("MCC name (e.g. Acme MCC)") if mcc_id else ""
+    mcc_name = (
+        _ob_prompt_help(
+            "MCC name (e.g. Acme MCC)",
+            "This is just Bob's local nickname for the manager account.",
+            "Use the manager account name shown in Google Ads.",
+        )
+        if mcc_id
+        else ""
+    )
 
     # ── CAMPAIGN TYPE ─────────────────────────────────────────────────────────
     _print_section("Campaign Type")
-    ct_key, ct_display = _ob_numbered("What campaign type are you running?", CAMPAIGN_TYPES, default=1)
+    ct_key, ct_display = _ob_numbered(
+        "What campaign type are you running?",
+        CAMPAIGN_TYPES,
+        default=1,
+        why="This controls the analysis assumptions Bob uses for performance reads.",
+        where="Look at the campaign type column in Google Ads, or choose App campaigns if this account promotes an app.",
+    )
     campaign_type = ct_key
 
     # ── PRIMARY GOAL (App only) ───────────────────────────────────────────────
@@ -5398,17 +5496,33 @@ def onboard(args: argparse.Namespace) -> None:
     if campaign_type == "app":
         _print_section("Primary Goal")
         goal_options = [("installs", "Installs"), ("in_app_conversions", "In-app conversions")]
-        goal_key, _ = _ob_numbered("What's the primary goal?", goal_options, default=2)
+        goal_key, _ = _ob_numbered(
+            "What's the primary goal?",
+            goal_options,
+            default=2,
+            why="Bob uses this as the main conversion metric when judging wins, losses, CPA, and recommendations.",
+            where="Use the outcome your team optimizes the App campaigns for in Google Ads.",
+        )
         primary_goal = goal_key
         campaign_goal_type = CAMPAIGN_GOAL_TYPES[goal_key]["campaign_goal_type"]
 
     # ── CURRENCY ──────────────────────────────────────────────────────────────
     _print_section("Currency")
     currency_options_display = CURRENCY_OPTIONS + [("OTHER", "Other — I'll type it")]
-    cur_key, _ = _ob_numbered("Currency?", currency_options_display, default=1)
+    cur_key, _ = _ob_numbered(
+        "Currency?",
+        currency_options_display,
+        default=1,
+        why="Bob uses this for cost labels, CAC thresholds, and bid/budget recommendations.",
+        where="Google Ads billing or account settings. This should match how your costs are reported.",
+    )
     if cur_key == "OTHER":
         while True:
-            cur_key = _ob_prompt("Currency code (3 letters, e.g. SGD)").upper()
+            cur_key = _ob_prompt_help(
+                "Currency code (3 letters, e.g. SGD)",
+                "Bob needs the 3-letter code so reports and thresholds display cleanly.",
+                "Use the ISO currency code from your billing currency, like USD, INR, AUD, or SGD.",
+            ).upper()
             if len(cur_key) == 3 and cur_key.isalpha():
                 break
             print("  Enter a 3-letter currency code.")
@@ -5418,14 +5532,23 @@ def onboard(args: argparse.Namespace) -> None:
     _print_section("Google Ads Reporting Access")
     google_ads_read_config_path = ""
     while True:
-        has_token = _ob_prompt("To pull reporting data from Google Ads, I need your developer token from Google Ads > Admin > API Center. Do you have it? (y/n)", "y").lower()
+        has_token = _ob_prompt_help(
+            "Do you have your Google Ads developer token? (y/n)",
+            "This gives Bob read-only reporting access so he can pull performance data.",
+            "Google Ads > Admin > API Center. Ask your Google Ads admin if you cannot see it.",
+            "y",
+        ).lower()
         if has_token not in {"y", "yes", "n", "no"}:
             print("  Reply y or n.")
             continue
         if has_token in {"n", "no"}:
             print("  No dramas. Setup can continue, but I won't be able to fetch Google Ads data until you add the developer token.")
             break
-        developer_token = _ob_prompt("Developer token")
+        developer_token = _ob_prompt_help(
+            "Developer token",
+            "Bob stores this locally and uses it only for Google Ads reporting pulls.",
+            "Copy it from Google Ads > Admin > API Center.",
+        )
         if not developer_token:
             print("  Developer token is required to set up reporting data pulls. Reply n to skip for now.")
             continue
@@ -5433,7 +5556,12 @@ def onboard(args: argparse.Namespace) -> None:
         login_customer_id = (mcc_id or cid).replace("-", "")
         config_path = Path(google_ads_read_config_path).expanduser()
         if config_path.exists():
-            replace = _ob_prompt("I found existing reporting access settings for this account. Replace them? (y/n)", "n").lower()
+            replace = _ob_prompt_help(
+                "I found existing reporting access settings for this account. Replace them? (y/n)",
+                "Replacing is only needed if the old token or manager account is wrong.",
+                "Choose n if this account already fetched data correctly before.",
+                "n",
+            ).lower()
             if replace not in {"y", "yes"}:
                 print("  Keeping the existing reporting access settings.")
                 break
@@ -5446,7 +5574,12 @@ def onboard(args: argparse.Namespace) -> None:
     google_ads_write_config_path = ""
     write_creds_json_path = ""
     while True:
-        has_api_json = _ob_prompt("Optional: do you want Bob to make approved changes live in Google Ads? For that I need the Google Cloud OAuth client JSON. Do you have it? (y/n)", "n").lower()
+        has_api_json = _ob_prompt_help(
+            "Optional: do you have the Google Cloud OAuth client JSON for live changes? (y/n)",
+            "This is only for approved write-backs like bid, budget, or creative changes.",
+            "Google Cloud Console > APIs & Services > Credentials > OAuth 2.0 Client IDs > Download JSON.",
+            "n",
+        ).lower()
         if has_api_json not in {"y", "yes", "n", "no"}:
             print("  Reply y or n.")
             continue
@@ -5455,7 +5588,12 @@ def onboard(args: argparse.Namespace) -> None:
             break
         print("  Download it from Google Cloud Console → OAuth 2.0 Client IDs → Download JSON.")
         print("  Save it somewhere on this machine, then paste the full path here.")
-        raw_creds = _ob_prompt("Path to OAuth client JSON", "~/google-ads-creds.json")
+        raw_creds = _ob_prompt_help(
+            "Path to OAuth client JSON",
+            "Bob needs the local file path once so he can create write-access credentials.",
+            "Paste the full path to the JSON file you downloaded.",
+            "~/google-ads-creds.json",
+        )
         creds_path = Path(raw_creds).expanduser()
         if not creds_path.exists():
             print("  I can't find that JSON file. Check where you saved it, or reply n to skip for now.")
@@ -5467,11 +5605,26 @@ def onboard(args: argparse.Namespace) -> None:
 
     # ── OPTIONAL DEFAULTS ─────────────────────────────────────────────────────
     _print_section("Optional Defaults")
-    cac_raw = _ob_prompt(f"CAC ceiling ({currency})", "200")
+    cac_raw = _ob_prompt_help(
+        f"CAC ceiling ({currency})",
+        "Bob uses this as a guardrail before recommending bid or budget increases.",
+        "Use your maximum acceptable cost per primary conversion. If unsure, use the default.",
+        "200",
+    )
     cac_ceiling = int(cac_raw) if cac_raw.isdigit() else 200
-    pct_raw = _ob_prompt("Max bid/budget change %", "10")
+    pct_raw = _ob_prompt_help(
+        "Max bid/budget change %",
+        "This caps how aggressive Bob can be in recommendation plans.",
+        "Use your team's normal weekly change limit. If unsure, use the default.",
+        "10",
+    )
     bid_budget_change_pct = min(int(pct_raw) if pct_raw.isdigit() else 10, 20)
-    cd_raw = _ob_prompt("Cooldown days between changes", "14")
+    cd_raw = _ob_prompt_help(
+        "Cooldown days between changes",
+        "Bob avoids changing the same campaign again before this many days pass.",
+        "Use your team's learning-window rule. If unsure, use the default.",
+        "14",
+    )
     bid_budget_cooldown_days = int(cd_raw) if cd_raw.isdigit() else 14
     creative_min_impressions = 50000
 
@@ -5501,12 +5654,16 @@ def onboard(args: argparse.Namespace) -> None:
     if campaign_type == "app":
         print(f"  Primary goal:  {primary_goal}")
     print(f"  Currency:      {currency}")
-    print(f"  Read config:   {google_ads_read_config_path or '(not set)'}")
-    if google_ads_write_config_path:
-        print(f"  Write config:  {google_ads_write_config_path}")
+    print(f"  Read access:   {'ready' if google_ads_read_config_path else 'not set'}")
+    print(f"  Write access:  {'ready' if google_ads_write_config_path else 'not set'}")
     print(f"  CAC ceiling:   {cac_ceiling}  |  Change %: {bid_budget_change_pct}  |  Cooldown: {bid_budget_cooldown_days}d")
 
-    confirm = _ob_prompt("\n  Save this? (y/n)", "y")
+    confirm = _ob_prompt_help(
+        "\n  Save this? (y/n)",
+        "Bob needs your confirmation before saving this account setup locally.",
+        "Review the summary above. Type y to save or n to stop.",
+        "y",
+    )
     if confirm.lower() != "y":
         print("No worries. Nothing saved.")
         return
@@ -5703,7 +5860,11 @@ def log_pull_cmd(args: argparse.Namespace) -> None:
 
 
 def log_signal_cmd(args: argparse.Namespace) -> None:
-    """Append one self-improvement signal — a friction moment in this session."""
+    """Append one self-improvement signal — a friction moment in this session.
+
+    For an immediate, single critical (chiefly `failsafe`). Routine friction is batched
+    into one `session-debrief` call at a success beat instead — see that command.
+    """
     profile = load_profile(required=False)
     account = args.account or str(profile.get("google_ads_customer_id", "")).replace("-", "")
     entry = log_signal(
@@ -5714,8 +5875,55 @@ def log_signal_cmd(args: argparse.Namespace) -> None:
         intent=args.intent,
         artifact=args.artifact,
         severity=args.severity,
+        source="inline",
     )
     print(f"signal logged: {entry['event_type']} — {entry['note']}")
+
+
+def session_debrief(args: argparse.Namespace) -> None:
+    """Record a batch of self-improvement signals captured at a session success beat.
+
+    The consent-based, in-voice half of capture: Bob tracks where it got stuck during a
+    session and, at a clear win (e.g. a wiki write), offers to note it. Only on the user's
+    say-so does it call this — one batched write for the whole session, each entry tagged
+    source="debrief". The agent-agnostic sibling of log-signal: same schema, same writer,
+    so it depends on no runtime internals. An empty list is a clean no-op (no nagging), and
+    a malformed batch is validated up front so nothing is half-written.
+    """
+    profile = load_profile(required=False)
+    account = args.account or str(profile.get("google_ads_customer_id", "")).replace("-", "")
+    try:
+        signals = json.loads(args.signals)
+    except json.JSONDecodeError as exc:
+        die(f"--signals must be a JSON array of signal objects: {exc}")
+    if not isinstance(signals, list):
+        die("--signals must be a JSON array, e.g. '[{\"event_type\":\"friction\",\"note\":\"...\"}]'")
+    if not signals:
+        print("session-debrief: clean session — no signals to record.")
+        return
+    # Validate every entry before writing any, so a malformed batch appends nothing.
+    cleaned = []
+    for i, s in enumerate(signals):
+        if not isinstance(s, dict):
+            die(f"--signals[{i}] must be an object with at least 'event_type' and 'note'")
+        event_type = s.get("event_type") or s.get("type")
+        note = s.get("note")
+        if not event_type or not note:
+            die(f"--signals[{i}] needs both 'event_type' and 'note'")
+        cleaned.append((event_type, note, s))
+    for event_type, note, s in cleaned:
+        log_signal(
+            event_type=event_type,
+            note=note,
+            account=s.get("account") or account,
+            user_text=s.get("user_text", ""),
+            intent=s.get("intent", ""),
+            artifact=s.get("artifact", ""),
+            severity=s.get("severity", ""),
+            source="debrief",
+        )
+    n = len(cleaned)
+    print(f"session-debrief: recorded {n} signal{'s' if n != 1 else ''} from this session.")
 
 
 def self_improve(args: argparse.Namespace) -> None:
@@ -5730,12 +5938,16 @@ def self_improve(args: argparse.Namespace) -> None:
         return
     by_type: dict[str, int] = {}
     by_severity: dict[str, int] = {}
+    by_source: dict[str, int] = {}
     for s in signals:
         et = s.get("event_type", "?")
         by_type[et] = by_type.get(et, 0) + 1
         sev = s.get("severity")
         if sev:
             by_severity[sev] = by_severity.get(sev, 0) + 1
+        src = s.get("source")
+        if src:
+            by_source[src] = by_source.get(src, 0) + 1
     print(f"Self-improvement signals: {len(signals)} total\n")
     print("By event type:")
     for k in sorted(by_type, key=lambda x: -by_type[x]):
@@ -5744,6 +5956,10 @@ def self_improve(args: argparse.Namespace) -> None:
         print("\nBy severity:")
         for k in sorted(by_severity, key=lambda x: -by_severity[x]):
             print(f"  {by_severity[k]:>4}  {k}")
+    if by_source:
+        print("\nBy source (cli=auto, inline=log-signal, debrief=session-debrief):")
+        for k in sorted(by_source, key=lambda x: -by_source[x]):
+            print(f"  {by_source[k]:>4}  {k}")
     print("\nRead these to cluster pitfalls and write the proposal:")
     print(f"  signals : {SIGNAL_LOG_PATH}")
     if backlog.exists():
@@ -6124,6 +6340,11 @@ def build_parser() -> argparse.ArgumentParser:
     sig_parser.add_argument("--account", default="", help="override active account (defaults to active profile)")
     sig_parser.set_defaults(func=log_signal_cmd)
 
+    sd_parser = sub.add_parser("session-debrief", help="record a batch of friction signals captured at a session success beat (consent-based)")
+    sd_parser.add_argument("--signals", required=True, help="JSON array of signal objects; each needs event_type + note, plus optional user_text/intent/artifact/severity")
+    sd_parser.add_argument("--account", default="", help="override active account (defaults to active profile)")
+    sd_parser.set_defaults(func=session_debrief)
+
     si_parser = sub.add_parser("self-improve", help="summarise logged signals + point to files for a self-improvement pass")
     si_parser.set_defaults(func=self_improve)
 
@@ -6348,6 +6569,7 @@ UTILITIES
   validate-manual               Compare a Bob aggregate against a manual export
   log-pull                      Write a pull-log entry without fetching
   log-signal                    Record a self-improvement signal (a friction moment)
+  session-debrief               Record a batch of friction signals at a session success beat
   self-improve                  Summarise signals for a self-improvement pass
   sync                          Share wiki + signals with the team (via a shared folder, no git)
 
@@ -6363,7 +6585,7 @@ def _auto_log_cli_failure(command: str, argv: list[str], detail: str) -> None:
     must never mask or replace the original error. Skips the self-improvement commands
     themselves to avoid noise/recursion.
     """
-    if command in ("log-signal", "self-improve"):
+    if command in ("log-signal", "session-debrief", "self-improve"):
         return
     try:
         profile = load_profile(required=False)
@@ -6374,6 +6596,7 @@ def _auto_log_cli_failure(command: str, argv: list[str], detail: str) -> None:
             account=account,
             intent=command,
             severity="friction",
+            source="cli",
         )
     except Exception:
         pass

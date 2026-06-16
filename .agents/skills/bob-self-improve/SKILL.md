@@ -8,9 +8,11 @@ description: Use when the user asks Bob to learn from past sessions, review recu
 Use this skill when the user asks Bob to learn from its own mistakes — "review your recent
 stumbles", "what keeps tripping you up", "run a self-improvement pass", "how can you get better".
 
-This is the **synthesis** half of the self-improvement loop. The **capture** half is automatic
-and agent-agnostic: agents log friction signals via `./bob log-signal` as they work (see the
-"Signal logging" section in `AGENTS.md`). This skill reads those signals and proposes fixes.
+This is the **synthesis** half of the self-improvement loop. The **capture** half is agent-agnostic:
+the CLI auto-logs hard signals, the agent batches soft friction into one `./bob session-debrief` at
+a success beat (and uses `./bob log-signal` for immediate criticals like `failsafe`) — see the
+"Signal logging" section in `AGENTS.md`. Each signal carries a `source` field (`cli` | `inline` |
+`debrief`). This skill reads those signals and proposes fixes.
 
 ## Personality
 

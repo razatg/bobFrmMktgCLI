@@ -1,0 +1,34 @@
+#!/bin/sh
+# Bob pre-commit hook: run the core smoke test before every commit.
+#
+# Wired in per-clone with:
+#     git config core.hooksPath scripts/hooks
+#
+# Keeps lib/datapull.py's deterministic core (metric formulas, zero-denominator
+# rule, period-date math, aggregation) from regressing silently. Sub-second, so
+# it always runs. Bypass in an emergency with: git commit --no-verify
+set -e
+
+# Repo root = two levels up from scripts/hooks/.
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+TEST="$ROOT/tests/test_core.py"
+
+# Never wedge a clone that doesn't have the test yet.
+if [ ! -f "$TEST" ]; then
+    exit 0
+fi
+
+# Prefer the project venv; fall back to system python3 (test is pure stdlib).
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PY="$ROOT/.venv/bin/python"
+else
+    PY=python3
+fi
+
+echo "pre-commit: running core smoke test..."
+if ! "$PY" "$TEST"; then
+    echo "pre-commit: core smoke test FAILED — commit aborted." >&2
+    echo "  Fix the regression, or if the change is intentional update the expected" >&2
+    echo "  values in tests/test_core.py. Bypass with: git commit --no-verify" >&2
+    exit 1
+fi

@@ -44,7 +44,27 @@ python3 lib/datapull.py suggest-creative-copy
 
 See `references/creative-copy-suggest.md` for the full workflow.
 
-**Step 4 (after agent fills suggestions and user approves) — Apply:**
+**Step 4 (optional) — Prepare LOW static image replacement candidates:**
+```bash
+./bob suggest-static-variants
+# Output:
+#   wiki/{customer_id}/design/low-static-variants/YYYY-MM-DD/manifest.json
+#   downloaded source images when URLs are available
+```
+
+Use the `bob-static-banners` skill's LOW Static Variant Workflow after this command. The agent must inspect each source image with `view_image`, ask the user for hard SLA constraints before every regeneration, generate only a same-size preview variant, and run spec-only QA. Preview generation must not upload or replace Google Ads assets.
+
+After the user explicitly approves a preview to make live, use:
+```bash
+./bob static-variants-apply \
+  --manifest wiki/{customer_id}/design/low-static-variants/YYYY-MM-DD/manifest.json \
+  --asset-id <LOW_ASSET_ID> \
+  --replacement <generated-final-png-or-jpg>
+```
+
+The apply command has its own approval table and waits for `y` before uploading the image asset or updating the app ad.
+
+**Step 5 (after agent fills suggestions and user approves) — Apply text changes only:**
 ```bash
 python3 lib/datapull.py creative-copy-apply \
   --plan wiki/action-items/creative-copy-YYYY-MM-DD.yaml \
@@ -74,8 +94,11 @@ Then show the low-action table from the CLI output.
 
 ## Suggested Actions
 
-- **pause**: low-action asset — stop serving, review copy
-- **replace**: pause candidate — suggest uploading a new variant in the same field_type
+- **pause**: low-action text asset — stop serving, review copy
+- **replace text**: LOW-action text asset — use `suggest-creative-copy`, then `creative-copy-apply` only after explicit user approval
+- **replace static image preview**: LOW `IMAGE` asset — use `suggest-static-variants`, then the `bob-static-banners` LOW Static Variant Workflow
+- **apply approved static image**: approved generated `IMAGE` replacement — use `static-variants-apply`, which asks for final approval before upload/mutation
+- **review media**: LOW `YOUTUBE_VIDEO` or `MEDIA_BUNDLE` asset — review for refresh; no automated generation path yet
 - **observe**: low-watch — monitor for one more week before acting
 
 ## Wiki / Artefact
