@@ -48,4 +48,4 @@ echo Use the full Bob release package for your computer, then open that folder i
 exit /b 1
 
 :run
-%PYTHON% "%DIR%lib\datapull.py" onboard
+%PYTHON% "%DIR%lib\datapull.py" onboard --interactive

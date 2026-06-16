@@ -20,7 +20,7 @@ The loop is simple:
 ./bob <subcommand> --help # full flag list + examples
 ```
 
-Run `python3 lib/datapull.py onboard` once, before `./bob` exists. After onboarding, never call `python3 lib/datapull.py` directly. The `bin/bob-*` shortcuts are thin proxies through `./bob`; they're safe to use but offer no extra capability.
+Run `python3 lib/datapull.py onboard --interactive` once (a human in a real terminal), or `--answers '{…}'` (an agent gathering in chat), before `./bob` exists. After onboarding, never call `python3 lib/datapull.py` directly. The `bin/bob-*` shortcuts are thin proxies through `./bob`; they're safe to use but offer no extra capability.
 
 If a question doesn't match any reference file in `.agents/skills/`, run `./bob` to see the command map, then `./bob <name> --help` for the right subcommand. **Never invent a subcommand name.**
 
@@ -65,7 +65,7 @@ Never edit `.bob/agent-mode.json` yourself without an explicit user request that
 
 When the user says "set me up", "onboard me", "connect my account", "add an account", or similar, treat it as guided account setup for a non-technical user.
 
-**Gather the answers in chat, then submit them in one command — never drive the script's interactive prompts.** Running `onboard` with no arguments starts a blocking `input()` loop an agent can't answer, so the session hangs. Instead collect the answers conversationally and pass them as JSON:
+**Ask the questions yourself in chat, then submit the answers in one command — never drive the script's interactive prompts.** Don't run a bare `onboard`, don't use `onboard --interactive`, and never feed answers into a live/background terminal — driving the prompts double-asks questions or hangs. (`--interactive` is the human-in-a-real-terminal path; a bare `onboard` just prints usage and exits.) Instead collect the answers conversationally and pass them as JSON:
 
 ```
 python3 lib/datapull.py onboard --dry-run --answers '{"customer_id":"123-456-7890","campaign_type":"app","primary_goal":"installs","currency":"INR", ...}'

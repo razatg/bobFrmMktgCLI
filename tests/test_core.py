@@ -294,6 +294,16 @@ class TestOnboardAnswers(unittest.TestCase):
         })
         self.assertIn("No developer token", out)  # loud warning, but dry-run still passes
 
+    def test_bare_onboard_prints_guidance_and_does_nothing(self):
+        # No --answers and no --interactive → guidance only, no prompts, no setup side effects.
+        args = argparse.Namespace(answers=None, interactive=False)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.onboard(args)
+        text = out.getvalue()
+        self.assertIn("--answers", text)
+        self.assertIn("--interactive", text)
+
     def test_real_save_without_token_is_blocked(self):
         # dry_run=False + no token + no skip → die BEFORE _finalize_onboard, so nothing is written.
         args = argparse.Namespace(

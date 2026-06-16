@@ -49,4 +49,4 @@ EOF
     exit 1
 fi
 
-exec "$PYTHON" "$DIR/lib/datapull.py" onboard
+exec "$PYTHON" "$DIR/lib/datapull.py" onboard --interactive

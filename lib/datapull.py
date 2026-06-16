@@ -5645,6 +5645,22 @@ def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> Non
 
 
 def onboard(args: argparse.Namespace) -> None:
+    # Pick a mode up front. A bare `onboard` must NOT present a drivable prompt loop: agents end up
+    # relaying the live prompts through a terminal (which double-asks questions, or hangs), instead
+    # of gathering answers in chat and submitting them once. With neither mode chosen, just print
+    # guidance and exit — no prompts to drive, no setup side effects.
+    if not getattr(args, "answers", None) and not getattr(args, "interactive", False):
+        print(
+            "\nTo set up a Google Ads account with Bob:\n\n"
+            '  • In your AI assistant, just say "set me up" — Bob asks you the questions and does the rest.\n'
+            "  • Prefer a hands-on terminal? Run:\n"
+            "      python3 lib/datapull.py onboard --interactive\n"
+            "  • Automation / agents: gather the answers in chat, then run:\n"
+            "      python3 lib/datapull.py onboard --answers '{\"customer_id\":\"…\", …}'\n"
+            "    (run  python3 lib/datapull.py onboard --help  for the full key list)\n"
+        )
+        return
+
     ensure_local_setup_for_onboarding()
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
     existing = _load_accounts_registry()
@@ -6709,6 +6725,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="with --answers: validate and print the confirm summary, write nothing",
+    )
+    ob_parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="run the hands-on terminal prompt flow (for a human in a real terminal). "
+        "Without this and without --answers, onboard just prints usage guidance.",
     )
     ob_parser.set_defaults(func=onboard)
 

@@ -89,7 +89,7 @@ After onboarding, run commands as `./bob <subcommand>` — the launcher uses the
 ./bob check-config [--config PATH]
 
 # Account management
-python3 lib/datapull.py onboard                # interactive setup before ./bob exists
+python3 lib/datapull.py onboard --interactive  # hands-on terminal setup before ./bob exists (agents use --answers)
 ./bob switch-account                           # switch active account context
 ./bob list-accounts                            # list all registered accounts
 
