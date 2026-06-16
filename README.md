@@ -104,65 +104,77 @@ You don't need to run setup scripts yourself — Bob handles setup and talks you
 
 ---
 
-## What you can ask
+## What Bob can do
 
-Once set up, just ask in plain English. Examples:
+Once set up, just ask in plain English — Bob works out what you mean and reads the answer straight from your Google Ads data. Here's the full range.
 
-### Yesterday & this week
+### Daily & weekly check-ins
 
 - *What happened yesterday?*
 - *How did yesterday compare to the same day last week?*
 - *How is this week tracking so far?*
-
-### Week over week
-
 - *How did last week compare to the week before?*
-- *What drove the change last week?*
-- *How are the Brand campaigns doing week over week?*
 
-### Month over month
+### Month & specific-period comparisons
 
 - *How is this month tracking vs last month?*
 - *How did May compare to April?*
+- *Compare week 20 with week 19.*
+- *May month-to-date vs April month-to-date.*
 
-### Campaigns
+### What changed — and why
 
-- *Which campaigns are dragging?*
-- *How are the Stable campaigns performing?*
 - *What caused the drop in installs last week?*
-- *Which network is spending the most?*
+- *Why did my cost per install go up?*
+- *Which network drove it — Search, Display, YouTube or Play?*
 
-### Creatives
+Bob works top-down — account → network → campaign → ad group — and overlays what the team changed around that time, so you get the cause, not just the number.
 
-- *Which creatives are underperforming?*
+### Zoom into a group of campaigns
+
+- *How are the Stable campaigns performing?*
+- *Compare all the Brand campaigns week over week.*
+- *Which campaigns are dragging?*
+
+### Creatives — find the duds and fix them
+
+- *Which creatives are underperforming?* — diagnosis with the why
 - *Which assets should I pause or replace?*
-- *Can you suggest better copy for the low-performing assets?*
+- *Suggest better copy for the low-performing text assets.* — Bob drafts replacements and pushes them live once you approve
+- *Build me a static banner design guide from my best performers.*
+- *Make fresh versions of my low-performing banners.* — same-size replacements, shown to you as a preview before anything goes live
 
 ### Bids & budgets
 
-- *What should I do with my bids this week?*
-- *Show me the bid and budget recommendation plan.*
-- *Apply the bid changes.*
-- *Are last week's bid changes working?*
+- *What should I do with my bids and budgets this week?*
+- *Show me the recommendation plan.*
+- *Apply the changes.* — only ever after you say go
+- *Are last week's bid changes working?* — a follow-up check a week or two later
 
 ### Team activity
 
 - *What did the team change this week?*
 - *What changed in [campaign name] recently?*
 
+### Accounts & setup
+
+- *Set me up.* / *Add another account.*
+- *Switch to [account name].* / *Which account am I on?*
+- *Check my config.* / *Setup failed — sort it out.*
+
+### Share with your team
+
+- *Hey Bob, sync.* — shares your saved analyses and notes with teammates through a shared folder (like Dropbox). Pull their updates, push yours. No login, no GitHub.
+
+### Keep Bob sharp
+
+- *Review your mistakes.* — Bob looks back over where it tripped up and writes a short improvement plan. Nothing changes until you approve it.
+
 ### Not sure where to start?
 
 - *Suggest some questions to ask.*
 
----
-
-## Managing multiple accounts
-
-Bob supports multiple Google Ads accounts. Just tell Bob in the chat:
-
-- *"Add another account"*
-- *"Switch to [account name]"*
-- *"Which account am I on?"*
+Bob never invents numbers — every figure comes from a live read of your account. If something isn't possible yet, Bob will tell you straight and note it down to learn later.
 
 ---
 
