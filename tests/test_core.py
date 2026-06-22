@@ -239,6 +239,23 @@ class TestOnboardAnswers(unittest.TestCase):
     dry_run=True so it only validates + prints (no files written, no setup run).
     """
 
+    def _complete_answers(self, **overrides):
+        answers = {
+            "customer_id": "999-888-7777",
+            "account_name": "Test App",
+            "campaign_type": "app",
+            "primary_goal": "installs",
+            "currency": "INR",
+            "mcc_id": "skip",
+            "developer_token": "test-token",
+            "oauth_client_json_path": "skip",
+            "cac_ceiling": 200,
+            "bid_budget_change_pct": 10,
+            "bid_budget_cooldown_days": 14,
+        }
+        answers.update(overrides)
+        return answers
+
     def _dry_run(self, answers_dict, existing=None):
         args = argparse.Namespace(answers=json.dumps(answers_dict), dry_run=True)
         out = io.StringIO()
@@ -257,19 +274,41 @@ class TestOnboardAnswers(unittest.TestCase):
 
     def test_valid_dry_run_normalizes_input(self):
         # fuzzy input ("999 888 7777", "App", "inr") is normalized in the summary
-        out = self._dry_run({
-            "customer_id": "999 888 7777",
-            "campaign_type": "App",
-            "primary_goal": "installs",
-            "currency": "inr",
-        })
+        out = self._dry_run(self._complete_answers(
+            customer_id="999 888 7777",
+            campaign_type="App",
+            currency="inr",
+        ))
         self.assertIn("999-888-7777", out)   # reformatted
         self.assertIn("INR", out)            # upper-cased
         self.assertIn("App Campaigns", out)  # enum resolved to display label
         self.assertIn("dry run", out.lower())
 
+    def test_incomplete_agent_answers_are_rejected(self):
+        msg = self._expect_die({
+            "customer_id": "999-888-7777",
+            "account_name": "Test App",
+            "campaign_type": "app",
+            "primary_goal": "installs",
+            "currency": "INR",
+            "developer_token": "test-token",
+        })
+        self.assertIn("incomplete", msg)
+        self.assertIn("mcc_id", msg)
+        self.assertIn("cac_ceiling", msg)
+        self.assertIn("bid_budget_change_pct", msg)
+        self.assertIn("bid_budget_cooldown_days", msg)
+
+    def test_mcc_name_required_when_mcc_id_is_supplied(self):
+        msg = self._expect_die(self._complete_answers(mcc_id="111-222-3333"))
+        self.assertIn("mcc_name", msg)
+
     def test_invalid_reports_all_problems_at_once(self):
-        msg = self._expect_die({"campaign_type": "banana", "currency": "rupees"})
+        msg = self._expect_die(self._complete_answers(
+            customer_id="",
+            campaign_type="banana",
+            currency="rupees",
+        ))
         self.assertIn("customer_id", msg)    # missing required field
         self.assertIn("campaign_type", msg)  # bad enum
         self.assertIn("currency", msg)       # bad currency — all three in one message
@@ -279,8 +318,7 @@ class TestOnboardAnswers(unittest.TestCase):
 
     def test_already_registered_rejected(self):
         msg = self._expect_die(
-            {"customer_id": "999-888-7777", "campaign_type": "app",
-             "primary_goal": "installs", "currency": "INR"},
+            self._complete_answers(),
             existing=[{"google_ads_customer_id": "999-888-7777"}],
         )
         self.assertIn("already registered", msg)
@@ -288,10 +326,7 @@ class TestOnboardAnswers(unittest.TestCase):
     # --- developer-token completeness gate ---
 
     def test_dry_run_warns_when_token_missing(self):
-        out = self._dry_run({
-            "customer_id": "999-888-7777", "campaign_type": "app",
-            "primary_goal": "installs", "currency": "INR",
-        })
+        out = self._dry_run(self._complete_answers(developer_token=""))
         self.assertIn("No developer token", out)  # loud warning, but dry-run still passes
 
     def test_bare_onboard_prints_guidance_and_does_nothing(self):
@@ -308,8 +343,17 @@ class TestOnboardAnswers(unittest.TestCase):
         # dry_run=False + no token + no skip → die BEFORE _finalize_onboard, so nothing is written.
         args = argparse.Namespace(
             answers=json.dumps({
-                "customer_id": "999-888-7777", "campaign_type": "app",
-                "primary_goal": "installs", "currency": "INR",
+                "customer_id": "999-888-7777",
+                "account_name": "Test App",
+                "campaign_type": "app",
+                "primary_goal": "installs",
+                "currency": "INR",
+                "mcc_id": "skip",
+                "developer_token": "",
+                "oauth_client_json_path": "skip",
+                "cac_ceiling": 200,
+                "bid_budget_change_pct": 10,
+                "bid_budget_cooldown_days": 14,
             }),
             dry_run=False,
         )

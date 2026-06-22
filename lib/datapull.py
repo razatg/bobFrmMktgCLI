@@ -5582,6 +5582,33 @@ def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> Non
 
     errors: list[str] = []
 
+    # Agents must ask every onboarding field in chat before submitting --answers.
+    # Missing optional keys usually mean the agent skipped a user-facing question,
+    # so fail fast instead of silently accepting defaults.
+    required_answer_keys = {
+        "customer_id",
+        "account_name",
+        "campaign_type",
+        "primary_goal",
+        "currency",
+        "mcc_id",
+        "oauth_client_json_path",
+        "cac_ceiling",
+        "bid_budget_change_pct",
+        "bid_budget_cooldown_days",
+    }
+    missing_answer_keys = sorted(k for k in required_answer_keys if k not in data)
+    submitted_mcc_id = str(data.get("mcc_id", "")).strip()
+    if submitted_mcc_id and submitted_mcc_id.lower() != "skip" and "mcc_name" not in data:
+        missing_answer_keys.append("mcc_name")
+    if "developer_token" not in data and "skip_read_access" not in data:
+        missing_answer_keys.append("developer_token or skip_read_access")
+    if missing_answer_keys:
+        die(
+            "onboarding answers are incomplete — agents must ask every setup question before "
+            "submitting --answers. Missing: " + ", ".join(missing_answer_keys)
+        )
+
     # Customer ID (required)
     cid_raw = str(data.get("customer_id", "")).strip()
     cid = _normalize_customer_id(cid_raw)
@@ -5650,6 +5677,8 @@ def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> Non
     write_creds_json_path = ""
     google_ads_write_config_path = ""
     oauth_path = str(data.get("oauth_client_json_path", "")).strip()
+    if oauth_path.lower() == "skip":
+        oauth_path = ""
     if oauth_path:
         if not Path(oauth_path).expanduser().exists():
             errors.append(f"oauth_client_json_path '{oauth_path}' not found on this machine")
