@@ -37,6 +37,8 @@ ls data/processed/<customer_id_no_hyphens>/<subdir>/  # list processed files for
 
 After onboarding, run commands as `./bob <subcommand>` — the launcher uses the project virtualenv. Use `python3 lib/datapull.py onboard` only to start onboarding before `./bob` exists. Do not call `bin/bob-*` directly except as fallback shortcuts (they proxy through `./bob`). When a question doesn't match any reference file, run `./bob` for the command map and `./bob <subcommand> --help` for flags — never invent a subcommand name.
 
+**First-run network access:** setup and `repair-setup` install Python packages from PyPI. If package installation fails with DNS, package-index, HTTPS, `garf-executors`, `garf-google-ads`, `google-ads`, or `No matching distribution found` errors, explain that the command environment likely lacks network access. Ask the user to allow network/escalated command access in their AI app, then rerun `./bob repair-setup` if `./bob` exists, or `python3 lib/datapull.py repair-setup` if it does not. Do not rerun onboarding just to fix dependencies.
+
 **Common subcommands:**
 ```bash
 # Bootstrap: fetch all default period windows (~16 small API calls)

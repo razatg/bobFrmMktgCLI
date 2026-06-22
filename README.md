@@ -79,6 +79,10 @@ Download Bob from GitHub using **Code → Download ZIP**, then unzip it somewher
 
 On the first run, Bob can download Python automatically if your machine doesn't already have it. Keep an internet connection on for setup.
 
+Some AI apps run terminal commands in a restricted sandbox. Your browser may have internet while the AI's command runner does not. If setup asks for network/escalated command access, approve it so Bob can install its Python packages from the Python package index.
+
+If setup fails while installing packages like `garf-executors`, `garf-google-ads`, or `google-ads`, it usually means the AI app's command runner could not reach the package index. It does not mean Bob is broken. Allow network access for setup, then ask Bob to "fix setup".
+
 ---
 
 **Step 2 — Open the folder in your AI app**

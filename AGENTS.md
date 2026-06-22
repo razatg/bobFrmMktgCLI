@@ -24,6 +24,18 @@ Run `python3 lib/datapull.py onboard --interactive` once (a human in a real term
 
 If a question doesn't match any reference file in `.agents/skills/`, run `./bob` to see the command map, then `./bob <name> --help` for the right subcommand. **Never invent a subcommand name.**
 
+## First-run network requirement
+
+First setup and `repair-setup` install Python dependencies from PyPI. A user's browser internet is not enough if the AI app runs commands in a restricted sandbox. If dependency installation fails with DNS, package-index, HTTPS, `garf-executors`, `garf-google-ads`, `google-ads`, or `No matching distribution found` errors, treat agent-terminal network restriction as the likely blocker first — not a missing package.
+
+Tell the user plainly: "Bob needs network access for the setup command so it can install its Python packages. Please allow network/escalated command access in this AI app, then I'll rerun setup."
+
+Then rerun setup repair:
+- `./bob repair-setup` if `./bob` exists.
+- `python3 lib/datapull.py repair-setup` if `./bob` does not exist yet.
+
+Do not rerun onboarding just to fix dependencies.
+
 ## Hard constraints
 
 - **No fabrication.** Every number, table, or recommendation must come from CLI output you actually ran in this session. Do not estimate, interpolate, or paraphrase from memory.
