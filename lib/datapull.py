@@ -479,10 +479,16 @@ def _write_bob_launcher() -> None:
     launcher = ROOT / "bob"
     launcher.write_text(
         "#!/bin/bash\n"
-        "# bob - launcher that prefers Bob's local environment, then a bundled runtime.\n"
+        "# bob - launcher that prefers Bob's local environment, then bootstraps Python if needed.\n"
         "set -e\n"
         "\n"
         'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        "\n"
+        'PYTHON_VERSION="3.12.10"\n'
+        'PYTHON_SERIES="${PYTHON_VERSION%.*}"\n'
+        'RUNTIME_DIR="$DIR/runtime/python"\n'
+        'BOOTSTRAP_PYTHON3="$RUNTIME_DIR/bin/python3"\n'
+        'BOOTSTRAP_PYTHON="$RUNTIME_DIR/bin/python"\n'
         "\n"
         "find_python() {\n"
         '    if [ -x "$DIR/.venv/bin/python3" ]; then\n'
@@ -518,13 +524,78 @@ def _write_bob_launcher() -> None:
         "    return 1\n"
         "}\n"
         "\n"
+        "bootstrap_python() {\n"
+        '    if [ "$(uname -s)" != "Darwin" ]; then\n'
+        "        cat <<'EOF'\n"
+        "Bob couldn't find Python on this machine.\n"
+        "\n"
+        "Run the platform-specific setup launcher so Bob can install Python locally first.\n"
+        "EOF\n"
+        "        return 1\n"
+        "    fi\n"
+        "\n"
+        "    if ! command -v curl >/dev/null 2>&1; then\n"
+        '        echo "Bob needs curl to download Python automatically."\n'
+        "        return 1\n"
+        "    fi\n"
+        "\n"
+        '    PKG_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-macos11.pkg"\n'
+        '    TMP_PKG="$(mktemp "/tmp/bob-python-${PYTHON_VERSION}.XXXXXX.pkg")"\n'
+        '    TMP_LOG="$(mktemp "/tmp/bob-python-install.${PYTHON_VERSION}.XXXXXX.log")"\n'
+        '    USER_PYTHON="$HOME/Library/Frameworks/Python.framework/Versions/$PYTHON_SERIES/bin/python3"\n'
+        '    SYSTEM_PYTHON="/Library/Frameworks/Python.framework/Versions/$PYTHON_SERIES/bin/python3"\n'
+        "\n"
+        '    echo "Bob could not find Python. Downloading Python $PYTHON_VERSION from python.org..."\n'
+        '    if ! curl --fail --location --silent --show-error "$PKG_URL" --output "$TMP_PKG"; then\n'
+        '        echo "Bob could not download Python automatically."\n'
+        '        rm -f "$TMP_PKG" "$TMP_LOG"\n'
+        "        return 1\n"
+        "    fi\n"
+        "\n"
+        '    echo "Installing a local Python runtime for Bob..."\n'
+        '    if ! installer -pkg "$TMP_PKG" -target CurrentUserHomeDirectory >"$TMP_LOG" 2>&1; then\n'
+        "        cat <<EOF\n"
+        "Bob downloaded Python but couldn't install it automatically.\n"
+        "\n"
+        "Installer log: $TMP_LOG\n"
+        "EOF\n"
+        '        rm -f "$TMP_PKG"\n'
+        "        return 1\n"
+        "    fi\n"
+        "\n"
+        '    rm -f "$TMP_PKG"\n'
+        '    mkdir -p "$RUNTIME_DIR/bin"\n'
+        "\n"
+        '    if [ -x "$USER_PYTHON" ]; then\n'
+        '        ln -sfn "$USER_PYTHON" "$BOOTSTRAP_PYTHON3"\n'
+        '        ln -sfn "$USER_PYTHON" "$BOOTSTRAP_PYTHON"\n'
+        "        return 0\n"
+        "    fi\n"
+        "\n"
+        '    if [ -x "$SYSTEM_PYTHON" ]; then\n'
+        '        ln -sfn "$SYSTEM_PYTHON" "$BOOTSTRAP_PYTHON3"\n'
+        '        ln -sfn "$SYSTEM_PYTHON" "$BOOTSTRAP_PYTHON"\n'
+        "        return 0\n"
+        "    fi\n"
+        "\n"
+        "    cat <<EOF\n"
+        "Bob installed Python but couldn't find the interpreter afterward.\n"
+        "\n"
+        "Expected one of:\n"
+        "  $USER_PYTHON\n"
+        "  $SYSTEM_PYTHON\n"
+        "EOF\n"
+        "    return 1\n"
+        "}\n"
+        "\n"
         'PYTHON="$(find_python || true)"\n'
         'if [ -z "$PYTHON" ]; then\n'
-        "    cat <<'EOF'\n"
-        "Bob can't start because this folder does not include a Python runtime.\n"
+        "    bootstrap_python\n"
+        '    PYTHON="$(find_python || true)"\n'
+        "fi\n"
         "\n"
-        "Use the full Bob release package for your computer, then open that folder in your AI app and say: set me up\n"
-        "EOF\n"
+        'if [ -z "$PYTHON" ]; then\n'
+        '    echo "Bob still could not find a usable Python runtime."\n'
         "    exit 1\n"
         "fi\n"
         "\n"

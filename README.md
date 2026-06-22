@@ -75,9 +75,9 @@ You'll need:
 
 **Step 1 — Download Bob**
 
-Download the full Bob release ZIP for your computer, then unzip it somewhere easy to find (Desktop is fine).
+Download Bob from GitHub using **Code → Download ZIP**, then unzip it somewhere easy to find (Desktop is fine).
 
-Do not use GitHub's **Code → Download ZIP** source-code button unless you are a developer. The source ZIP may not include Bob's bundled runtime.
+On the first run, Bob can download Python automatically if your machine doesn't already have it. Keep an internet connection on for setup.
 
 ---
 
@@ -100,7 +100,7 @@ Just type that in the chat. Bob will:
 - Walk you through connecting your Google Ads account
 - Suggest useful first questions
 
-You don't need to run setup scripts yourself — Bob handles setup and talks you through each step conversationally. Bob only pulls Google Ads data after you ask a performance question.
+You don't need to install Python yourself. Bob handles the first-time setup and talks you through each step conversationally. Bob only pulls Google Ads data after you ask a performance question.
 
 ---
 
