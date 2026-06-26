@@ -181,9 +181,14 @@ def _comparison_cols(id_cols: list[str]) -> list[str]:
         cols += [f"current_{m}", f"baseline_{m}"]
     return cols
 
-CAMPAIGN_SLICE_COMPARISON_COLUMNS = _comparison_cols(["campaign_id", "campaign_name", "campaign_status"])
-ACCOUNT_WEEK_COMPARISON_COLUMNS   = _comparison_cols(["network"])
-CAMPAIGN_WEEK_COMPARISON_COLUMNS  = _comparison_cols(["campaign_id", "campaign_name", "campaign_status"])
+CAMPAIGN_SLICE_COMPARISON_COLUMNS = _comparison_cols(["customer_id", "campaign_id", "campaign_name", "campaign_status"])
+CAMPAIGN_NETWORK_COMPARISON_COLUMNS = _comparison_cols(["customer_id", "campaign_id", "campaign_name", "campaign_status", "network"])
+ACCOUNT_WEEK_COMPARISON_COLUMNS   = _comparison_cols(["customer_id", "customer_name", "network"])
+CAMPAIGN_WEEK_COMPARISON_COLUMNS  = _comparison_cols(["customer_id", "campaign_id", "campaign_name", "campaign_status"])
+ADGROUP_NETWORK_COMPARISON_COLUMNS = _comparison_cols([
+    "customer_id", "campaign_id", "campaign_name",
+    "ad_group_id", "ad_group_name", "ad_group_status", "network",
+])
 
 DEFAULT_TOLERANCES = {
     "impressions": ("relative", 0.01),
@@ -828,6 +833,36 @@ def find_processed_files_for_period(
     return [file_index.get((s.isoformat(), e.isoformat())) for s, e in windows]
 
 
+def ensure_processed_file_for_period(
+    grain: str,
+    subdir: str,
+    start: dt.date,
+    end: dt.date,
+    customer_id: str | None,
+    primary_goal: str,
+) -> Path | None:
+    """Return a processed period file, aggregating the exact raw window when available."""
+    found = find_processed_files_for_period(subdir, [(start, end)], customer_id)[0]
+    if found:
+        return found
+
+    raw_path = find_raw_file_for_period(grain, start, end, customer_id)
+    if not raw_path:
+        return None
+
+    aggregate(argparse.Namespace(
+        grain=grain,
+        source=None,
+        goal=primary_goal,
+        input=str(raw_path),
+        customer=customer_id,
+        output=None,
+        from_date=None,
+        to=None,
+    ))
+    return find_processed_files_for_period(subdir, [(start, end)], customer_id)[0]
+
+
 def log_pull(
     query: str,
     from_date: str,
@@ -1232,6 +1267,16 @@ METRIC_DISPLAY_SPEC: list[tuple[str, str, str]] = [
 ]
 
 
+def _metric_display_spec(include_reach: bool) -> list[tuple[str, str, str]]:
+    if include_reach:
+        return METRIC_DISPLAY_SPEC
+    return [
+        (label, key, kind)
+        for label, key, kind in METRIC_DISPLAY_SPEC
+        if key not in ("reach", "frequency")
+    ]
+
+
 def _currency_symbol(currency: str) -> str:
     return CURRENCY_SYMBOLS.get((currency or "").upper(), "")
 
@@ -1273,15 +1318,17 @@ def _print_metric_table(
     cur_label: str,
     base_label: str,
     currency_sym: str,
+    include_reach: bool = True,
 ) -> None:
-    col_m = max(len(s[0]) for s in METRIC_DISPLAY_SPEC) + 1
+    spec = _metric_display_spec(include_reach)
+    col_m = max(len(s[0]) for s in spec) + 1
     col_v = max(18, len(cur_label) + 2, len(base_label) + 2)
     col_d = 10
     hdr = f"  {'Metric':<{col_m}}  {cur_label:>{col_v}}  {base_label:>{col_v}}  {'Δ %':>{col_d}}"
     sep = "  " + "─" * col_m + "──" + "─" * col_v + "──" + "─" * col_v + "──" + "─" * col_d
     print(hdr)
     print(sep)
-    for label, key, kind in METRIC_DISPLAY_SPEC:
+    for label, key, kind in spec:
         cur_fmt = _fmt_display(cur.get(key, "NA"), kind, currency_sym)
         base_fmt = _fmt_display(base.get(key, "NA"), kind, currency_sym)
         delta_fmt = _fmt_delta_display(cur.get(key, "NA"), base.get(key, "NA"))
@@ -1299,6 +1346,16 @@ def _date_label(path: Path) -> str:
     if len(parts) >= 3:
         return f"{parts[1]}–{parts[2]}"
     return path.name
+
+
+def _period_window_from_path(path: Path) -> tuple[dt.date, dt.date] | None:
+    parts = path.stem.split("_")
+    if len(parts) < 3:
+        return None
+    try:
+        return dt.date.fromisoformat(parts[1]), dt.date.fromisoformat(parts[2])
+    except ValueError:
+        return None
 
 
 def _build_comparison_rows(
@@ -1357,6 +1414,10 @@ def _build_comparison_rows(
             row[f"baseline_{m}"] = base.get(m, "NA")
         out.append(row)
     return out
+
+
+def _write_filtered_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    write_csv(path, [{field: row.get(field, "") for field in fields} for row in rows], fields)
 
 
 def _aggregate_period_rows(
@@ -1669,9 +1730,36 @@ def _print_grain_results(
     name_filter: str,
     output_path: str | None,
     output_account_path: str | None,
+    reach_metrics: bool = True,
 ) -> None:
     goal_col = "installs" if primary_goal == "installs" else "in_app_conversions"
     rows = _build_comparison_rows(cur_rows, base_rows, key_cols, primary_goal)
+    include_campaign_reach = (
+        grain_name == "campaign_network_period"
+        and reach_metrics
+        and cur_reach_rows is not None
+        and base_reach_rows is not None
+    )
+    cur_reach_by_campaign: dict[str, dict] = {}
+    base_reach_by_campaign: dict[str, dict] = {}
+    if include_campaign_reach:
+        cur_reach_by_campaign = {
+            r.get("campaign_id", ""): r
+            for r in _aggregate_period_rows(cur_reach_rows or [], ["campaign_id"], primary_goal)
+        }
+        base_reach_by_campaign = {
+            r.get("campaign_id", ""): r
+            for r in _aggregate_period_rows(base_reach_rows or [], ["campaign_id"], primary_goal)
+        }
+        for row in rows:
+            campaign_id = row.get("campaign_id", "")
+            cur_reach = cur_reach_by_campaign.get(campaign_id, {})
+            base_reach = base_reach_by_campaign.get(campaign_id, {})
+            row["current_reach"] = cur_reach.get("reach", "NA")
+            row["baseline_reach"] = base_reach.get("reach", "NA")
+            row["delta_reach_pct"] = _delta_pct(number(row["current_reach"]), number(row["baseline_reach"]))
+            row["current_frequency"] = cur_reach.get("frequency", "NA")
+            row["baseline_frequency"] = base_reach.get("frequency", "NA")
     total_cur = _aggregate_period_rows(cur_rows, ["customer_id"], primary_goal)
     total_base = _aggregate_period_rows(base_rows, ["customer_id"], primary_goal)
     tc = total_cur[0] if total_cur else {}
@@ -1698,12 +1786,12 @@ def _print_grain_results(
     if grain_name == "account_network_period":
         if all_metrics:
             print(f"\nAccount Summary — all metrics")
-            _print_metric_table(tc, tb, cur_label, base_label, currency_sym)
+            _print_metric_table(tc, tb, cur_label, base_label, currency_sym, include_reach=False)
             for row in rows:
                 network = _display_network(row.get("network", ""))
                 cur_net, base_net = _row_to_period_dicts(row, include_reach=False)
                 print(f"\nNetwork: {network}")
-                _print_metric_table(cur_net, base_net, cur_label, base_label, currency_sym)
+                _print_metric_table(cur_net, base_net, cur_label, base_label, currency_sym, include_reach=False)
 
         print(f"\nAccount × Network")
         hdr = f"  {'Network':<16}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
@@ -1742,27 +1830,36 @@ def _print_grain_results(
             reverse=True,
         )
         n = len(rows)
-        n_label = f"{n} campaigns" + (f" matching '{name_filter}'" if name_filter else "")
+        if "network" in key_cols:
+            distinct_campaigns = len({r.get("campaign_id", "") for r in rows})
+            n_label = f"{n} campaign-network rows across {distinct_campaigns} campaigns"
+        else:
+            n_label = f"{n} campaigns"
+        if name_filter:
+            n_label += f" matching '{name_filter}'"
         if all_metrics:
-            # Use reach-only grain for Users/Frequency in the segment summary if available.
-            # We intentionally do NOT compute a summed reach total across campaigns elsewhere.
-            if cur_reach_rows is not None and base_reach_rows is not None:
-                reach_tc_list = _aggregate_period_rows(cur_reach_rows, ["customer_id"], primary_goal)
-                reach_tb_list = _aggregate_period_rows(base_reach_rows, ["customer_id"], primary_goal)
-                reach_tc = reach_tc_list[0] if reach_tc_list else {}
-                reach_tb = reach_tb_list[0] if reach_tb_list else {}
-                # Merge reach + frequency onto the normal totals dicts for display.
-                tc = dict(tc)
-                tb = dict(tb)
-                tc["reach"] = reach_tc.get("reach", "NA")
-                tb["reach"] = reach_tb.get("reach", "NA")
-                tc["frequency"] = reach_tc.get("frequency", "NA")
-                tb["frequency"] = reach_tb.get("frequency", "NA")
             print(f"\nCampaign Segment Summary — all metrics ({n_label})")
-            _print_metric_table(tc, tb, cur_label, base_label, currency_sym)
+            _print_metric_table(tc, tb, cur_label, base_label, currency_sym, include_reach=False)
+            for row in rows:
+                cur_campaign, base_campaign = _row_to_period_dicts(row, include_reach=include_campaign_reach)
+                if "network" in row:
+                    print(f"\nCampaign: {row.get('campaign_name', '')} | Network: {_display_network(row.get('network', ''))}")
+                else:
+                    print(f"\nCampaign: {row.get('campaign_name', '')}")
+                _print_metric_table(
+                    cur_campaign,
+                    base_campaign,
+                    cur_label,
+                    base_label,
+                    currency_sym,
+                    include_reach=include_campaign_reach,
+                )
 
         print(f"\nCampaigns ({n_label}) — sorted by |goal Δ|")
-        hdr = f"  {'Campaign':<45}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+        if "network" in key_cols:
+            hdr = f"  {'Campaign':<45}  {'Network':<16}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+        else:
+            hdr = f"  {'Campaign':<45}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
         print(hdr)
         print("  " + "─" * (len(hdr) - 2))
         for row in rows:
@@ -1770,8 +1867,85 @@ def _print_grain_results(
             g_base = row[f'baseline_{goal_col}']
             c_cur = row['current_cost']
             c_base = row['baseline_cost']
+            if "network" in key_cols:
+                print(
+                    f"  {row['campaign_name']:<45}  "
+                    f"{_display_network(row.get('network', '')):<16}  "
+                    f"{_fmt_display(g_cur, 'count'):>12}  "
+                    f"{_fmt_display(g_base, 'count'):>12}  "
+                    f"{_fmt_delta_display(g_cur, g_base):>8}  "
+                    f"{_fmt_display(c_cur, 'cost', currency_sym):>12}  "
+                    f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
+                    f"{_fmt_delta_display(c_cur, c_base):>8}"
+                )
+            else:
+                print(
+                    f"  {row['campaign_name']:<45}  "
+                    f"{_fmt_display(g_cur, 'count'):>12}  "
+                    f"{_fmt_display(g_base, 'count'):>12}  "
+                    f"{_fmt_delta_display(g_cur, g_base):>8}  "
+                    f"{_fmt_display(c_cur, 'cost', currency_sym):>12}  "
+                    f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
+                    f"{_fmt_delta_display(c_cur, c_base):>8}"
+                )
+        if "network" in key_cols:
             print(
-                f"  {row['campaign_name']:<45}  "
+                f"  {'— TOTAL —':<45}  "
+                f"{'':<16}  "
+                f"{_fmt_display(tc.get(goal_col, '0'), 'count'):>12}  "
+                f"{_fmt_display(tb.get(goal_col, '0'), 'count'):>12}  "
+                f"{_fmt_delta_display(tc.get(goal_col, '0'), tb.get(goal_col, '0')):>8}  "
+                f"{_fmt_display(tc.get('cost', '0'), 'cost', currency_sym):>12}  "
+                f"{_fmt_display(tb.get('cost', '0'), 'cost', currency_sym):>12}  "
+                f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
+            )
+        else:
+            print(
+                f"  {'— TOTAL —':<45}  "
+                f"{_fmt_display(tc.get(goal_col, '0'), 'count'):>12}  "
+                f"{_fmt_display(tb.get(goal_col, '0'), 'count'):>12}  "
+                f"{_fmt_delta_display(tc.get(goal_col, '0'), tb.get(goal_col, '0')):>8}  "
+                f"{_fmt_display(tc.get('cost', '0'), 'cost', currency_sym):>12}  "
+                f"{_fmt_display(tb.get('cost', '0'), 'cost', currency_sym):>12}  "
+                f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
+            )
+        if output_path:
+            fields = CAMPAIGN_NETWORK_COMPARISON_COLUMNS if "network" in key_cols else CAMPAIGN_WEEK_COMPARISON_COLUMNS
+            _write_filtered_csv(Path(output_path).expanduser(), rows, fields)
+            print(f"\ncampaign comparison written: {output_path}")
+
+    elif grain_name == "adgroup_network_period":
+        rows.sort(
+            key=lambda r: abs(number(r[f"current_{goal_col}"]) - number(r[f"baseline_{goal_col}"])),
+            reverse=True,
+        )
+        n_label = f"{len(rows)} adgroup-network rows"
+        if name_filter:
+            n_label += f" matching '{name_filter}'"
+        if all_metrics:
+            print(f"\nAd Group × Network — all metrics ({n_label})")
+            for row in rows:
+                cur_ag, base_ag = _row_to_period_dicts(row, include_reach=False)
+                print(
+                    f"\nCampaign: {row.get('campaign_name', '')} | "
+                    f"Ad group: {row.get('ad_group_name', '')} | "
+                    f"Network: {_display_network(row.get('network', ''))}"
+                )
+                _print_metric_table(cur_ag, base_ag, cur_label, base_label, currency_sym, include_reach=False)
+
+        print(f"\nAd Group × Network ({n_label}) — sorted by |goal Δ|")
+        hdr = f"  {'Campaign':<32}  {'Ad Group':<32}  {'Network':<16}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+        print(hdr)
+        print("  " + "─" * (len(hdr) - 2))
+        for row in rows:
+            g_cur = row[f"current_{goal_col}"]
+            g_base = row[f"baseline_{goal_col}"]
+            c_cur = row["current_cost"]
+            c_base = row["baseline_cost"]
+            print(
+                f"  {row.get('campaign_name', ''):<32.32}  "
+                f"{row.get('ad_group_name', ''):<32.32}  "
+                f"{_display_network(row.get('network', '')):<16}  "
                 f"{_fmt_display(g_cur, 'count'):>12}  "
                 f"{_fmt_display(g_base, 'count'):>12}  "
                 f"{_fmt_delta_display(g_cur, g_base):>8}  "
@@ -1779,18 +1953,111 @@ def _print_grain_results(
                 f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
                 f"{_fmt_delta_display(c_cur, c_base):>8}"
             )
-        print(
-            f"  {'— TOTAL —':<45}  "
-            f"{_fmt_display(tc.get(goal_col, '0'), 'count'):>12}  "
-            f"{_fmt_display(tb.get(goal_col, '0'), 'count'):>12}  "
-            f"{_fmt_delta_display(tc.get(goal_col, '0'), tb.get(goal_col, '0')):>8}  "
-            f"{_fmt_display(tc.get('cost', '0'), 'cost', currency_sym):>12}  "
-            f"{_fmt_display(tb.get('cost', '0'), 'cost', currency_sym):>12}  "
-            f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
-        )
         if output_path:
-            write_csv(Path(output_path).expanduser(), rows, CAMPAIGN_WEEK_COMPARISON_COLUMNS)
-            print(f"\ncampaign comparison written: {output_path}")
+            _write_filtered_csv(Path(output_path).expanduser(), rows, ADGROUP_NETWORK_COMPARISON_COLUMNS)
+            print(f"\nadgroup × network comparison written: {output_path}")
+
+
+def _print_segment_network_results(
+    cur_rows: list[dict],
+    base_rows: list[dict],
+    primary_goal: str,
+    currency_sym: str,
+    cur_label: str,
+    base_label: str,
+    all_metrics: bool,
+    output_path: str | None,
+) -> None:
+    goal_col = "installs" if primary_goal == "installs" else "in_app_conversions"
+    rows = _build_comparison_rows(
+        cur_rows,
+        base_rows,
+        ["customer_id", "campaign_id", "campaign_name", "campaign_status", "network"],
+        primary_goal,
+    )
+    rows.sort(
+        key=lambda r: (
+            r.get("campaign_name", ""),
+            _display_network(r.get("network", "")),
+        ),
+    )
+    segment_rows = _build_comparison_rows(
+        cur_rows,
+        base_rows,
+        ["customer_id", "network"],
+        primary_goal,
+    )
+    segment_rows.sort(
+        key=lambda r: abs(number(r[f"current_{goal_col}"]) - number(r[f"baseline_{goal_col}"])),
+        reverse=True,
+    )
+    total_cur = _aggregate_period_rows(cur_rows, ["customer_id"], primary_goal)
+    total_base = _aggregate_period_rows(base_rows, ["customer_id"], primary_goal)
+    tc = total_cur[0] if total_cur else {}
+    tb = total_base[0] if total_base else {}
+
+    if all_metrics:
+        print(f"\nCampaign × Network — all metrics")
+        for row in rows:
+            network = _display_network(row.get("network", ""))
+            cur_net = {m: row.get(f"current_{m}", "NA") for _, m, _ in METRIC_DISPLAY_SPEC}
+            base_net = {m: row.get(f"baseline_{m}", "NA") for _, m, _ in METRIC_DISPLAY_SPEC}
+            for d in (cur_net, base_net):
+                d["reach"] = "NA"
+                d["frequency"] = "NA"
+            print(f"\nCampaign: {row.get('campaign_name', '')} | Network: {network}")
+            _print_metric_table(cur_net, base_net, cur_label, base_label, currency_sym, include_reach=False)
+
+    print(f"\nCampaign × Network")
+    hdr = f"  {'Campaign':<45}  {'Network':<16}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+    print(hdr)
+    print("  " + "─" * (len(hdr) - 2))
+    for row in rows:
+        g_cur = row[f"current_{goal_col}"]
+        g_base = row[f"baseline_{goal_col}"]
+        c_cur = row["current_cost"]
+        c_base = row["baseline_cost"]
+        print(
+            f"  {row.get('campaign_name', ''):<45}  "
+            f"  {_display_network(row.get('network', '')):<16}  "
+            f"{_fmt_display(g_cur, 'count'):>12}  "
+            f"{_fmt_display(g_base, 'count'):>12}  "
+            f"{_fmt_delta_display(g_cur, g_base):>8}  "
+            f"{_fmt_display(c_cur, 'cost', currency_sym):>12}  "
+            f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
+            f"{_fmt_delta_display(c_cur, c_base):>8}"
+        )
+
+    print(f"\nSegment × Network")
+    hdr = f"  {'Network':<16}  {'Cur Goal':>12}  {'Base Goal':>12}  {'Δ%':>8}  {'Cur Cost':>12}  {'Base Cost':>12}  {'Δ%':>8}"
+    print(hdr)
+    print("  " + "─" * (len(hdr) - 2))
+    for row in segment_rows:
+        g_cur = row[f"current_{goal_col}"]
+        g_base = row[f"baseline_{goal_col}"]
+        c_cur = row["current_cost"]
+        c_base = row["baseline_cost"]
+        print(
+            f"  {_display_network(row.get('network', '')):<16}  "
+            f"{_fmt_display(g_cur, 'count'):>12}  "
+            f"{_fmt_display(g_base, 'count'):>12}  "
+            f"{_fmt_delta_display(g_cur, g_base):>8}  "
+            f"{_fmt_display(c_cur, 'cost', currency_sym):>12}  "
+            f"{_fmt_display(c_base, 'cost', currency_sym):>12}  "
+            f"{_fmt_delta_display(c_cur, c_base):>8}"
+        )
+    print(
+        f"  {'TOTAL':<16}  "
+        f"{_fmt_display(tc.get(goal_col, '0'), 'count'):>12}  "
+        f"{_fmt_display(tb.get(goal_col, '0'), 'count'):>12}  "
+        f"{_fmt_delta_display(tc.get(goal_col, '0'), tb.get(goal_col, '0')):>8}  "
+        f"{_fmt_display(tc.get('cost', '0'), 'cost', currency_sym):>12}  "
+        f"{_fmt_display(tb.get('cost', '0'), 'cost', currency_sym):>12}  "
+        f"{_fmt_delta_display(tc.get('cost', '0'), tb.get('cost', '0')):>8}"
+    )
+    if output_path:
+        _write_filtered_csv(Path(output_path).expanduser(), rows, CAMPAIGN_NETWORK_COMPARISON_COLUMNS)
+        print(f"\ncampaign × network comparison written: {output_path}")
 
 
 def slice_campaigns(args: argparse.Namespace) -> None:
@@ -1799,11 +2066,18 @@ def slice_campaigns(args: argparse.Namespace) -> None:
     currency_sym = _currency_symbol(profile.get("currency", ""))
     pattern = (args.name_contains or "").lower()
     all_metrics = getattr(args, "all_metrics", False)
+    reach_metrics = getattr(args, "reach_metrics", False)
+    network_split = getattr(args, "network_split", False)
     customer_id = profile.get("google_ads_customer_id")
+    windows: list[tuple[dt.date, dt.date]] | None = None
 
     if args.current and args.baseline:
         current_path: Path | None = Path(args.current).expanduser()
         baseline_path: Path | None = Path(args.baseline).expanduser()
+        cur_window = _period_window_from_path(current_path)
+        base_window = _period_window_from_path(baseline_path)
+        if cur_window and base_window:
+            windows = [cur_window, base_window]
     else:
         period = args.period or "yesterday_vs_sdlw"
         windows = resolve_period_dates(period)
@@ -1849,13 +2123,67 @@ def slice_campaigns(args: argparse.Namespace) -> None:
     print(f"\nCampaign slice: name contains '{args.name_contains}'")
     print(f"Current: {cur_label}  |  Baseline: {base_label}")
 
+    cur_reach_rows = None
+    base_reach_rows = None
+    if all_metrics and reach_metrics:
+        if not windows:
+            die("reach metrics require processed filenames with YYYY-MM-DD_YYYY-MM-DD windows, or use --period")
+        reach_subdir = _NETWORK_PERIOD_SUBDIR["campaign_reach_period"]
+        reach_cur_path = ensure_processed_file_for_period(
+            "campaign_reach_period",
+            reach_subdir,
+            windows[0][0],
+            windows[0][1],
+            customer_id,
+            primary_goal,
+        )
+        reach_base_path = ensure_processed_file_for_period(
+            "campaign_reach_period",
+            reach_subdir,
+            windows[1][0],
+            windows[1][1],
+            customer_id,
+            primary_goal,
+        )
+        if not reach_cur_path or not reach_base_path:
+            missing = []
+            if not reach_cur_path:
+                missing.append(f"{windows[0][0]}–{windows[0][1]}")
+            if not reach_base_path:
+                missing.append(f"{windows[1][0]}–{windows[1][1]}")
+            print(f"\n[campaign_reach_period] processed files missing for: {', '.join(missing)}")
+            print("Fetch and aggregate:")
+            for start, end in windows:
+                raw_path = find_raw_file_for_period("campaign_reach_period", start, end, customer_id)
+                if not raw_path:
+                    print(f"  python3 lib/datapull.py fetch --query campaign_reach_period --from {start} --to {end}")
+                print(f"  python3 lib/datapull.py aggregate --grain campaign_reach_period --from {start} --to {end}")
+            raise SystemExit(1)
+        cur_reach_all = read_csv(reach_cur_path)
+        base_reach_all = read_csv(reach_base_path)
+        cur_ids = {r.get("campaign_id", "") for r in cur_rows}
+        base_ids = {r.get("campaign_id", "") for r in base_rows}
+        cur_reach_rows = [r for r in cur_reach_all if r.get("campaign_id", "") in cur_ids]
+        base_reach_rows = [r for r in base_reach_all if r.get("campaign_id", "") in base_ids]
+
     _print_grain_results(
         "campaign_network_period",
         ["customer_id", "campaign_id", "campaign_name", "campaign_status"],
-        cur_rows, base_rows, None, None, primary_goal, all_metrics, currency_sym,
+        cur_rows, base_rows, cur_reach_rows, base_reach_rows, primary_goal, all_metrics, currency_sym,
         cur_label, base_label, pattern,
-        args.output, None,
+        args.output, None, reach_metrics,
     )
+    if network_split:
+        _print_segment_network_results(
+            cur_rows,
+            base_rows,
+            primary_goal,
+            currency_sym,
+            cur_label,
+            base_label,
+            all_metrics,
+            getattr(args, "output_network", None),
+        )
 
 
 def compare_weeks(args: argparse.Namespace) -> None:
@@ -1864,6 +2192,8 @@ def compare_weeks(args: argparse.Namespace) -> None:
     currency_sym = _currency_symbol(profile.get("currency", ""))
     name_filter = (args.name_contains or "").lower()
     all_metrics = getattr(args, "all_metrics", False)
+    reach_metrics = getattr(args, "reach_metrics", False)
+    network_split = getattr(args, "network_split", False)
     customer_id = profile.get("google_ads_customer_id")
 
     ref = today()
@@ -1896,7 +2226,15 @@ def compare_weeks(args: argparse.Namespace) -> None:
     if args.grain in ("account", "both"):
         grains.append(("account_network_period", ["customer_id", "customer_name", "network"]))
     if args.grain in ("campaign", "both"):
-        grains.append(("campaign_network_period", ["customer_id", "campaign_id", "campaign_name", "campaign_status"]))
+        campaign_keys = ["customer_id", "campaign_id", "campaign_name", "campaign_status"]
+        if network_split:
+            campaign_keys.append("network")
+        grains.append(("campaign_network_period", campaign_keys))
+    if args.grain == "adgroup":
+        grains.append((
+            "adgroup_network_period",
+            ["customer_id", "campaign_id", "campaign_name", "ad_group_id", "ad_group_name", "ad_group_status", "network"],
+        ))
 
     all_ok = True
     for grain_name, key_cols in grains:
@@ -1946,11 +2284,21 @@ def compare_weeks(args: argparse.Namespace) -> None:
                 )
                 all_ok = False
                 continue
+        if grain_name == "adgroup_network_period" and name_filter:
+            cur_rows = [r for r in cur_rows if name_filter in r.get("campaign_name", "").lower()]
+            base_rows = [r for r in base_rows if name_filter in r.get("campaign_name", "").lower()]
+            if not cur_rows and not base_rows:
+                print(
+                    f"\n[{grain_name}] no ad groups under campaigns matching '{args.name_contains}' in either week.",
+                    file=sys.stderr,
+                )
+                all_ok = False
+                continue
 
         # Optional: reach-only grain for campaign segment metric table.
         cur_reach_rows = None
         base_reach_rows = None
-        if grain_name == "campaign_network_period" and all_metrics:
+        if grain_name == "campaign_network_period" and all_metrics and reach_metrics:
             reach_found = find_processed_files_for_period(
                 _NETWORK_PERIOD_SUBDIR["campaign_reach_period"],
                 [(cur_start, cur_end), (base_start, base_end)],
@@ -1979,8 +2327,9 @@ def compare_weeks(args: argparse.Namespace) -> None:
             grain_name, key_cols, cur_rows, base_rows, cur_reach_rows, base_reach_rows,
             primary_goal, all_metrics, currency_sym,
             cur_label, base_label, name_filter,
-            args.output if grain_name == "campaign_network_period" else None,
+            args.output if grain_name in ("campaign_network_period", "adgroup_network_period") else None,
             args.output_account if grain_name == "account_network_period" else None,
+            reach_metrics,
         )
 
     if not all_ok:
@@ -2014,6 +2363,8 @@ def compare_months(args: argparse.Namespace) -> None:
     currency_sym = _currency_symbol(profile.get("currency", ""))
     name_filter = (args.name_contains or "").lower()
     all_metrics = getattr(args, "all_metrics", False)
+    reach_metrics = getattr(args, "reach_metrics", False)
+    network_split = getattr(args, "network_split", False)
     customer_id = profile.get("google_ads_customer_id")
 
     ref = today()
@@ -2045,13 +2396,25 @@ def compare_months(args: argparse.Namespace) -> None:
     if args.grain in ("account", "both"):
         grains.append(("account_network_period", ["customer_id", "customer_name", "network"]))
     if args.grain in ("campaign", "both"):
-        grains.append(("campaign_network_period", ["customer_id", "campaign_id", "campaign_name", "campaign_status"]))
+        campaign_keys = ["customer_id", "campaign_id", "campaign_name", "campaign_status"]
+        if network_split:
+            campaign_keys.append("network")
+        grains.append(("campaign_network_period", campaign_keys))
+    if args.grain == "adgroup":
+        grains.append((
+            "adgroup_network_period",
+            ["customer_id", "campaign_id", "campaign_name", "ad_group_id", "ad_group_name", "ad_group_status", "network"],
+        ))
 
     all_ok = True
     for grain_name, key_cols in grains:
         subdir = _NETWORK_PERIOD_SUBDIR[grain_name]
-        found = find_processed_files_for_period(subdir, [(cur_start, cur_end), (base_start, base_end)], customer_id)
-        cur_path, base_path = found[0], found[1]
+        cur_path = ensure_processed_file_for_period(
+            grain_name, subdir, cur_start, cur_end, customer_id, primary_goal
+        )
+        base_path = ensure_processed_file_for_period(
+            grain_name, subdir, base_start, base_end, customer_id, primary_goal
+        )
 
         if not cur_path or not base_path:
             all_ok = False
@@ -2064,7 +2427,7 @@ def compare_months(args: argparse.Namespace) -> None:
             print("Fetch and aggregate:")
             for start, end in [(cur_start, cur_end), (base_start, base_end)]:
                 print(f"  python3 lib/datapull.py fetch --query {grain_name} --from {start} --to {end}")
-            print(f"  python3 lib/datapull.py aggregate --grain {grain_name}")
+                print(f"  python3 lib/datapull.py aggregate --grain {grain_name} --from {start} --to {end}")
             continue
 
         cur_rows = read_csv(cur_path)
@@ -2093,16 +2456,27 @@ def compare_months(args: argparse.Namespace) -> None:
                 )
                 all_ok = False
                 continue
+        if grain_name == "adgroup_network_period" and name_filter:
+            cur_rows = [r for r in cur_rows if name_filter in r.get("campaign_name", "").lower()]
+            base_rows = [r for r in base_rows if name_filter in r.get("campaign_name", "").lower()]
+            if not cur_rows and not base_rows:
+                print(
+                    f"\n[{grain_name}] no ad groups under campaigns matching '{args.name_contains}' in either month.",
+                    file=sys.stderr,
+                )
+                all_ok = False
+                continue
 
         cur_reach_rows = None
         base_reach_rows = None
-        if grain_name == "campaign_network_period" and all_metrics:
-            reach_found = find_processed_files_for_period(
-                _NETWORK_PERIOD_SUBDIR["campaign_reach_period"],
-                [(cur_start, cur_end), (base_start, base_end)],
-                customer_id,
+        if grain_name == "campaign_network_period" and all_metrics and reach_metrics:
+            reach_subdir = _NETWORK_PERIOD_SUBDIR["campaign_reach_period"]
+            reach_cur_path = ensure_processed_file_for_period(
+                "campaign_reach_period", reach_subdir, cur_start, cur_end, customer_id, primary_goal
             )
-            reach_cur_path, reach_base_path = reach_found[0], reach_found[1]
+            reach_base_path = ensure_processed_file_for_period(
+                "campaign_reach_period", reach_subdir, base_start, base_end, customer_id, primary_goal
+            )
             if not reach_cur_path or not reach_base_path:
                 missing = []
                 if not reach_cur_path:
@@ -2123,8 +2497,9 @@ def compare_months(args: argparse.Namespace) -> None:
             grain_name, key_cols, cur_rows, base_rows, cur_reach_rows, base_reach_rows,
             primary_goal, all_metrics, currency_sym,
             cur_label, base_label, name_filter,
-            args.output if grain_name == "campaign_network_period" else None,
+            args.output if grain_name in ("campaign_network_period", "adgroup_network_period") else None,
             args.output_account if grain_name == "account_network_period" else None,
+            reach_metrics,
         )
 
     if not all_ok:
@@ -6693,12 +7068,14 @@ def build_parser() -> argparse.ArgumentParser:
     wk_parser.add_argument("--week", type=int, help="current ISO week number (default: last complete week)")
     wk_parser.add_argument("--vs", type=int, help="baseline ISO week number (default: current - 1)")
     wk_parser.add_argument("--year", type=int, help="ISO year for current week (default: current year)")
-    wk_parser.add_argument("--grain", default="both", choices=["account", "campaign", "both"])
+    wk_parser.add_argument("--grain", default="both", choices=["account", "campaign", "adgroup", "both"])
     wk_parser.add_argument("--name-contains", help="filter campaigns by name substring")
     wk_parser.add_argument("--output", help="write campaign comparison CSV to this path")
     wk_parser.add_argument("--output-account", help="write account comparison CSV to this path")
     wk_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
-    wk_parser.add_argument("--all-metrics", action="store_true", help="show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%%, CPA)")
+    wk_parser.add_argument("--all-metrics", action="store_true", help="show full metric table; use --reach-metrics to include Users/Frequency")
+    wk_parser.add_argument("--reach-metrics", action="store_true", help="include opt-in Users/Frequency for individual campaign rows")
+    wk_parser.add_argument("--network-split", action="store_true", help="keep campaign comparisons split by network")
     wk_parser.set_defaults(func=compare_weeks)
 
     mo_parser = sub.add_parser("compare-months", help="compare MTD or full-month performance across two calendar months")
@@ -6706,12 +7083,14 @@ def build_parser() -> argparse.ArgumentParser:
     mo_parser.add_argument("--vs", type=int, help="baseline month 1–12 (default: current - 1)")
     mo_parser.add_argument("--year", type=int, help="year for the current month (default: current year)")
     mo_parser.add_argument("--full", action="store_true", help="compare full calendar months instead of MTD")
-    mo_parser.add_argument("--grain", default="both", choices=["account", "campaign", "both"])
+    mo_parser.add_argument("--grain", default="both", choices=["account", "campaign", "adgroup", "both"])
     mo_parser.add_argument("--name-contains", help="filter campaigns by name substring")
     mo_parser.add_argument("--output", help="write campaign comparison CSV to this path")
     mo_parser.add_argument("--output-account", help="write account comparison CSV to this path")
     mo_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
-    mo_parser.add_argument("--all-metrics", action="store_true", help="show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%%, CPA)")
+    mo_parser.add_argument("--all-metrics", action="store_true", help="show full metric table; use --reach-metrics to include Users/Frequency")
+    mo_parser.add_argument("--reach-metrics", action="store_true", help="include opt-in Users/Frequency for individual campaign rows")
+    mo_parser.add_argument("--network-split", action="store_true", help="keep campaign comparisons split by network")
     mo_parser.set_defaults(func=compare_months)
 
     slice_parser = sub.add_parser("slice-campaigns", help="compare a name-filtered campaign segment across two periods")
@@ -6725,8 +7104,11 @@ def build_parser() -> argparse.ArgumentParser:
     slice_parser.add_argument("--current", help="explicit current-period processed campaign-network CSV")
     slice_parser.add_argument("--baseline", help="explicit baseline processed campaign-network CSV")
     slice_parser.add_argument("--output", help="write full comparison CSV to this path")
+    slice_parser.add_argument("--output-network", help="write campaign × network comparison CSV to this path")
     slice_parser.add_argument("--goal", choices=["installs", "in_app_conversions"])
-    slice_parser.add_argument("--all-metrics", action="store_true", help="show full metric table (users, CPM, freq, CTR, CPC, CTI, conv%%, CPA)")
+    slice_parser.add_argument("--all-metrics", action="store_true", help="show full metric table; use --reach-metrics to include Users/Frequency")
+    slice_parser.add_argument("--reach-metrics", action="store_true", help="include opt-in Users/Frequency for individual campaign rows")
+    slice_parser.add_argument("--network-split", action="store_true", help="show campaign × network rows plus segment network rollup")
     slice_parser.set_defaults(func=slice_campaigns)
 
     sc_parser = sub.add_parser("slice-creatives", help="flag LOW-label creatives vs campaign averages")

@@ -21,6 +21,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -217,6 +218,474 @@ class TestAggregation(unittest.TestCase):
         ]
         out = dp._aggregate_period_rows(rows, ["network"], "installs")
         self.assertEqual([r["network"] for r in out], ["a", "z"])  # sorted by key
+
+
+class TestProcessedPeriodMaterialization(unittest.TestCase):
+    """Exact period slices should be materialized from raw files before comparisons fail."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._raw_dir = dp.RAW_DIR
+        self._processed_dir = dp.PROCESSED_DIR
+        root = Path(self.tmp.name)
+        dp.RAW_DIR = root / "raw"
+        dp.PROCESSED_DIR = root / "processed"
+        self.addCleanup(self._restore_dirs)
+
+    def _restore_dirs(self):
+        dp.RAW_DIR = self._raw_dir
+        dp.PROCESSED_DIR = self._processed_dir
+
+    def d(self, s):
+        return dt.date.fromisoformat(s)
+
+    def test_exact_raw_window_is_aggregated_when_processed_file_is_missing(self):
+        customer = "9998887777"
+        raw_dir = dp.RAW_DIR / "account_network_period"
+        raw_path = raw_dir / f"{customer}_2026-05-01_2026-05-24_test.csv"
+        dp.write_csv(raw_path, [{
+            "customer_id": customer,
+            "customer_name": "Test Account",
+            "network": "SEARCH",
+            "impressions": "1000",
+            "clicks": "100",
+            "cost": "200",
+            "installs": "50",
+            "in_app_conversions": "10",
+        }], ["customer_id", "customer_name", "network"] + dp.SUM_METRICS)
+
+        processed = dp.ensure_processed_file_for_period(
+            "account_network_period",
+            "account-network",
+            self.d("2026-05-01"),
+            self.d("2026-05-24"),
+            customer,
+            "installs",
+        )
+
+        self.assertIsNotNone(processed)
+        self.assertEqual(processed.name, f"{customer}_2026-05-01_2026-05-24.csv")
+        rows = dp.read_csv(processed)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["network"], "Google Search")
+        self.assertEqual(rows[0]["cost"], "200")
+        self.assertEqual(rows[0]["cpi"], "4")
+
+    def test_compare_months_missing_guidance_uses_exact_mtd_windows(self):
+        saved_today = os.environ.get("BOB_TODAY")
+        saved_load_profile = dp.load_profile
+        os.environ["BOB_TODAY"] = "2026-06-25"
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": "9998887777",
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+        if saved_today is None:
+            self.addCleanup(lambda: os.environ.pop("BOB_TODAY", None))
+        else:
+            self.addCleanup(lambda: os.environ.__setitem__("BOB_TODAY", saved_today))
+
+        args = argparse.Namespace(
+            month=6,
+            vs=5,
+            year=2026,
+            full=False,
+            grain="account",
+            name_contains=None,
+            output=None,
+            output_account=None,
+            goal=None,
+            all_metrics=False,
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            dp.compare_months(args)
+        text = out.getvalue()
+        self.assertIn("Jun (2026-06-01–2026-06-24)", text)
+        self.assertIn("May (2026-05-01–2026-05-24)", text)
+        self.assertIn("aggregate --grain account_network_period --from 2026-06-01 --to 2026-06-24", text)
+        self.assertIn("aggregate --grain account_network_period --from 2026-05-01 --to 2026-05-24", text)
+
+    def _campaign_network_rows(self, customer):
+        return (
+            [{
+                "customer_id": customer,
+                "campaign_id": "1",
+                "campaign_name": "Brand Stable",
+                "campaign_status": "ENABLED",
+                "network": "SEARCH",
+                "impressions": "1000",
+                "clicks": "100",
+                "cost": "200",
+                "installs": "50",
+                "in_app_conversions": "10",
+            }, {
+                "customer_id": customer,
+                "campaign_id": "1",
+                "campaign_name": "Brand Stable",
+                "campaign_status": "ENABLED",
+                "network": "CONTENT",
+                "impressions": "500",
+                "clicks": "50",
+                "cost": "100",
+                "installs": "25",
+                "in_app_conversions": "5",
+            }],
+            [{
+                "customer_id": customer,
+                "campaign_id": "1",
+                "campaign_name": "Brand Stable",
+                "campaign_status": "ENABLED",
+                "network": "SEARCH",
+                "impressions": "800",
+                "clicks": "80",
+                "cost": "160",
+                "installs": "40",
+                "in_app_conversions": "8",
+            }, {
+                "customer_id": customer,
+                "campaign_id": "1",
+                "campaign_name": "Brand Stable",
+                "campaign_status": "ENABLED",
+                "network": "CONTENT",
+                "impressions": "250",
+                "clicks": "25",
+                "cost": "50",
+                "installs": "10",
+                "in_app_conversions": "2",
+            }],
+        )
+
+    def _write_campaign_network_pair(self):
+        customer = "9998887777"
+        proc_dir = dp.PROCESSED_DIR / customer / "campaign-network"
+        cur_path = proc_dir / f"{customer}_2026-06-01_2026-06-07.csv"
+        base_path = proc_dir / f"{customer}_2026-05-25_2026-05-31.csv"
+        cur_rows, base_rows = self._campaign_network_rows(customer)
+        dp.write_csv(cur_path, cur_rows, dp.CAMPAIGN_NETWORK_PERIOD_COLUMNS)
+        dp.write_csv(base_path, base_rows, dp.CAMPAIGN_NETWORK_PERIOD_COLUMNS)
+        return customer, cur_path, base_path
+
+    def _write_campaign_reach_pair(self, customer):
+        proc_dir = dp.PROCESSED_DIR / customer / "campaign-reach"
+        cur_path = proc_dir / f"{customer}_2026-06-01_2026-06-07.csv"
+        base_path = proc_dir / f"{customer}_2026-05-25_2026-05-31.csv"
+        cur_rows = [{
+            "customer_id": customer,
+            "campaign_id": "1",
+            "campaign_name": "Brand Stable",
+            "campaign_status": "ENABLED",
+            "reach": "500",
+            "impressions": "1500",
+            "clicks": "150",
+            "cost": "300",
+            "installs": "75",
+            "in_app_conversions": "15",
+        }]
+        base_rows = [{
+            "customer_id": customer,
+            "campaign_id": "1",
+            "campaign_name": "Brand Stable",
+            "campaign_status": "ENABLED",
+            "reach": "420",
+            "impressions": "1050",
+            "clicks": "105",
+            "cost": "210",
+            "installs": "50",
+            "in_app_conversions": "10",
+        }]
+        dp.write_csv(cur_path, cur_rows, dp.CAMPAIGN_REACH_PERIOD_COLUMNS)
+        dp.write_csv(base_path, base_rows, dp.CAMPAIGN_REACH_PERIOD_COLUMNS)
+        return cur_path, base_path
+
+    def _write_adgroup_network_pair(self):
+        customer = "9998887777"
+        proc_dir = dp.PROCESSED_DIR / customer / "adgroup-network"
+        cur_path = proc_dir / f"{customer}_2026-06-01_2026-06-07.csv"
+        base_path = proc_dir / f"{customer}_2026-05-25_2026-05-31.csv"
+        cur_rows = [{
+            "customer_id": customer,
+            "campaign_id": "1",
+            "campaign_name": "Brand Stable",
+            "ad_group_id": "11",
+            "ad_group_name": "Brand Stable AG",
+            "ad_group_status": "ENABLED",
+            "network": "SEARCH",
+            "impressions": "100",
+            "clicks": "10",
+            "cost": "20",
+            "installs": "5",
+            "in_app_conversions": "1",
+        }]
+        base_rows = [{
+            "customer_id": customer,
+            "campaign_id": "1",
+            "campaign_name": "Brand Stable",
+            "ad_group_id": "11",
+            "ad_group_name": "Brand Stable AG",
+            "ad_group_status": "ENABLED",
+            "network": "SEARCH",
+            "impressions": "80",
+            "clicks": "8",
+            "cost": "16",
+            "installs": "4",
+            "in_app_conversions": "1",
+        }]
+        dp.write_csv(cur_path, cur_rows, dp.ADGROUP_NETWORK_PERIOD_COLUMNS)
+        dp.write_csv(base_path, base_rows, dp.ADGROUP_NETWORK_PERIOD_COLUMNS)
+        return customer, cur_path, base_path
+
+    def _slice_args(self, cur_path, base_path, **overrides):
+        args = {
+            "name_contains": "Brand",
+            "period": "yesterday_vs_sdlw",
+            "current": str(cur_path),
+            "baseline": str(base_path),
+            "output": None,
+            "output_network": None,
+            "goal": "installs",
+            "all_metrics": False,
+            "reach_metrics": False,
+            "network_split": False,
+        }
+        args.update(overrides)
+        return argparse.Namespace(**args)
+
+    def test_slice_campaigns_can_show_named_segment_network_split(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.slice_campaigns(self._slice_args(cur_path, base_path, network_split=True))
+        text = out.getvalue()
+        self.assertIn("Campaign × Network", text)
+        self.assertIn("Segment × Network", text)
+        self.assertIn("Brand Stable", text)
+        self.assertIn("Google Search", text)
+        self.assertIn("Google Display Network", text)
+
+    def test_slice_campaigns_network_split_all_metrics_shows_additive_metrics(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.slice_campaigns(self._slice_args(
+                cur_path,
+                base_path,
+                all_metrics=True,
+                network_split=True,
+            ))
+        text = out.getvalue()
+        self.assertIn("Campaign × Network — all metrics", text)
+        self.assertIn("Campaign: Brand Stable | Network: Google Search", text)
+        self.assertIn("CTR %", text)
+        self.assertNotIn("Users", text)
+        self.assertNotIn("Frequency", text)
+
+    def test_all_metrics_does_not_warn_or_show_reach_without_opt_in(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.slice_campaigns(self._slice_args(cur_path, base_path, all_metrics=True))
+        text = out.getvalue()
+        self.assertIn("Campaign Segment Summary", text)
+        self.assertIn("Campaign: Brand Stable", text)
+        self.assertIn("Impressions", text)
+        self.assertIn("CTR %", text)
+        self.assertNotIn("campaign_reach_period", text)
+        self.assertNotIn("Users", text)
+        self.assertNotIn("Frequency", text)
+
+    def test_reach_metrics_only_show_on_individual_campaign_tables(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        self._write_campaign_reach_pair(customer)
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.slice_campaigns(self._slice_args(
+                cur_path,
+                base_path,
+                all_metrics=True,
+                reach_metrics=True,
+            ))
+        text = out.getvalue()
+        summary = text.split("Campaign: Brand Stable", 1)[0]
+        campaign = text.split("Campaign: Brand Stable", 1)[1]
+        self.assertNotIn("Users", summary)
+        self.assertNotIn("Frequency", summary)
+        self.assertIn("Users", campaign)
+        self.assertIn("Frequency", campaign)
+        self.assertIn("500", campaign)
+
+    def test_slice_campaigns_output_csv_accepts_customer_id_rows(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        output_path = Path(self.tmp.name) / "segment.csv"
+        with contextlib.redirect_stdout(io.StringIO()):
+            dp.slice_campaigns(self._slice_args(cur_path, base_path, output=str(output_path)))
+        rows = dp.read_csv(output_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["customer_id"], customer)
+        self.assertEqual(rows[0]["campaign_name"], "Brand Stable")
+        self.assertEqual(rows[0]["current_cost"], "300")
+
+    def test_slice_campaigns_output_csv_includes_campaign_reach_only_when_available(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        self._write_campaign_reach_pair(customer)
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        output_path = Path(self.tmp.name) / "segment-reach.csv"
+        with contextlib.redirect_stdout(io.StringIO()):
+            dp.slice_campaigns(self._slice_args(
+                cur_path,
+                base_path,
+                all_metrics=True,
+                reach_metrics=True,
+                output=str(output_path),
+            ))
+        rows = dp.read_csv(output_path)
+        self.assertEqual(rows[0]["current_reach"], "500")
+        self.assertEqual(rows[0]["baseline_reach"], "420")
+        self.assertEqual(rows[0]["current_frequency"], "3")
+
+    def test_slice_campaigns_output_network_preserves_campaign_by_network_rows(self):
+        customer, cur_path, base_path = self._write_campaign_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        output_path = Path(self.tmp.name) / "segment-network.csv"
+        with contextlib.redirect_stdout(io.StringIO()):
+            dp.slice_campaigns(self._slice_args(
+                cur_path,
+                base_path,
+                network_split=True,
+                output_network=str(output_path),
+            ))
+        rows = dp.read_csv(output_path)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["campaign_name"] for r in rows}, {"Brand Stable"})
+        self.assertEqual({r["network"] for r in rows}, {"Google Search", "Google Display Network"})
+        search = next(r for r in rows if r["network"] == "Google Search")
+        self.assertEqual(search["current_installs"], "50")
+        self.assertEqual(search["baseline_installs"], "40")
+
+    def test_compare_weeks_campaign_network_split_output_preserves_network_rows(self):
+        customer, _, _ = self._write_campaign_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        output_path = Path(self.tmp.name) / "compare-week-campaign-network.csv"
+        args = argparse.Namespace(
+            week=23,
+            vs=22,
+            year=2026,
+            grain="campaign",
+            name_contains="Brand",
+            output=str(output_path),
+            output_account=None,
+            goal="installs",
+            all_metrics=False,
+            reach_metrics=False,
+            network_split=True,
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.compare_weeks(args)
+        text = out.getvalue()
+        self.assertIn("Campaigns (2 campaign-network rows across 1 campaigns matching 'brand')", text)
+        self.assertIn("Google Search", text)
+        rows = dp.read_csv(output_path)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["network"] for r in rows}, {"Google Search", "Google Display Network"})
+
+    def test_compare_weeks_adgroup_grain_outputs_adgroup_network_rows(self):
+        customer, _, _ = self._write_adgroup_network_pair()
+        saved_load_profile = dp.load_profile
+        dp.load_profile = lambda required=False: {
+            "google_ads_customer_id": customer,
+            "primary_goal": "installs",
+            "currency": "INR",
+        }
+        self.addCleanup(lambda: setattr(dp, "load_profile", saved_load_profile))
+
+        output_path = Path(self.tmp.name) / "compare-week-adgroup-network.csv"
+        args = argparse.Namespace(
+            week=23,
+            vs=22,
+            year=2026,
+            grain="adgroup",
+            name_contains="Brand",
+            output=str(output_path),
+            output_account=None,
+            goal="installs",
+            all_metrics=True,
+            reach_metrics=False,
+            network_split=False,
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dp.compare_weeks(args)
+        text = out.getvalue()
+        self.assertIn("Ad Group × Network", text)
+        self.assertIn("Brand Stable AG", text)
+        rows = dp.read_csv(output_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ad_group_name"], "Brand Stable AG")
+        self.assertEqual(rows[0]["network"], "Google Search")
 
 
 class TestNormalizeCustomerId(unittest.TestCase):
