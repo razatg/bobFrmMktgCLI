@@ -1,0 +1,25 @@
+[project]
+name = "bob-frm-mktg"
+version = "0.1.0"
+description = "CLI-first Google Ads performance marketing automation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "garf-executors==1.5.0",
+    "garf-google-ads==1.1.7",
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+write = [
+    "google-ads==31.0.0",
+    "google-auth-oauthlib==1.4.0",
+]
+video = [
+    "google-genai>=1.0.0",
+    "moviepy>=2.1.0",
+    "pillow>=10.0.0",
+    "numpy>=1.26.0",
+]
+
+[tool.uv]
+package = false

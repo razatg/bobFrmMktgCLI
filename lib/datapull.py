@@ -27,6 +27,8 @@ PROFILE_PATH = BOB_DIR / "profile.json"
 ACCOUNTS_DIR = BOB_DIR / "accounts"
 ACCOUNTS_REGISTRY = BOB_DIR / "accounts.json"
 VENV_DIR = ROOT / ".venv"
+UV_RUNTIME_DIR = ROOT / "runtime" / "uv"
+UV_BINARY = UV_RUNTIME_DIR / ("uv.exe" if os.name == "nt" else "uv")
 QUERIES_DIR = ROOT / "garf" / "queries"
 RAW_DIR = ROOT / "garf" / "outputs" / "raw"
 PROCESSED_DIR = ROOT / "data" / "processed"
@@ -480,146 +482,92 @@ def _venv_python() -> Path:
     return VENV_DIR / "bin" / "python3"
 
 
+def _uv_executable() -> str | None:
+    """Return uv from PATH or Bob's private runtime location."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    if UV_BINARY.exists() and os.access(UV_BINARY, os.X_OK):
+        return str(UV_BINARY)
+    return None
+
+
+def _uv_sync_command(extra: str | None = None) -> list[str]:
+    uv = _uv_executable()
+    if not uv:
+        die(
+            "Bob needs its local runtime manager (uv), but it is not available. "
+            "Run ./bob again with network access enabled so Bob can install it."
+        )
+    command = [uv, "sync", "--project", str(ROOT), "--python", "3.12"]
+    if extra:
+        command.extend(["--extra", extra])
+    return command
+
+
+def _uv_run_command(*command: str, sync: bool = False) -> list[str]:
+    uv = _uv_executable()
+    if not uv:
+        die(
+            "Bob needs its local runtime manager (uv), but it is not available. "
+            "Run ./bob again with network access enabled so Bob can install it."
+        )
+    args = [uv, "run", "--project", str(ROOT), "--python", "3.12"]
+    if not sync:
+        args.append("--no-sync")
+    return args + list(command)
+
+
 def _write_bob_launcher() -> None:
     launcher = ROOT / "bob"
     launcher.write_text(
         "#!/bin/bash\n"
-        "# bob - launcher that prefers Bob's local environment, then bootstraps Python if needed.\n"
+        "# bob - launcher backed by uv-managed, self-healing Python dependencies.\n"
         "set -e\n"
         "\n"
         'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
         "\n"
-        'PYTHON_VERSION="3.12.10"\n'
-        'PYTHON_SERIES="${PYTHON_VERSION%.*}"\n'
-        'RUNTIME_DIR="$DIR/runtime/python"\n'
-        'BOOTSTRAP_PYTHON3="$RUNTIME_DIR/bin/python3"\n'
-        'BOOTSTRAP_PYTHON="$RUNTIME_DIR/bin/python"\n'
+        'UV_DIR="$DIR/runtime/uv"\n'
+        'UV_BIN="$UV_DIR/uv"\n'
         "\n"
-        "find_python() {\n"
-        '    if [ -x "$DIR/.venv/bin/python3" ]; then\n'
-        '        printf \'%s\\n\' "$DIR/.venv/bin/python3"\n'
-        "        return 0\n"
-        "    fi\n"
-        '    if [ -x "$DIR/.venv/Scripts/python.exe" ]; then\n'
-        '        printf \'%s\\n\' "$DIR/.venv/Scripts/python.exe"\n'
-        "        return 0\n"
-        "    fi\n"
-        "\n"
-        "    for candidate in \\\n"
-        '        "$DIR/runtime/python/bin/python3" \\\n'
-        '        "$DIR/runtime/python/bin/python" \\\n'
-        '        "$DIR/runtime/python/python.exe" \\\n'
-        '        "$DIR/runtime/python/Scripts/python.exe" \\\n'
-        '        "$DIR/.runtime/python/bin/python3" \\\n'
-        '        "$DIR/.runtime/python/bin/python" \\\n'
-        '        "$DIR/.runtime/python/python.exe" \\\n'
-        '        "$DIR/.runtime/python/Scripts/python.exe"\n'
-        "    do\n"
-        '        if [ -x "$candidate" ]; then\n'
-        '            printf \'%s\\n\' "$candidate"\n'
-        "            return 0\n"
-        "        fi\n"
-        "    done\n"
-        "\n"
-        "    if command -v python3 >/dev/null 2>&1; then\n"
-        "        command -v python3\n"
-        "        return 0\n"
-        "    fi\n"
-        "\n"
-        "    return 1\n"
-        "}\n"
-        "\n"
-        "bootstrap_python() {\n"
-        '    if [ "$(uname -s)" != "Darwin" ]; then\n'
-        "        cat <<'EOF'\n"
-        "Bob couldn't find Python on this machine.\n"
-        "\n"
-        "Run the platform-specific setup launcher so Bob can install Python locally first.\n"
-        "EOF\n"
-        "        return 1\n"
-        "    fi\n"
-        "\n"
-        "    if ! command -v curl >/dev/null 2>&1; then\n"
-        '        echo "Bob needs curl to download Python automatically."\n'
-        "        return 1\n"
-        "    fi\n"
-        "\n"
-        '    PKG_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-macos11.pkg"\n'
-        '    TMP_PKG="$(mktemp "/tmp/bob-python-${PYTHON_VERSION}.XXXXXX.pkg")"\n'
-        '    TMP_LOG="$(mktemp "/tmp/bob-python-install.${PYTHON_VERSION}.XXXXXX.log")"\n'
-        '    USER_PYTHON="$HOME/Library/Frameworks/Python.framework/Versions/$PYTHON_SERIES/bin/python3"\n'
-        '    SYSTEM_PYTHON="/Library/Frameworks/Python.framework/Versions/$PYTHON_SERIES/bin/python3"\n'
-        "\n"
-        '    echo "Bob could not find Python. Downloading Python $PYTHON_VERSION from python.org..."\n'
-        '    if ! curl --fail --location --silent --show-error "$PKG_URL" --output "$TMP_PKG"; then\n'
-        '        echo "Bob could not download Python automatically."\n'
-        '        rm -f "$TMP_PKG" "$TMP_LOG"\n'
-        "        return 1\n"
-        "    fi\n"
-        "\n"
-        '    echo "Installing a local Python runtime for Bob..."\n'
-        '    if ! installer -pkg "$TMP_PKG" -target CurrentUserHomeDirectory >"$TMP_LOG" 2>&1; then\n'
-        "        cat <<EOF\n"
-        "Bob downloaded Python but couldn't install it automatically.\n"
-        "\n"
-        "Installer log: $TMP_LOG\n"
-        "EOF\n"
-        '        rm -f "$TMP_PKG"\n'
-        "        return 1\n"
-        "    fi\n"
-        "\n"
-        '    rm -f "$TMP_PKG"\n'
-        '    mkdir -p "$RUNTIME_DIR/bin"\n'
-        "\n"
-        '    if [ -x "$USER_PYTHON" ]; then\n'
-        '        ln -sfn "$USER_PYTHON" "$BOOTSTRAP_PYTHON3"\n'
-        '        ln -sfn "$USER_PYTHON" "$BOOTSTRAP_PYTHON"\n'
-        "        return 0\n"
-        "    fi\n"
-        "\n"
-        '    if [ -x "$SYSTEM_PYTHON" ]; then\n'
-        '        ln -sfn "$SYSTEM_PYTHON" "$BOOTSTRAP_PYTHON3"\n'
-        '        ln -sfn "$SYSTEM_PYTHON" "$BOOTSTRAP_PYTHON"\n'
-        "        return 0\n"
-        "    fi\n"
-        "\n"
-        "    cat <<EOF\n"
-        "Bob installed Python but couldn't find the interpreter afterward.\n"
-        "\n"
-        "Expected one of:\n"
-        "  $USER_PYTHON\n"
-        "  $SYSTEM_PYTHON\n"
-        "EOF\n"
-        "    return 1\n"
-        "}\n"
-        "\n"
-        'PYTHON="$(find_python || true)"\n'
-        'if [ -z "$PYTHON" ]; then\n'
-        "    bootstrap_python\n"
-        '    PYTHON="$(find_python || true)"\n'
-        "fi\n"
-        "\n"
-        'if [ -z "$PYTHON" ]; then\n'
-        '    echo "Bob still could not find a usable Python runtime."\n'
-        "    exit 1\n"
-        "fi\n"
-        "\n"
-        'exec "$PYTHON" "$DIR/lib/datapull.py" "$@"\n'
+        'if command -v uv >/dev/null 2>&1; then\n'
+        '    UV_BIN="$(command -v uv)"\n'
+        'elif [ ! -x "$UV_BIN" ]; then\n'
+        '    if ! command -v curl >/dev/null 2>&1; then\n'
+        '        echo "Bob needs uv to manage its local runtime, and curl to install uv automatically." >&2\n'
+        '        exit 1\n'
+        '    fi\n'
+        '    mkdir -p "$UV_DIR"\n'
+        '    UV_INSTALLER="$(mktemp "${TMPDIR:-/tmp}/bob-uv.XXXXXX.sh")"\n'
+        '    trap "rm -f \\\"$UV_INSTALLER\\\"" EXIT\n'
+        '    echo "Bob is installing its local runtime manager..."\n'
+        '    if ! curl --fail --location --silent --show-error https://astral.sh/uv/install.sh --output "$UV_INSTALLER"; then\n'
+        '        echo "Bob could not download its runtime manager. Check network access and try again." >&2\n'
+        '        exit 1\n'
+        '    fi\n'
+        '    UV_INSTALL_DIR="$UV_DIR" UV_NO_MODIFY_PATH=1 sh "$UV_INSTALLER" >/dev/null\n'
+        'fi\n'
+        '\n'
+        'if [ ! -x "$UV_BIN" ] && ! command -v uv >/dev/null 2>&1; then\n'
+        '    echo "Bob could not find a usable uv runtime manager." >&2\n'
+        '    exit 1\n'
+        'fi\n'
+        'if [ ! -x "$UV_BIN" ]; then UV_BIN="$(command -v uv)"; fi\n'
+        'exec "$UV_BIN" run --project "$DIR" --python 3.12 python "$DIR/lib/datapull.py" "$@"\n'
     )
     launcher.chmod(0o755)
 
 
 def _install_project_requirements() -> None:
-    if not VENV_DIR.exists():
-        print("  Creating Bob's local Python environment...")
-        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=ROOT)
-
-    venv_python = _venv_python()
-    pip_cmd = [str(venv_python), "-m", "pip"]
-    print("  Installing what Bob needs...")
-    subprocess.check_call(pip_cmd + ["install", "--quiet", "--upgrade", "pip"], cwd=ROOT)
-    subprocess.check_call(pip_cmd + ["install", "--quiet", "-r", str(ROOT / "requirements.txt")], cwd=ROOT)
+    print("  Syncing Bob's local runtime...")
+    subprocess.check_call(_uv_sync_command(), cwd=ROOT)
     _write_bob_launcher()
+
+
+def _install_capability(capability: str) -> None:
+    """Install an optional capability into Bob's uv-managed environment."""
+    print(f"  Adding Bob's {capability} tools...")
+    subprocess.check_call(_uv_sync_command(extra=capability), cwd=ROOT)
 
 
 def ensure_local_setup_for_onboarding() -> None:
@@ -631,19 +579,15 @@ def ensure_local_setup_for_onboarding() -> None:
     _install_project_requirements()
     print("  Bob is ready.\n")
 
-    venv_python = _venv_python()
-    try:
-        current_python = Path(sys.executable).resolve()
-        target_python = venv_python.resolve()
-    except OSError:
-        current_python = Path(sys.executable)
-        target_python = venv_python
-    if current_python != target_python and venv_python.exists():
+    # A human may start onboarding with system Python before the launcher exists.
+    # Re-enter through uv so optional imports used later in onboarding resolve from
+    # the managed environment, while avoiding a loop when already running under uv.
+    if os.environ.get("BOB_ONBOARD_SETUP_DONE") != "1" and sys.prefix == sys.base_prefix:
+        command = _uv_run_command("python", str(Path(__file__).resolve()), *sys.argv[1:])
         env = os.environ.copy()
         env["BOB_ONBOARD_SETUP_DONE"] = "1"
-        # Forward the original onboard args (e.g. --answers, --dry-run) through the
-        # venv re-exec — hardcoding ["onboard"] here would silently drop them.
-        os.execve(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]], env)
+        os.execvpe(command[0], command, env)
+
 
 
 def _missing_distributions(distribution_names: list[str]) -> list[str]:
@@ -707,11 +651,10 @@ def _install_with_log(log_path: Path) -> bool:
     Returns True on success, False on failure. Used as the second-attempt retry.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    venv_python = _venv_python()
-    pip_cmd = [str(venv_python), "-m", "pip", "install", "-v", "-r", str(ROOT / "requirements.txt")]
+    sync_cmd = _uv_sync_command() + ["-v"]
     try:
         with open(log_path, "w") as logf:
-            subprocess.check_call(pip_cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT)
+            subprocess.check_call(sync_cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT)
         return True
     except subprocess.CalledProcessError:
         return False
@@ -741,14 +684,18 @@ def _repair_and_check_onboarding_runtime(require_read: bool, require_write: bool
 
 
 def garf_command(query_path: Path, output_dir: Path, account: str, config: str | None) -> list[str]:
+    uv = _uv_executable()
     garf_exe = shutil.which("garf")
+    prefix: list[str] = []
+    if uv:
+        prefix = [uv, "run", "--project", str(ROOT), "--python", "3.12", "--no-sync"]
     if not garf_exe:
         candidate = Path(sys.executable).parent / "garf"
         if candidate.exists():
             garf_exe = str(candidate)
     if not garf_exe:
         garf_exe = "garf"
-    cmd = [
+    cmd = prefix + [
         garf_exe,
         str(query_path),
         "--source",
@@ -5567,10 +5514,11 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
 
 
 def setup_write_credentials(args: argparse.Namespace) -> None:
+    _install_capability("write")
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore
     except ImportError:
-        die("google_auth_oauthlib not installed — run: pip install google-auth-oauthlib")
+        die("google_auth_oauthlib could not be installed — ask Bob to fix setup and try again.")
     import yaml as _yaml
     import json as _json
 
@@ -7314,6 +7262,14 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         sys.stdout.write(_COMMAND_MAP)
         return 0
+    if argv[0].startswith("video-"):
+        _install_capability("video")
+    elif argv[0] in {
+        "bid-budget-apply",
+        "static-variants-apply",
+        "creative-copy-apply",
+    }:
+        _install_capability("write")
     parser = build_parser()
     args = parser.parse_args(argv)
     command = getattr(args, "command", argv[0])

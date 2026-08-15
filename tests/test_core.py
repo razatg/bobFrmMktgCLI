@@ -23,6 +23,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 # Import the module under test without packaging: lib/datapull.py.
@@ -831,6 +832,48 @@ class TestOnboardAnswers(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 dp._onboard_from_answers(args, [])
         self.assertIn("developer token", err.getvalue().lower())
+
+
+class TestUvRuntime(unittest.TestCase):
+    """The launcher and setup path use uv as the runtime authority."""
+
+    def test_uv_run_command_defaults_to_no_sync(self):
+        with mock.patch.object(dp, "_uv_executable", return_value="/tmp/uv"):
+            self.assertEqual(
+                dp._uv_run_command("python", "-c", "pass"),
+                ["/tmp/uv", "run", "--project", str(dp.ROOT), "--python", "3.12", "--no-sync", "python", "-c", "pass"],
+            )
+
+    def test_uv_run_command_can_request_sync(self):
+        with mock.patch.object(dp, "_uv_executable", return_value="/tmp/uv"):
+            self.assertNotIn("--no-sync", dp._uv_run_command("python", "-V", sync=True))
+
+    def test_uv_sync_command_supports_optional_capability(self):
+        with mock.patch.object(dp, "_uv_executable", return_value="/tmp/uv"):
+            self.assertEqual(
+                dp._uv_sync_command(extra="write"),
+                ["/tmp/uv", "sync", "--project", str(dp.ROOT), "--python", "3.12", "--extra", "write"],
+            )
+
+    def test_missing_uv_reports_recovery_action(self):
+        with mock.patch.object(dp, "_uv_executable", return_value=None):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                dp._uv_sync_command()
+            self.assertIn("runtime manager", err.getvalue())
+            self.assertIn("network access", err.getvalue())
+
+    def test_launcher_delegates_to_uv(self):
+        launcher = Path(dp.ROOT / "bob").read_text()
+        self.assertIn("run --project", launcher)
+        self.assertIn("UV_INSTALL_DIR", launcher)
+        self.assertNotIn("installer -pkg", launcher)
+
+    def test_project_declares_capability_extras(self):
+        project = (Path(dp.ROOT) / "pyproject.toml").read_text()
+        self.assertIn("[project.optional-dependencies]", project)
+        self.assertIn("write =", project)
+        self.assertIn("video =", project)
 
 
 if __name__ == "__main__":
