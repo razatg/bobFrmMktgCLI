@@ -339,6 +339,16 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('outside this Bob workspace', response.json()['immediate_response'])
         self.assertEqual(self.app.state.runner.calls, [])
 
+    def test_admin_can_change_own_password(self):
+        csrf=self.bootstrap()
+        wrong=self.client.post('/api/profile/password',headers={'X-CSRF-Token':csrf},json={'current_password':'wrong-password','new_password':'new-admin-password-123'})
+        self.assertEqual(wrong.status_code,403)
+        changed=self.client.post('/api/profile/password',headers={'X-CSRF-Token':csrf},json={'current_password':'a-secure-password','new_password':'new-admin-password-123'})
+        self.assertEqual(changed.status_code,200,changed.text)
+        self.client.post('/auth/logout',headers={'X-CSRF-Token':csrf})
+        login=self.client.post('/auth/login',json={'identifier':'admin','password':'new-admin-password-123'})
+        self.assertEqual(login.status_code,200,login.text)
+
     def test_codex_out_of_scope_reply_teaches_exact_prompt_cache(self):
         self.app.state.runner = OffScopeRunner()
         csrf=self.bootstrap()
