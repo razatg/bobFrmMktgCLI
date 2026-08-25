@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import importlib.metadata as importlib_metadata
 import json
 import math
@@ -15,14 +16,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 
+# `ROOT` is the immutable code/instructions root. Hosted deployments set
+# `BOB_STATE_ROOT` to the persistent client volume so Bob's existing commands
+# keep their layout while accounts, data, Wiki, and logs survive image updates.
 ROOT = Path(__file__).resolve().parents[1]
-BOB_DIR = ROOT / ".bob"
+STATE_ROOT = Path(os.getenv("BOB_STATE_ROOT", str(ROOT))).expanduser().resolve()
+BOB_DIR = STATE_ROOT / ".bob"
 PROFILE_PATH = BOB_DIR / "profile.json"
 ACCOUNTS_DIR = BOB_DIR / "accounts"
 ACCOUNTS_REGISTRY = BOB_DIR / "accounts.json"
@@ -30,12 +36,13 @@ VENV_DIR = ROOT / ".venv"
 UV_RUNTIME_DIR = ROOT / "runtime" / "uv"
 UV_BINARY = UV_RUNTIME_DIR / ("uv.exe" if os.name == "nt" else "uv")
 QUERIES_DIR = ROOT / "garf" / "queries"
-RAW_DIR = ROOT / "garf" / "outputs" / "raw"
-PROCESSED_DIR = ROOT / "data" / "processed"
-REPORTS_DIR = ROOT / "validation" / "reports"
-PULL_LOG_PATH = ROOT / "logs" / "pull-log.jsonl"
-SIGNAL_LOG_PATH = ROOT / "logs" / "session-signals.jsonl"
-SELF_IMPROVE_DIR = ROOT / "wiki" / "_self-improve"
+RAW_DIR = STATE_ROOT / "garf" / "outputs" / "raw"
+PROCESSED_DIR = STATE_ROOT / "data" / "processed"
+REPORTS_DIR = STATE_ROOT / "validation" / "reports"
+PULL_LOG_PATH = STATE_ROOT / "logs" / "pull-log.jsonl"
+PULL_LOCKS_DIR = STATE_ROOT / "logs" / "pull-locks"
+SIGNAL_LOG_PATH = STATE_ROOT / "logs" / "session-signals.jsonl"
+SELF_IMPROVE_DIR = STATE_ROOT / "wiki" / "_self-improve"
 
 # Team sync (./bob sync): wiki + self-improve signals shared with teammates via a plain shared
 # folder (e.g. a synced Dropbox folder) — NEVER the public GitHub origin. No git involved: the
@@ -300,7 +307,7 @@ def account_processed_dir(customer_id: str, subdir: str) -> Path:
 
 def account_wiki_dir(customer_id: str) -> Path:
     """wiki/{customer_id}/ — per-account wiki store."""
-    return ROOT / "wiki" / customer_id.replace("-", "")
+    return STATE_ROOT / "wiki" / customer_id.replace("-", "")
 
 
 def _resolve_processed_dir(subdir: str, customer_id: str | None) -> Path:
@@ -338,7 +345,16 @@ def _set_active_account(profile: dict) -> None:
 
 
 def _profile_read_config_value(profile: dict[str, Any]) -> str:
+    runtime_config = os.getenv("BOB_GOOGLE_ADS_RUNTIME_CONFIG", "").strip()
+    if runtime_config:
+        return runtime_config
     return str(profile.get("google_ads_read_config_path", "") or "").strip()
+
+
+def _resolve_state_path(value: str | Path) -> Path:
+    """Resolve legacy relative account paths against the persistent state root."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else STATE_ROOT / path
 
 
 def _set_profile_read_config_value(profile: dict[str, Any], value: str) -> None:
@@ -679,7 +695,7 @@ def _repair_and_check_onboarding_runtime(require_read: bool, require_write: bool
 
     # Second attempt: verbose install with output captured for diagnosis.
     print("  First install didn't take. Trying once more...")
-    _install_with_log(ROOT / "logs" / "setup.log")
+    _install_with_log(STATE_ROOT / "logs" / "setup.log")
     return _onboarding_runtime_issues(require_read, require_write)
 
 
@@ -824,9 +840,11 @@ def log_pull(
     """Append one entry to the pull log (logs/pull-log.jsonl).
 
     outcome values: 'fetched' (API called), 'skipped_raw' (file existed),
-    'skipped_wiki' (wiki cache hit — agent writes via log-pull subcommand).
+    'skipped_wiki' (wiki cache hit — agent writes via log-pull subcommand),
+    'skipped_inflight' (another identical pull finished while we waited).
     """
-    PULL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    path = _pull_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
         "query": query,
@@ -839,9 +857,123 @@ def log_pull(
         "run_id": run_id_val,
         "output_file": output_file,
     }
-    with PULL_LOG_PATH.open("a") as f:
+    client_instance_id = os.getenv("BOB_CLIENT_INSTANCE_ID", "").strip()
+    if client_instance_id:
+        entry["client_instance_id"] = client_instance_id
+    with path.open("a") as f:
         json.dump(entry, f)
         f.write("\n")
+
+
+def _pull_client_scope() -> str:
+    return os.getenv("BOB_CLIENT_INSTANCE_ID", "").strip() or "default"
+
+
+def _pull_log_path() -> Path:
+    client_instance_id = os.getenv("BOB_CLIENT_INSTANCE_ID", "").strip()
+    if client_instance_id:
+        return PULL_LOG_PATH.parent / "clients" / client_instance_id / PULL_LOG_PATH.name
+    return PULL_LOG_PATH
+
+
+def _pull_log_candidates() -> list[Path]:
+    primary = _pull_log_path()
+    if primary == PULL_LOG_PATH:
+        return [primary]
+    return [primary, PULL_LOG_PATH]
+
+
+def _pull_locks_dir() -> Path:
+    client_instance_id = os.getenv("BOB_CLIENT_INSTANCE_ID", "").strip()
+    if client_instance_id:
+        return PULL_LOCKS_DIR.parent / "clients" / client_instance_id / PULL_LOCKS_DIR.name
+    return PULL_LOCKS_DIR
+
+
+def _pull_fingerprint(query: str, from_date: str, to_date: str, account: str) -> str:
+    raw = "|".join((_pull_client_scope(), query, from_date, to_date, account))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _matching_pull_entry(entry: dict[str, Any], query: str, from_date: str, to_date: str, account: str) -> bool:
+    if entry.get("query") != query:
+        return False
+    if entry.get("from_date") != from_date or entry.get("to_date") != to_date:
+        return False
+    if str(entry.get("account", "")).replace("-", "") != account:
+        return False
+    entry_scope = str(entry.get("client_instance_id", "")).strip()
+    current_scope = os.getenv("BOB_CLIENT_INSTANCE_ID", "").strip()
+    if current_scope:
+        return entry_scope == current_scope
+    return not entry_scope
+
+
+def _latest_matching_pull(query: str, from_date: str, to_date: str, account: str) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for path in _pull_log_candidates():
+        if not path.exists():
+            continue
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if _matching_pull_entry(entry, query, from_date, to_date, account):
+                    latest = entry
+    return latest
+
+
+def _claim_pull_lock(query: str, start: dt.date, end: dt.date, account: str) -> Path:
+    locks_dir = _pull_locks_dir()
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir = locks_dir / _pull_fingerprint(query, start.isoformat(), end.isoformat(), account)
+    deadline = time.monotonic() + float(os.getenv("BOB_PULL_WAIT_SECONDS", "300"))
+    stale_seconds = float(os.getenv("BOB_PULL_STALE_SECONDS", "1800"))
+    while True:
+        exact = sorted((RAW_DIR / query).glob(f"{account}_{start}_{end}_*.csv"))
+        if exact:
+            raise FileExistsError(str(exact[-1]))
+        recent = _latest_matching_pull(query, start.isoformat(), end.isoformat(), account)
+        if recent and recent.get("output_file") and Path(str(recent["output_file"])).exists():
+            raise FileExistsError(str(recent["output_file"]))
+        try:
+            lock_dir.mkdir()
+            payload = {
+                "client_instance_id": os.getenv("BOB_CLIENT_INSTANCE_ID", "").strip(),
+                "query": query,
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "account": account,
+                "pid": os.getpid(),
+                "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            }
+            (lock_dir / "owner.json").write_text(json.dumps(payload, indent=2) + "\n")
+            return lock_dir
+        except FileExistsError:
+            try:
+                age = time.time() - lock_dir.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age > stale_seconds:
+                shutil.rmtree(lock_dir, ignore_errors=True)
+                continue
+            if time.monotonic() >= deadline:
+                die(
+                    f"Another identical pull is still running for {account} / {query} / "
+                    f"{start.isoformat()}..{end.isoformat()}. Try again in a bit."
+                )
+            time.sleep(1.0)
+
+
+def _release_pull_lock(lock_dir: Path | None) -> None:
+    if not lock_dir:
+        return
+    shutil.rmtree(lock_dir, ignore_errors=True)
 
 
 def log_signal(
@@ -946,7 +1078,7 @@ def fetch(args: argparse.Namespace) -> None:
     if not config and not args.dry_run:
         die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
     if config:
-        config = str(Path(config).expanduser())
+        config = str(_resolve_state_path(config))
 
     if query_name in DATE_QUERIES:
         start, end = resolve_range(args)
@@ -961,7 +1093,25 @@ def fetch(args: argparse.Namespace) -> None:
     # Deduplication: skip if exact (query, account, start, end) already exists
     question = getattr(args, "question", "") or ""
     reason = getattr(args, "reason", "") or ""
+    lock_dir: Path | None = None
     if not getattr(args, "force", False) and not args.dry_run:
+        recent = _latest_matching_pull(query_name, start.isoformat(), end.isoformat(), account)
+        if recent and recent.get("output_file") and Path(str(recent["output_file"])).exists():
+            existing_output = Path(str(recent["output_file"]))
+            print(f"skipping {query_name} {start}..{end} — already logged {existing_output.name}")
+            log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(existing_output), reason, question, outcome="skipped_raw")
+            try:
+                log_signal(
+                    event_type="redundant_fetch",
+                    note=f"fetch {query_name} {start}..{end} but pull log already pointed to {existing_output.name}",
+                    account=account,
+                    intent="fetch",
+                    severity="friction",
+                    source="cli",
+                )
+            except Exception:
+                pass
+            return
         existing = sorted(raw_query_dir.glob(f"{account}_{start}_{end}_*.csv"))
         if existing:
             print(f"skipping {query_name} {start}..{end} — already have {existing[-1].name}")
@@ -979,6 +1129,13 @@ def fetch(args: argparse.Namespace) -> None:
                 )
             except Exception:
                 pass
+            return
+        try:
+            lock_dir = _claim_pull_lock(query_name, start, end, account)
+        except FileExistsError as exc:
+            reused = Path(str(exc))
+            print(f"reusing in-flight {query_name} {start}..{end} — {reused.name}")
+            log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(reused), reason, question, outcome="skipped_inflight")
             return
 
     rendered_query = render_query(query_name, start, end)
@@ -1008,29 +1165,32 @@ def fetch(args: argparse.Namespace) -> None:
         print(f"metadata written: {meta_file}")
         return
 
-    with tempfile.TemporaryDirectory(prefix="bob-garf-") as tmp:
-        tmp_dir = Path(tmp)
-        cmd = garf_command(rendered_query_path, tmp_dir, account, config)
-        metadata["command"] = cmd
-        try:
-            result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
-        except FileNotFoundError:
-            die("garf executable not found. Install with: pip install garf-executors garf-google-ads")
-        metadata["returncode"] = result.returncode
-        metadata["stdout"] = result.stdout[-4000:]
-        metadata["stderr"] = result.stderr[-4000:]
-        if result.returncode != 0:
-            failure_message = garf_failure_message(query_name, meta_file, result.stdout, result.stderr)
-            if failure_message.startswith("Bob can't reach Google Ads"):
-                metadata["diagnosis"] = "network_or_dns_unreachable"
-            write_metadata(meta_file, metadata)
-            die(failure_message)
+    try:
+        with tempfile.TemporaryDirectory(prefix="bob-garf-") as tmp:
+            tmp_dir = Path(tmp)
+            cmd = garf_command(rendered_query_path, tmp_dir, account, config)
+            metadata["command"] = cmd
+            try:
+                result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
+            except FileNotFoundError:
+                die("garf executable not found. Install with: pip install garf-executors garf-google-ads")
+            metadata["returncode"] = result.returncode
+            metadata["stdout"] = result.stdout[-4000:]
+            metadata["stderr"] = result.stderr[-4000:]
+            if result.returncode != 0:
+                failure_message = garf_failure_message(query_name, meta_file, result.stdout, result.stderr)
+                if failure_message.startswith("Bob can't reach Google Ads"):
+                    metadata["diagnosis"] = "network_or_dns_unreachable"
+                write_metadata(meta_file, metadata)
+                die(failure_message)
 
-        produced = sorted(tmp_dir.glob("*.csv"))
-        if not produced:
-            write_metadata(meta_file, metadata)
-            die(f"GARF completed but no CSV was written to {tmp_dir}")
-        shutil.move(str(produced[0]), output_file)
+            produced = sorted(tmp_dir.glob("*.csv"))
+            if not produced:
+                write_metadata(meta_file, metadata)
+                die(f"GARF completed but no CSV was written to {tmp_dir}")
+            shutil.move(str(produced[0]), output_file)
+    finally:
+        _release_pull_lock(lock_dir)
 
     write_metadata(meta_file, metadata)
     log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(output_file), reason, question, outcome="fetched")
@@ -2583,7 +2743,7 @@ def check_config(args: argparse.Namespace) -> None:
     config = args.config or _profile_read_config_value(profile)
     if not config:
         die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
-    config_path = Path(config).expanduser()
+    config_path = _resolve_state_path(config)
     if not config_path.exists():
         die(f"Google Ads GARF config not found: {config_path}\nExpected at {config_path} — create it or set google_ads_read_config_path in your account profile (.bob/accounts/<id>/profile.json)")
     text = config_path.read_text()
@@ -2980,7 +3140,7 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
     print(f"\nrecommendation CSV written: {csv_path}")
 
     # Write YAML plan
-    wiki_base = account_wiki_dir(customer) if customer != "unknown" else ROOT / "wiki"
+    wiki_base = account_wiki_dir(customer) if customer != "unknown" else STATE_ROOT / "wiki"
     yaml_path = Path(args.yaml_output).expanduser() if args.yaml_output else (
         wiki_base / "action-items" / f"bid-budget-{date_str}.yaml"
     )
@@ -4441,7 +4601,7 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
             profile["google_ads_customer_id"] = explicit_customer
     customer_id = profile.get("google_ads_customer_id") or "unknown"
     currency = _currency_symbol(profile.get("currency", ""))
-    wiki_base = account_wiki_dir(customer_id) if customer_id != "unknown" else ROOT / "wiki"
+    wiki_base = account_wiki_dir(customer_id) if customer_id != "unknown" else STATE_ROOT / "wiki"
     design_dir = wiki_base / "design"
     strategy_guide_path = design_dir / "banner-design-strategy.md"
     design_md_path = design_dir / "DESIGN.md"
@@ -4626,7 +4786,7 @@ def suggest_static_variants(args: argparse.Namespace) -> None:
             profile = dict(profile)
             profile["google_ads_customer_id"] = explicit_customer
     customer_id = profile.get("google_ads_customer_id") or "unknown"
-    wiki_base = account_wiki_dir(customer_id) if customer_id != "unknown" else ROOT / "wiki"
+    wiki_base = account_wiki_dir(customer_id) if customer_id != "unknown" else STATE_ROOT / "wiki"
     design_dir = wiki_base / "design"
 
     min_imp = float(getattr(args, "min_impressions", None) or profile.get("creative_min_impressions", DEFAULT_CREATIVE_MIN_IMPRESSIONS))
@@ -5121,7 +5281,7 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
         c["change_index"] = i
 
     today = _dt.date.today().isoformat()
-    out_dir = Path(getattr(args, "output_dir", None) or "wiki/action-items")
+    out_dir = Path(getattr(args, "output_dir", None) or STATE_ROOT / "wiki" / "action-items")
     out_dir.mkdir(parents=True, exist_ok=True)
     yaml_path = out_dir / f"creative-copy-{today}.yaml"
     prompt_path = out_dir / f"creative-copy-{today}-prompt.txt"
@@ -5738,13 +5898,13 @@ def _resolve_profile_config_path(profile: dict[str, Any], *, write: bool = False
         if not candidate or candidate in seen:
             continue
         seen.add(candidate)
-        path = Path(candidate).expanduser()
+        path = _resolve_state_path(candidate)
         if path.exists():
             return path
     fallback = configured
     if not fallback:
         fallback = defaults[0]
-    return Path(fallback).expanduser()
+    return _resolve_state_path(fallback)
 
 
 def _normalize_account_config_files(profile: dict[str, Any]) -> list[str]:
@@ -5753,12 +5913,12 @@ def _normalize_account_config_files(profile: dict[str, Any]) -> list[str]:
         return []
 
     migrated: list[str] = []
-    read_default = Path(_default_read_config_path(customer_id)).expanduser()
-    write_default = Path(_default_write_config_path(customer_id)).expanduser()
+    read_default = _resolve_state_path(_default_read_config_path(customer_id))
+    write_default = _resolve_state_path(_default_write_config_path(customer_id))
 
     read_path = _profile_read_config_value(profile)
     if read_path:
-        current_read = Path(read_path).expanduser()
+        current_read = _resolve_state_path(read_path)
         if current_read != read_default and current_read.exists() and not read_default.exists():
             read_default.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(current_read, read_default)
@@ -5770,7 +5930,7 @@ def _normalize_account_config_files(profile: dict[str, Any]) -> list[str]:
 
     write_path = str(profile.get("google_ads_write_config_path", "") or "").strip()
     if write_path:
-        current_write = Path(write_path).expanduser()
+        current_write = _resolve_state_path(write_path)
         if current_write != write_default and current_write.exists() and not write_default.exists():
             write_default.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(current_write, write_default)
@@ -6440,7 +6600,7 @@ def repair_setup(args: argparse.Namespace) -> None:
         return
 
     print("  First install didn't take. Trying once more with verbose output...")
-    _install_with_log(ROOT / "logs" / "setup.log")
+    _install_with_log(STATE_ROOT / "logs" / "setup.log")
     issues = _onboarding_runtime_issues(require_read=True, require_write=False)
     if not issues:
         print("  Setup looks good.")
@@ -6449,7 +6609,7 @@ def repair_setup(args: argparse.Namespace) -> None:
     print("\n  Still not right:")
     for issue in issues:
         print(f"  - {issue}")
-    print(f"\n  Full install log: {ROOT / 'logs' / 'setup.log'}")
+    print(f"\n  Full install log: {STATE_ROOT / 'logs' / 'setup.log'}")
 
 
 def list_accounts(args: argparse.Namespace) -> None:
@@ -6559,7 +6719,7 @@ def self_improve(args: argparse.Namespace) -> None:
     agent at the files to read. Does NOT call any model — clustering and the proposal
     are the agent's job (see the bob-self-improve skill). Manual, proposal-only."""
     signals = _read_signal_log()
-    backlog = ROOT / "logs" / "backlog.md"
+    backlog = STATE_ROOT / "logs" / "backlog.md"
     if not signals:
         print("No signals logged yet (logs/session-signals.jsonl is empty or missing).")
         print("Nothing to synthesize. Signals accumulate as agents call `./bob log-signal`.")
@@ -6901,8 +7061,8 @@ def sync(args: argparse.Namespace) -> None:
     print(f"{'DRY RUN — ' if args.dry_run else ''}sync ({direction}) with {shared}\n")
 
     sig = _union_jsonl(SIGNAL_LOG_PATH, shared / "session-signals.jsonl", to_local, to_shared, args.dry_run)
-    wiki = _sync_wiki(ROOT / "wiki", shared / "wiki", to_local, to_shared, args.dry_run)
-    bk = _union_md_file(ROOT / "logs" / "backlog.md", shared / "backlog.md",
+    wiki = _sync_wiki(STATE_ROOT / "wiki", shared / "wiki", to_local, to_shared, args.dry_run)
+    bk = _union_md_file(STATE_ROOT / "logs" / "backlog.md", shared / "backlog.md",
                         _union_backlog, to_local, to_shared, args.dry_run)
 
     print(f"signals : {sig['total']} total  (+{sig['added_local']} local, +{sig['added_shared']} shared"

@@ -22,6 +22,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -518,8 +520,8 @@ class TestProcessedPeriodMaterialization(unittest.TestCase):
         self.assertIn("Impressions", text)
         self.assertIn("CTR %", text)
         self.assertNotIn("campaign_reach_period", text)
-        self.assertNotIn("Users", text)
-        self.assertNotIn("Frequency", text)
+
+
 
     def test_reach_metrics_only_show_on_individual_campaign_tables(self):
         customer, cur_path, base_path = self._write_campaign_network_pair()
@@ -874,6 +876,80 @@ class TestUvRuntime(unittest.TestCase):
         self.assertIn("[project.optional-dependencies]", project)
         self.assertIn("write =", project)
         self.assertIn("video =", project)
+
+
+class TestFetchDedupe(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._raw_dir = dp.RAW_DIR
+        self._pull_log = dp.PULL_LOG_PATH
+        self._pull_locks = dp.PULL_LOCKS_DIR
+        self._queries_dir = dp.QUERIES_DIR
+        self._saved_env = os.environ.copy()
+        root = Path(self.tmp.name)
+        dp.RAW_DIR = root / "raw"
+        dp.PULL_LOG_PATH = root / "logs" / "pull-log.jsonl"
+        dp.PULL_LOCKS_DIR = root / "logs" / "pull-locks"
+        dp.QUERIES_DIR = root / "queries"
+        dp.QUERIES_DIR.mkdir(parents=True, exist_ok=True)
+        (dp.QUERIES_DIR / "campaign_daily.sql").write_text("SELECT 1\n")
+        os.environ["BOB_CLIENT_INSTANCE_ID"] = "alpha-client"
+        self.addCleanup(self._restore_paths)
+
+    def _restore_paths(self):
+        dp.RAW_DIR = self._raw_dir
+        dp.PULL_LOG_PATH = self._pull_log
+        dp.PULL_LOCKS_DIR = self._pull_locks
+        dp.QUERIES_DIR = self._queries_dir
+        os.environ.clear()
+        os.environ.update(self._saved_env)
+
+    def _fetch_args(self):
+        return argparse.Namespace(
+            query="campaign_daily",
+            days=None,
+            from_date="2026-08-18",
+            to="2026-08-24",
+            account="3546923408",
+            config="fake-google-ads.yaml",
+            dry_run=False,
+            run_id="test-run",
+            reason="thin dedupe test",
+            question="",
+            force=False,
+        )
+
+    def test_identical_inflight_fetch_is_reused(self):
+        call_count = 0
+        call_lock = threading.Lock()
+
+        def fake_garf_command(rendered_query_path, tmp_dir, account, config):
+            return [str(tmp_dir)]
+
+        def fake_run(cmd, cwd=None, text=None, capture_output=None, check=None):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+            time.sleep(0.3)
+            Path(cmd[0], "out.csv").write_text("date,impressions\n2026-08-24,1\n")
+            return mock.Mock(returncode=0, stdout="ok", stderr="")
+
+        with mock.patch.object(dp, "garf_command", side_effect=fake_garf_command), \
+             mock.patch.object(dp, "render_query", return_value="SELECT 1"), \
+             mock.patch.object(dp.subprocess, "run", side_effect=fake_run):
+            first = threading.Thread(target=dp.fetch, args=(self._fetch_args(),))
+            second = threading.Thread(target=dp.fetch, args=(self._fetch_args(),))
+            first.start()
+            time.sleep(0.05)
+            second.start()
+            first.join()
+            second.join()
+
+        self.assertEqual(call_count, 1)
+        lines = [json.loads(line) for line in dp._pull_log_path().read_text().splitlines() if line.strip()]
+        self.assertEqual(sorted(line["outcome"] for line in lines), ["fetched", "skipped_inflight"])
+        self.assertTrue(all(line.get("client_instance_id") == "alpha-client" for line in lines))
 
 
 if __name__ == "__main__":

@@ -60,3 +60,6 @@ google-ads/mutations/*
 /runtime/
 /bob
 validation/
+
+# Local safety snapshots used before hosted/admin migrations
+backup/

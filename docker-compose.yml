@@ -1,0 +1,26 @@
+services:
+  web:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      ADMIN_IDENTIFIER: ${ADMIN_IDENTIFIER:-superadmin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-BobAdmin-2026!}
+      ADMIN_CLIENT_NAME: ${ADMIN_CLIENT_NAME:-Bob Client}
+      BOB_METADATA_DB: /data/metadata/metadata.sqlite3
+      BOB_STATE_ROOT: /data/client
+      BOB_SECRET_ROOT: /data/secrets
+      CODEX_HOME: /data/codex
+      BOB_CODEX_MODEL: ${BOB_CODEX_MODEL:-gpt-5.6-luna}
+      BOB_RUNTIME: ${BOB_RUNTIME:-hosted}
+    volumes:
+      - bob-data:/data/client
+      - secret-data:/data/secrets
+      - codex-data:/data/codex
+      - metadata-data:/data/metadata
+    init: true
+    security_opt: [no-new-privileges:true]
+volumes:
+  bob-data:
+  codex-data:
+  metadata-data:
+  secret-data:
