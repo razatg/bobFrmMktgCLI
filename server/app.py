@@ -605,7 +605,15 @@ async def get_conversation(cid: str, request: Request):
     _,row=await conversation(request,cid); msgs=request.app.state.store.all('SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at',(cid,)); return {'conversation':dict(row),'messages':[dict(x) for x in msgs]}
 @app.post('/api/conversations/{cid}/messages')
 async def message(cid: str, body: MessageIn, request: Request):
-    user,row=await conversation(request,cid); s=request.app.state.store
+    user,row=await conversation(request,cid); s=request.app.state.store; row=dict(row)
+    # Persist an unambiguous account mention on the conversation so the
+    # dropdown, agent panel, runtime config, and Codex prompt share context.
+    prompt_lower=body.content.lower()
+    permitted=permitted_accounts(s,user,row['client_instance_id'])
+    mentioned=[a for a in permitted if a['account_name'] and a['account_name'].lower() in prompt_lower]
+    if len(mentioned)==1 and mentioned[0]['id']!=row.get('account_id'):
+        s.run('UPDATE conversations SET account_id=?,last_activity_at=? WHERE id=?',(mentioned[0]['id'],now(),cid))
+        row['account_id']=mentioned[0]['id']
     setup_request=body.content.strip().lower()
     if 'set me up' in setup_request or setup_request in {'setup','onboard me','onboard me bob'}:
         mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
