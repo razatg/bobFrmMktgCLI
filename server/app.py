@@ -617,6 +617,14 @@ async def message(cid: str, body: MessageIn, request: Request):
     # dropdown, agent panel, runtime config, and Codex prompt share context.
     prompt_lower=body.content.lower()
     permitted=permitted_accounts(s,user,row['client_instance_id'])
+    all_accounts=[dict(a) for a in s.all('SELECT id,account_name FROM client_accounts WHERE client_instance_id=? AND is_active=1',(row['client_instance_id'],))]
+    permitted_ids={a['id'] for a in permitted}
+    unauthorized=[a for a in all_accounts if a['id'] not in permitted_ids and a['account_name'] and a['account_name'].lower() in prompt_lower]
+    if len(unauthorized)==1:
+        mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
+        reply=f"You don’t have access to {unauthorized[0]['account_name']}. Ask an admin to grant you READ access first."
+        s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
+        return {'job_id':None,'message_id':mid,'immediate_response':reply}
     mentioned=[a for a in permitted if a['account_name'] and a['account_name'].lower() in prompt_lower]
     if len(mentioned)==1 and mentioned[0]['id']!=row.get('account_id'):
         s.run('UPDATE conversations SET account_id=?,last_activity_at=? WHERE id=?',(mentioned[0]['id'],now(),cid))

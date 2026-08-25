@@ -326,6 +326,14 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(conversation['account_id'],brand_id)
         blocked=self.client.post(f"/api/conversations/{conversation['id']}/account",headers={'X-CSRF-Token':analyst_csrf},json={'account_id':demand_id})
         self.assertEqual(blocked.status_code,404,blocked.text)
+        self.client.post('/auth/logout',headers={'X-CSRF-Token':analyst_csrf})
+        owner_login=self.client.post('/auth/login',json={'identifier':'owner@alpha.com','password':'alpha-owner-password'})
+        owner_csrf=owner_login.json()['csrf']
+        owner_conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':owner_csrf}).json()
+        denied=self.client.post(f"/api/conversations/{owner_conversation['id']}/messages",headers={'X-CSRF-Token':owner_csrf},json={'content':'what happened in Alpha Brand last week'})
+        self.assertEqual(denied.status_code,200,denied.text)
+        self.assertIsNone(denied.json()['job_id'])
+        self.assertIn('don’t have access to Alpha Brand',denied.json()['immediate_response'])
 
     def test_obvious_generic_prompt_is_blocked_before_codex(self):
         csrf=self.bootstrap()
