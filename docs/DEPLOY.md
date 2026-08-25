@@ -18,7 +18,7 @@ Hetzner VPS or GCP VM
 
 Start with a VPS or Compute Engine VM rather than Cloud Run. Bob currently needs persistent volumes, Codex session history, and a long-running worker process.
 
-The repository already contains the image and Compose setup in [Dockerfile](./Dockerfile) and [docker-compose.yml](./docker-compose.yml).
+The repository already contains the image and Compose setup in [Dockerfile](../Dockerfile) and [docker-compose.yml](../docker-compose.yml).
 
 ## First deployment
 
@@ -56,7 +56,7 @@ The localhost callback is only for development.
 
 ## Codex CLI setup
 
-Codex is installed inside the Docker image by the [Dockerfile](./Dockerfile):
+Codex is installed inside the Docker image by the [Dockerfile](../Dockerfile):
 
 ```dockerfile
 npm install --global "@openai/codex@0.147.0"
