@@ -134,11 +134,12 @@ def is_obviously_bob_scope(store, row, prompt):
     if len(normalized.split()) <= 6 and recent:
         return True, 'followup'
     return True, 'pass'
-def scope_wrapped_prompt(prompt):
+def scope_wrapped_prompt(prompt, account_context=None):
     return (
         "You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
         "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
         f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
+        f"Current selected account: {account_context or 'none'}. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
         f"User message:\n{prompt}"
     )
 def client_for_user(store, user, client_id=None):
@@ -613,22 +614,6 @@ async def get_conversation(cid: str, request: Request):
 @app.post('/api/conversations/{cid}/messages')
 async def message(cid: str, body: MessageIn, request: Request):
     user,row=await conversation(request,cid); s=request.app.state.store; row=dict(row)
-    # Persist an unambiguous account mention on the conversation so the
-    # dropdown, agent panel, runtime config, and Codex prompt share context.
-    prompt_lower=body.content.lower()
-    permitted=permitted_accounts(s,user,row['client_instance_id'])
-    all_accounts=[dict(a) for a in s.all('SELECT id,account_name FROM client_accounts WHERE client_instance_id=? AND is_active=1',(row['client_instance_id'],))]
-    permitted_ids={a['id'] for a in permitted}
-    unauthorized=[a for a in all_accounts if a['id'] not in permitted_ids and a['account_name'] and a['account_name'].lower() in prompt_lower]
-    if len(unauthorized)==1:
-        mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
-        reply=f"You don’t have access to {unauthorized[0]['account_name']}. Ask an admin to grant you READ access first."
-        s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
-        return {'job_id':None,'message_id':mid,'immediate_response':reply}
-    mentioned=[a for a in permitted if a['account_name'] and a['account_name'].lower() in prompt_lower]
-    if len(mentioned)==1 and mentioned[0]['id']!=row.get('account_id'):
-        s.run('UPDATE conversations SET account_id=?,last_activity_at=? WHERE id=?',(mentioned[0]['id'],now(),cid))
-        row['account_id']=mentioned[0]['id']
     setup_request=body.content.strip().lower()
     if 'set me up' in setup_request or setup_request in {'setup','onboard me','onboard me bob'}:
         mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
@@ -670,7 +655,8 @@ async def run_job(request,jid,cid,prompt,row,lock):
             if runtime_config:
                 environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
             policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),environment=environment)
-            sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(prompt),workspace,policy,emit,app.state.cancel.get(jid))
+            selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
+            sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
             final = final or 'No final response returned.'
             if final.startswith(OFF_SCOPE_SENTINEL):
                 learned = load_learned_offscope()
