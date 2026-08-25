@@ -237,7 +237,14 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
     except OSError: pass
     # Rebuild the CLI-facing account registry in the conversation-local state
     # root so one web conversation's account choice never mutates another's.
-    accounts = [dict(row) for row in store.all('SELECT id,customer_id,account_name,is_active FROM client_accounts WHERE client_instance_id=? ORDER BY account_name',(client_instance_id,))]
+    user=store.one('SELECT role FROM users WHERE id=?',(user_id,))
+    account_sql='SELECT id,customer_id,account_name,is_active FROM client_accounts WHERE client_instance_id=? AND is_active=1'
+    account_args=[client_instance_id]
+    if not user or user['role']!='admin':
+        account_sql+=' AND EXISTS (SELECT 1 FROM user_account_access ua WHERE ua.account_id=client_accounts.id AND ua.user_id=?)'
+        account_args.append(user_id)
+    account_sql+=' ORDER BY account_name'
+    accounts = [dict(row) for row in store.all(account_sql,tuple(account_args))]
     registry = state_root / '.bob' / 'accounts.json'
     registry.parent.mkdir(parents=True, exist_ok=True)
     selected = account_id or (accounts[0]['id'] if accounts else None)
