@@ -62,14 +62,14 @@ class GatewayTests(unittest.TestCase):
 
     def test_agent_info_is_dynamic(self):
         self.bootstrap()
-        accounts = [{'account_name': 'Ownly', 'google_ads_customer_id': '996-177-7147', 'active': True}]
+        accounts = [{'account_name': 'Demo Account', 'google_ads_customer_id': '123-456-7890', 'active': True}]
         state = Path(self.workspace) / '.bob'
         state.mkdir(parents=True, exist_ok=True)
         (state / 'accounts.json').write_text(json.dumps(accounts))
         info = self.client.get('/api/agent-info')
         self.assertEqual(info.status_code, 200, info.text)
         self.assertEqual(info.json()['client_name'], 'Test Client')
-        self.assertEqual(info.json()['account_name'], 'Ownly')
+        self.assertEqual(info.json()['account_name'], 'Demo Account')
         self.assertEqual(info.json()['model'], 'CODEX / gpt-5.6-luna')
         self.assertEqual(info.json()['name'], 'BOB')
         self.assertEqual(info.json()['role'], 'SENIOR PERFORMANCE MARKETING LEAD')
@@ -139,7 +139,7 @@ class GatewayTests(unittest.TestCase):
     def test_admin_account_permission_grant_and_revoke(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
         client_id=s.one('SELECT id FROM client_instances')['id']
-        account_id='account-one'; s.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',(account_id,client_id,'1112223333','Rapido Demand',1,'2026-08-24T00:00:00+00:00'))
+        account_id='account-one'; s.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',(account_id,client_id,'1112223333','Demo Demand',1,'2026-08-24T00:00:00+00:00'))
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
         member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member','password':'another-secure-password'})
         uid=s.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']
@@ -169,14 +169,14 @@ class GatewayTests(unittest.TestCase):
         from server.app import provision_environment_admin
         from server.models import Store
         path=Path(self.tmp.name)/'provision.sqlite3'
-        with patch.dict(os.environ, {'ADMIN_IDENTIFIER':'superadmin','ADMIN_PASSWORD':'BobAdmin-2026!','ADMIN_CLIENT_NAME':'Rapido MCC'}):
+        with patch.dict(os.environ, {'ADMIN_IDENTIFIER':'superadmin','ADMIN_PASSWORD':'BobAdmin-2026!','ADMIN_CLIENT_NAME':'Demo MCC'}):
             store=Store(path)
             provision_environment_admin(store)
             user=store.one('SELECT * FROM users')
             self.assertEqual(user['email_or_identifier'],'superadmin')
             self.assertEqual(user['role'],'admin')
-            self.assertEqual(store.one('SELECT display_name FROM client_instances')['display_name'],'Rapido MCC')
-            store.close()
+        self.assertEqual(store.one('SELECT display_name FROM client_instances')['display_name'],'Demo MCC')
+        store.close()
 
     def test_admin_can_create_an_additional_client(self):
         csrf=self.bootstrap()
@@ -212,19 +212,19 @@ class GatewayTests(unittest.TestCase):
         created=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':admin_csrf},json={
             'name':'Alpha','slug':'alpha','mcc_name':'Alpha MCC','mcc_id':'222-222-2222',
             'identifier':'owner@alpha.com','password':'alpha-owner-password',
-            'accounts':[{'account_name':'Alpha Demand','customer_id':'354-692-3408'},
-                        {'account_name':'Alpha Brand','customer_id':'996-177-7147'}]})
+            'accounts':[{'account_name':'Demo Demand','customer_id':'123-456-7890'},
+                        {'account_name':'Demo Brand','customer_id':'987-654-3210'}]})
         self.assertEqual(created.status_code,200,created.text)
         client_id=created.json()['client']['id']
         detail=self.client.get(f'/api/admin/clients/{client_id}',headers={'X-CSRF-Token':admin_csrf})
         self.assertEqual(detail.status_code,200,detail.text)
         payload=detail.json()
         self.assertEqual(payload['config']['mcc_name'],'Alpha MCC')
-        self.assertEqual(sorted(a['customer_id'] for a in payload['accounts']),['3546923408','9961777147'])
+        self.assertEqual(sorted(a['customer_id'] for a in payload['accounts']),['1234567890','9876543210'])
         owner_id=next(u['id'] for u in payload['users'] if u['email_or_identifier']=='owner@alpha.com')
         permissions=self.app.state.store.all('''SELECT a.customer_id,ua.permission FROM user_account_access ua
           JOIN client_accounts a ON a.id=ua.account_id WHERE ua.user_id=? ORDER BY a.customer_id''',(owner_id,))
-        self.assertEqual([(x['customer_id'],x['permission']) for x in permissions],[('3546923408','read'),('9961777147','read')])
+        self.assertEqual([(x['customer_id'],x['permission']) for x in permissions],[('1234567890','read'),('9876543210','read')])
         users=self.client.get(f'/api/admin/users?client_instance_id={client_id}',headers={'X-CSRF-Token':admin_csrf})
         self.assertEqual([u['email_or_identifier'] for u in users.json()],['admin','owner@alpha.com'])
         app_test=self.client.post('/api/admin/google-ads/test',headers={'X-CSRF-Token':admin_csrf})
@@ -250,9 +250,9 @@ class GatewayTests(unittest.TestCase):
         clients=self.client.get('/api/admin/clients',headers={'X-CSRF-Token':csrf}).json()
         client_id=clients[0]['id']
         response=self.client.patch(f'/api/admin/clients/{client_id}',headers={'X-CSRF-Token':csrf},json={
-            'name':'Rapido','slug':'rapido','mcc_name':'Rapido MCC','mcc_id':'35-252-7237'})
+            'name':'Demo Client','slug':'demo-client','mcc_name':'Demo MCC','mcc_id':'12-345-6789'})
         self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(response.json()['mcc_id'],'352527237')
+        self.assertEqual(response.json()['mcc_id'],'123456789')
 
     def test_different_conversations_get_isolated_account_runtime(self):
         admin_csrf=self.bootstrap()
@@ -299,8 +299,8 @@ class GatewayTests(unittest.TestCase):
         admin_csrf=self.bootstrap()
         created=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':admin_csrf},json={
             'name':'Alpha','slug':'alpha','identifier':'owner@alpha.com','password':'alpha-owner-password',
-            'accounts':[{'account_name':'Alpha Demand','customer_id':'354-692-3408'},
-                        {'account_name':'Alpha Brand','customer_id':'996-177-7147'}]})
+            'accounts':[{'account_name':'Demo Demand','customer_id':'123-456-7890'},
+                        {'account_name':'Demo Brand','customer_id':'987-654-3210'}]})
         self.assertEqual(created.status_code,200,created.text)
         client_id=created.json()['client']['id']
         added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={

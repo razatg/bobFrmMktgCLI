@@ -14,6 +14,7 @@ env/
 
 # Environment variables / secrets
 .env
+*.sqlite3
 
 # --- Bob Frm Mktg ---
 
@@ -27,6 +28,10 @@ env/
 
 # Raw API outputs
 garf/outputs/raw/
+
+# Hosted/local persistent runtime data and temporary media
+data/
+tmp/
 
 # Processed data
 data/processed/

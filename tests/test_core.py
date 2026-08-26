@@ -911,7 +911,7 @@ class TestFetchDedupe(unittest.TestCase):
             days=None,
             from_date="2026-08-18",
             to="2026-08-24",
-            account="3546923408",
+            account="1234567890",
             config="fake-google-ads.yaml",
             dry_run=False,
             run_id="test-run",

@@ -17,7 +17,7 @@ log-signal` (see the "Signal logging" section in `AGENTS.md`) and stored one-per
   "artifact": ".agents/skills/bob-performance-analysis/references/calendar-period-comparison.md",
   "severity": "wrong",
   "source": "debrief",
-  "account": "3546923408"
+  "account": "1234567890"
 }
 ```
 

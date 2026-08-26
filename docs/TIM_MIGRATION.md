@@ -70,7 +70,7 @@ client instance, workspace volume, accounts, Wiki, and conversations they can ac
 isolation is enforced by `client_instance_id` in the gateway and by separate worker/volume
 boundaries; it does not depend on the browser hostname.
 
-The first deployment may still run one client worker for Rapido MCC. URL shape is a presentation
+The first deployment may still run one client worker for the initial client MCC. URL shape is a presentation
 and deployment choice, not a separate deployment or data-isolation mechanism in the MVP.
 
 For local and test hosting, use environment-configured URLs:
@@ -537,7 +537,7 @@ timfrmmktg.com
         v
   Gateway/API container
         |
-        +-- client-rapido worker + Bob/data volume
+        +-- client-primary worker + Bob/data volume
         +-- client-other worker  + Bob/data volume
         `-- client-third worker  + Bob/data volume
 ```
@@ -642,7 +642,7 @@ membership-based tenant boundary that will support additional clients later.
 - Add SQLite session/job metadata (conversation_id → thread_id mapping) and the UI message projection.
 - Add the Codex adapter using native persistent sessions (exec + exec resume).
 - Add one client workspace volume.
-- Migrate the existing Rapido MCC state into that volume before first startup; code, skills, query templates, and the launcher remain image-owned.
+- Migrate the existing client state into that volume before first startup; code, skills, query templates, and the launcher remain image-owned.
 - Support read-only Bob questions.
 - Add process limits (asyncio.Semaphore), timeout, cancellation, and audit logging.
 - Add job-scoped SSE with event IDs, keep-alives, bounded reconnect, and terminal-event idempotency.
