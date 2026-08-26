@@ -39,6 +39,24 @@ The initial site will be available at `http://SERVER_IP:8000`. Point the product
 
 Use either a Hetzner Cloud VPS or a GCP Compute Engine Ubuntu VM. For the MVP, use at least 2 vCPUs, 4 GB RAM, 40 GB disk, and a static public IP.
 
+### CPU architecture: Apple Silicon Mac to Intel GCP
+
+The GCP E2 machine family is x86-64/Intel-compatible. Bob’s Dockerfile uses Python, Node.js, npm, and the Codex CLI and does not need a separate Intel Dockerfile. The simplest deployment is to clone the repository and run `docker compose build` on the GCP VM itself; Docker then builds the native `linux/amd64` image.
+
+Your development Mac uses Apple Silicon (`arm64`). If you build the image on the Mac and transfer it to GCP, build for the GCP architecture explicitly:
+
+```bash
+docker buildx build --platform linux/amd64 -t bob:latest --load .
+```
+
+If you use a container registry:
+
+```bash
+docker buildx build --platform linux/amd64 -t REGISTRY/bob:latest --push .
+```
+
+If you only run `docker compose build` on the Mac, Docker normally creates an `arm64` image, which should not be used as the production image on the Intel VM. No Compose or application change is required when the image is built directly on GCP.
+
 Install Docker and Git:
 
 ```bash
