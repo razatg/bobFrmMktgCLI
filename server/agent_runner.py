@@ -52,8 +52,12 @@ class AgentRunner:
                 resolved = str(Path(root).expanduser().resolve())
                 if resolved not in add_dirs:
                     add_dirs.append(resolved)
-        for root in add_dirs:
-            args += ['--add-dir', root]
+        # `exec resume` does not accept --add-dir; a resumed session reuses
+        # the permissions captured when the session was created. New hosted
+        # sessions need the application root so symlinked `.agents` loads.
+        if not session_id:
+            for root in add_dirs:
+                args += ['--add-dir', root]
         if policy.model: args += ['--model', policy.model]
         if session_id: args.append(session_id)
         args.append(prompt)

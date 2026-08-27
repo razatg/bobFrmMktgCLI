@@ -225,6 +225,107 @@ GOOGLE_OAUTH_REDIRECT_URI=https://bob.example.com/api/google-ads/oauth/callback
 
 Register the same HTTPS callback URL in Google Cloud Console, allow ports 80 and 443, and restart Bob with `docker-compose up -d`.
 
+### Temporary HTTPS with nip.io
+
+Before buying a domain, a static public IP can be used with `nip.io`. For example, if the VM's
+static IP is `136.64.108.221`, the temporary hostname is:
+
+```text
+136.64.108.221.nip.io
+```
+
+`nip.io` resolves this hostname to the embedded IP address. It is suitable for MVP testing only;
+use a real domain before production.
+
+1. In GCP, create or confirm an ingress firewall rule for TCP ports `80` and `443`. The rule should
+   target the VM's network tag, such as `bob-web`.
+2. Install Caddy on the VM:
+
+```bash
+sudo apt update
+sudo apt install -y caddy
+```
+
+3. Configure the reverse proxy:
+
+```bash
+sudo nano /etc/caddy/Caddyfile
+```
+
+Use:
+
+```text
+136.64.108.221.nip.io {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+Replace the IP if the VM has a different static IP. Save with `Ctrl+O`, press Enter, then exit
+with `Ctrl+X`. Start and reload Caddy:
+
+```bash
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy
+sudo systemctl status caddy
+```
+
+Caddy obtains and renews the HTTPS certificate automatically. Update Bob's server-only `.env`:
+
+```env
+BOB_PUBLIC_BASE_URL=https://136.64.108.221.nip.io
+GOOGLE_OAUTH_REDIRECT_URI=https://136.64.108.221.nip.io/api/google-ads/oauth/callback
+```
+
+Restart Bob:
+
+```bash
+cd ~/bobFrmMktgCLI
+docker-compose up -d
+```
+
+Register this exact URI in the Google Cloud OAuth client:
+
+```text
+https://136.64.108.221.nip.io/api/google-ads/oauth/callback
+```
+
+Open Bob at `https://136.64.108.221.nip.io`. A public IP over plain HTTP is only for testing Bob
+itself; Google OAuth for the hosted application should use the HTTPS hostname.
+
+## Updating Bob on the VM
+
+Run updates from the repository directory:
+
+```bash
+cd ~/bobFrmMktgCLI
+git pull origin main
+docker-compose build --no-cache
+docker-compose up -d
+docker-compose ps
+```
+
+What these commands do:
+
+- `git pull origin main` downloads the latest committed code and documentation from GitHub.
+- `docker-compose build --no-cache` rebuilds the image from the new source and reinstalls image
+  dependencies, such as `bubblewrap`. `--no-cache` ensures an old image layer is not reused when a
+  dependency or Dockerfile changes.
+- `docker-compose up -d` starts the updated container in the background. Docker volumes are not
+  deleted, so client data, metadata, secrets, and Codex sessions remain intact.
+- `docker-compose ps` confirms whether the container is running.
+
+After an update, verify the image and application:
+
+```bash
+docker-compose exec web which bwrap
+curl http://127.0.0.1:8000/api/health
+docker-compose logs --tail=100 web
+```
+
+For a routine code-only update, `docker-compose build` is usually sufficient; use
+`--no-cache` after Dockerfile, Python dependency, Codex, or system-package changes. Never run
+`docker-compose down -v` during an update because `-v` deletes the named data volumes.
+
 ## Complete deployment steps
 
 ### 1. Create the server
