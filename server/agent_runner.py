@@ -34,6 +34,51 @@ class AgentRunner:
         if self._debug_enabled():
             logger.warning(message, *args)
 
+    @staticmethod
+    async def _read_jsonl(stream, max_output_bytes, emit, session_id=None):
+        """Read Codex JSONL without asyncio's default 64 KiB line limit."""
+        output = 0
+        pending = bytearray()
+        thread_id = session_id
+        final = ''
+
+        async def handle(raw):
+            nonlocal thread_id, final
+            line = raw.decode(errors='replace').strip()
+            if not line:
+                return
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                event = {'type':'stdout','text':line}
+            if event.get('type') == 'thread.started':
+                thread_id = event.get('thread_id', thread_id)
+            item = event.get('item') or {}
+            if event.get('type') in {'assistant.final','result','final'}:
+                final = event.get('text') or event.get('message') or event.get('result') or final
+            elif event.get('type') == 'item.completed' and item.get('type') == 'agent_message':
+                final = item.get('text') or final
+            await emit(event)
+
+        while True:
+            chunk = await stream.read(64 * 1024)
+            if not chunk:
+                break
+            output += len(chunk)
+            if output > max_output_bytes:
+                raise RuntimeError('agent output limit exceeded')
+            pending.extend(chunk)
+            while True:
+                newline = pending.find(b'\n')
+                if newline < 0:
+                    break
+                raw = bytes(pending[:newline])
+                del pending[:newline + 1]
+                await handle(raw)
+        if pending:
+            await handle(bytes(pending))
+        return thread_id, final
+
     async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
         if backend != 'codex': raise ValueError('only the Codex backend is enabled in Phase 1')
         runtime = os.getenv('BOB_RUNTIME', 'hosted').strip().lower()
@@ -90,24 +135,9 @@ class AgentRunner:
         started = time.monotonic()
         self._debug('codex start runtime=%s session=%s cwd=%s args=%r', runtime, bool(session_id), workspace, args[:-1])
         proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(workspace), env=environment)
-        output = 0; thread_id = session_id; final = ''
+        thread_id = session_id; final = ''
         async def read():
-            nonlocal output, thread_id, final
-            async for raw in proc.stdout:
-                output += len(raw)
-                if output > policy.max_output_bytes: proc.kill(); raise RuntimeError('agent output limit exceeded')
-                line = raw.decode(errors='replace').strip()
-                if not line: continue
-                try: event = json.loads(line)
-                except json.JSONDecodeError: event = {'type':'stdout','text':line}
-                if event.get('type') == 'thread.started': thread_id = event.get('thread_id', thread_id)
-                item = event.get('item') or {}
-                if event.get('type') in {'assistant.final','result','final'}:
-                    final = event.get('text') or event.get('message') or event.get('result') or final
-                elif event.get('type') == 'item.completed' and item.get('type') == 'agent_message':
-                    final = item.get('text') or final
-                await emit(event)
-            return final
+            return await self._read_jsonl(proc.stdout, policy.max_output_bytes, emit, session_id)
         task = None
         try:
             task = asyncio.create_task(read())
@@ -120,7 +150,7 @@ class AgentRunner:
                     proc.kill()
                     raise asyncio.TimeoutError
                 await asyncio.sleep(.05)
-            final = await task
+            thread_id, final = await task
             remaining = max(0.1, deadline - asyncio.get_running_loop().time())
             await asyncio.wait_for(proc.wait(), remaining)
         except asyncio.TimeoutError:
