@@ -43,6 +43,8 @@ class RepositoryHygieneTests(unittest.TestCase):
         )
         matches = []
         for relative in tracked:
+            if relative == "tests/test_repo_hygiene.py":
+                continue
             path = ROOT / relative
             try:
                 text = path.read_text()

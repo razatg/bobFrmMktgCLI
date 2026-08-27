@@ -13,6 +13,10 @@ class ExecutionPolicy:
 
 class AgentRunner:
     def __init__(self, executable=None): self.executable = executable or shutil.which('codex') or 'codex'
+    @staticmethod
+    def _hosted_sandbox_available():
+        return bool(shutil.which('bwrap'))
+
     async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
         if backend != 'codex': raise ValueError('only the Codex backend is enabled in Phase 1')
         runtime = os.getenv('BOB_RUNTIME', 'hosted').strip().lower()
@@ -32,6 +36,8 @@ class AgentRunner:
             args += ['--dangerously-bypass-approvals-and-sandbox']
         elif not session_id:
             # Hosted Linux uses Codex's normal inner sandbox.
+            if not self._hosted_sandbox_available():
+                raise RuntimeError('Hosted Codex sandbox is unavailable: bubblewrap (bwrap) is not installed in the container')
             args += ['--sandbox', 'workspace-write']
         if not session_id: args += ['--cd', str(workspace)]
         args += ['--json', '--skip-git-repo-check']

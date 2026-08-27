@@ -2,7 +2,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 ARG CODEX_VERSION=0.147.0
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
+    && apt-get install -y --no-install-recommends bubblewrap nodejs npm \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && rm -rf /var/lib/apt/lists/* /root/.npm \
     && useradd --create-home --uid 10001 bob \

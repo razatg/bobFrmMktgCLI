@@ -20,6 +20,9 @@ Start with a VPS or Compute Engine VM rather than Cloud Run. Bob currently needs
 
 The repository already contains the image and Compose setup in [Dockerfile](../Dockerfile) and [docker-compose.yml](../docker-compose.yml).
 
+The image installs `bubblewrap` (`bwrap`) for Codex's hosted Linux sandbox. Desktop mode uses the
+Docker boundary with Codex's sandbox bypass; hosted mode must retain Codex `workspace-write`.
+
 ## First deployment
 
 Provision an Ubuntu VM, install Docker and Git, then run:
@@ -32,6 +35,195 @@ docker compose up -d
 ```
 
 The initial site will be available at `http://SERVER_IP:8000`. Point the production DNS record at the server and put Caddy or Nginx in front of Bob for HTTPS.
+
+## GCP quick-start guide (Debian VM)
+
+This is the tested MVP path for a GCP Compute Engine VM using a temporary HTTP address. HTTPS and a domain can be added later.
+
+### 1. Create and connect to the VM
+
+Use an x86-64 VM with at least 2 vCPUs, 4 GB RAM, 40 GB disk, and a public IPv4 address. Debian is fine; Ubuntu is not required. Add your Mac's public SSH key (`~/.ssh/id_ed25519.pub`) to the VM if using direct SSH. Never paste the private key (`~/.ssh/id_ed25519`).
+
+The simplest first connection is the **SSH** button beside the VM in the GCP console. From a local terminal, direct SSH uses:
+
+```bash
+ssh YOUR_GCP_USERNAME@YOUR_EXTERNAL_IP
+```
+
+### 2. Install Git and Docker on Debian
+
+```bash
+sudo apt update
+sudo apt install -y git docker.io docker-compose
+sudo systemctl enable --now docker
+docker --version
+docker-compose --version
+```
+
+Debian may provide the standalone `docker-compose` command rather than the newer `docker compose` plugin. Use the hyphenated command consistently on that VM.
+
+### 3. Reserve a static IP
+
+In GCP, open **VPC network → IP addresses**, find the VM's ephemeral external IP, and choose **Promote to static IP**. Keep the static IP attached to the running VM. This avoids the address changing after a stop/start.
+
+### 4. Allow Bob's test port
+
+Add a network tag such as `bob-web` to the VM. Then create a VPC firewall rule:
+
+```text
+Name: allow-bob-8000
+Network: default
+Direction: Ingress
+Action: Allow
+Target tags: bob-web
+Source IPv4 ranges: 0.0.0.0/0
+Protocols and ports: TCP 8000
+```
+
+Port 8000 is for temporary MVP testing only. Production should expose HTTPS on ports 80 and 443 through Caddy or Nginx.
+
+### 5. Clone Bob and create the server environment
+
+```bash
+git clone <repository-url>
+cd bobFrmMktgCLI
+nano .env
+```
+
+For the current static-IP test, use:
+
+```env
+ADMIN_IDENTIFIER=superadmin
+ADMIN_PASSWORD=<strong-admin-password>
+ADMIN_CLIENT_NAME=FRM MKTG
+BOB_ENVIRONMENT=production
+BOB_RUNTIME=hosted
+BOB_PUBLIC_BASE_URL=http://YOUR_STATIC_IP:8000
+GOOGLE_OAUTH_REDIRECT_URI=http://YOUR_STATIC_IP:8000/api/google-ads/oauth/callback
+BOB_CODEX_MODEL=gpt-5.6-luna
+```
+
+Replace `YOUR_STATIC_IP` and `<strong-admin-password>`. Save the file, then protect it:
+
+```bash
+chmod 600 .env
+```
+
+Never commit this file. Google Ads developer tokens and OAuth secrets are entered through the Admin UI and stored in the protected Docker volumes.
+
+### 6. Build and start Bob
+
+```bash
+docker-compose build
+docker-compose up -d
+docker-compose ps
+curl http://127.0.0.1:8000/api/health
+```
+
+The health response should be:
+
+```json
+{"status":"ok"}
+```
+
+Open `http://YOUR_STATIC_IP:8000` in a browser.
+
+### 7. Authenticate Codex inside the container
+
+Codex must be logged in inside Bob's container, not only on the VM host. Because a GCP VM is headless, use device authentication:
+
+```bash
+docker-compose exec web codex login --device-auth
+docker-compose exec web codex login status
+docker-compose exec web codex --version
+```
+
+The command displays a URL and a short code. Open the URL on your local computer, enter the code, and complete authentication. No localhost callback tunnel is required.
+
+Test the same execution path Bob uses:
+
+```bash
+docker-compose exec web codex exec \
+  --sandbox workspace-write \
+  --skip-git-repo-check \
+  "Reply with the word READY"
+```
+
+Codex credentials and sessions are stored in the persistent `codex-data` volume mounted at `/data/codex`.
+
+To change the Codex account later:
+
+```bash
+docker-compose exec web codex logout
+docker-compose exec web codex login --device-auth
+docker-compose exec web codex login status
+```
+
+This changes Codex authentication only; it does not remove Bob's client data, conversations, or wiki.
+
+### 8. Troubleshoot secret-volume permissions
+
+If the Admin UI shows **Internal Server Error** and the container log contains:
+
+```text
+PermissionError: [Errno 13] Permission denied: '/data/secrets/...'
+```
+
+the secret files are present but are owned by a different Linux user. Bob intentionally runs as the
+unprivileged `bob` user, so it cannot read files owned by `root` or another user. Repair ownership
+and permissions from the repository directory:
+
+```bash
+cd ~/bobFrmMktgCLI
+docker-compose exec -u root web chown -R bob:bob /data/secrets
+docker-compose exec -u root web chmod 700 /data/secrets
+docker-compose exec -u root web sh -c "find /data/secrets -type f -exec chmod 600 {} +"
+docker-compose restart web
+```
+
+These commands do not print, replace, or delete credentials. They make the directory accessible only
+to Bob and each secret file readable/writable only by Bob. Verify the result with:
+
+```bash
+docker-compose exec web ls -la /data/secrets
+```
+
+Files should be owned by `bob` and have permissions similar to `-rw-------`. After the restart,
+retry **TEST APPLICATION** in the Admin UI. If the `find` command is mangled by terminal quoting,
+the simpler fallback is:
+
+```bash
+docker-compose exec -u root web sh -c "chmod 600 /data/secrets/*"
+docker-compose restart web
+```
+
+### 9. Test the MVP flow
+
+1. Sign in as `superadmin`.
+2. Confirm the client, MCC, Google Ads accounts, users, and account permissions.
+3. Sign out and sign in as a client user.
+4. Ask `Which account am I on?`.
+5. Ask `What happened last week?`.
+6. Switch the account dropdown and repeat the question.
+7. Confirm a user with `NONE` permission is blocked before Codex runs.
+8. Ask `Set me up` and complete the Google authorization flow.
+
+Keep the application logs visible while testing:
+
+```bash
+docker-compose logs -f web
+```
+
+### 10. Later: domain and HTTPS
+
+After the IP-based MVP test works, point an `A` record at the static IP and use Caddy or Nginx for HTTPS. Then update `.env`:
+
+```env
+BOB_PUBLIC_BASE_URL=https://bob.example.com
+GOOGLE_OAUTH_REDIRECT_URI=https://bob.example.com/api/google-ads/oauth/callback
+```
+
+Register the same HTTPS callback URL in Google Cloud Console, allow ports 80 and 443, and restart Bob with `docker-compose up -d`.
 
 ## Complete deployment steps
 
@@ -213,6 +405,26 @@ For the MVP, `/data/secrets` is protected at the application and container-files
 This is not the same as encryption at rest. A host administrator, Docker daemon administrator, or anyone who obtains the volume backup can still read the secrets. For production hardening, use GCP Secret Manager on GCP, or Vault/Docker secrets backed by a protected host secret store on Hetzner. Keep Codex authentication in its protected persistent `CODEX_HOME` volume because the CLI expects local files.
 
 Back up `/data/client`, `/data/metadata`, `/data/secrets`, and `/data/codex` using encrypted backups.
+
+## Deployment backlog: Google identity confirmation
+
+Bob login identity and Google OAuth identity are separate. For example, a Bob user signed in as
+`x@x.com` may complete Google Ads authorization using `y@x.com`, provided that the Google account
+has access to the relevant MCC or accounts and the OAuth application permits it. The resulting
+credential is stored against the Bob user who initiated the flow, not matched solely by email.
+
+Before production rollout, display and record both identities after the OAuth callback:
+
+```text
+Bob user: x@x.com
+Google account authorized: y@x.com
+Google Ads accounts granted: <account list>
+```
+
+The implementation must treat OAuth `state` only as a flow-correlation value. It must not use the
+email in `state` as proof of the Google identity. Add an Admin UI confirmation and audit trail for
+the Google account returned by Google, so an administrator can detect an unintended account being
+connected.
 
 ## Updating Bob
 
