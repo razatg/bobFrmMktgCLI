@@ -152,6 +152,32 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(revoke.status_code,200,revoke.text)
         self.assertIsNone(s.one('SELECT 1 FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id)))
 
+    def test_conversation_runtime_materializes_image_files_without_code_symlinks(self):
+        from server import app as app_module
+
+        runtime_root = Path(self.workspace)
+        workspace = runtime_root / 'runtime' / 'conversations' / 'sandbox-safe' / 'workspace'
+        (workspace / 'garf').mkdir(parents=True, exist_ok=True)
+        # Reproduce the layout created by earlier releases so upgrades also
+        # prove that stale writable-to-read-only symlinks are replaced.
+        (workspace / '.agents').symlink_to(app_module.ROOT / '.agents', target_is_directory=True)
+        (workspace / 'bob').symlink_to(app_module.ROOT / 'bob')
+        (workspace / 'garf' / 'queries').symlink_to(app_module.ROOT / 'garf' / 'queries', target_is_directory=True)
+
+        with patch.object(app_module, 'STATE_ROOT', runtime_root):
+            prepared, state_root = app_module.prepare_conversation_runtime('sandbox-safe')
+
+        self.assertEqual(prepared, workspace)
+        self.assertFalse((prepared / '.agents').is_symlink())
+        self.assertTrue((prepared / '.agents' / 'skills').is_dir())
+        self.assertFalse((prepared / 'AGENTS.md').is_symlink())
+        self.assertFalse((prepared / 'garf' / 'queries').is_symlink())
+        self.assertFalse((prepared / 'bob').is_symlink())
+        self.assertTrue(os.access(prepared / 'bob', os.X_OK))
+        self.assertIn(str(app_module.ROOT / 'bob'), (prepared / 'bob').read_text())
+        self.assertTrue((prepared / '.bob').is_symlink())
+        self.assertEqual((prepared / '.bob').resolve(), (state_root / '.bob').resolve())
+
     def test_set_me_up_is_a_chat_response_with_google_url(self):
         admin_csrf=self.bootstrap()
         self.client.post('/api/admin/google-ads/config',headers={'X-CSRF-Token':admin_csrf},json={
@@ -309,19 +335,19 @@ class GatewayTests(unittest.TestCase):
         detail=self.client.get(f'/api/admin/clients/{client_id}',headers={'X-CSRF-Token':admin_csrf}).json()
         owner_id=next(u['id'] for u in detail['users'] if u['email_or_identifier']=='owner@alpha.com')
         analyst_id=next(u['id'] for u in detail['users'] if u['email_or_identifier']=='analyst@alpha.com')
-        demand_id=next(a['id'] for a in detail['accounts'] if a['account_name']=='Alpha Demand')
-        brand_id=next(a['id'] for a in detail['accounts'] if a['account_name']=='Alpha Brand')
+        demand_id=next(a['id'] for a in detail['accounts'] if a['account_name']=='Demo Demand')
+        brand_id=next(a['id'] for a in detail['accounts'] if a['account_name']=='Demo Brand')
         self.client.post(f'/api/admin/users/{owner_id}/accounts/{brand_id}/revoke',headers={'X-CSRF-Token':admin_csrf})
         self.client.post(f'/api/admin/users/{analyst_id}/accounts/{brand_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read'})
         owner=self.client.post('/auth/login',json={'identifier':'owner@alpha.com','password':'alpha-owner-password'})
         owner_csrf=owner.json()['csrf']
         owner_accounts=self.client.get('/api/accounts').json()
-        self.assertEqual([a['account_name'] for a in owner_accounts],['Alpha Demand'])
+        self.assertEqual([a['account_name'] for a in owner_accounts],['Demo Demand'])
         self.client.post('/auth/logout',headers={'X-CSRF-Token':owner_csrf})
         analyst_login=self.client.post('/auth/login',json={'identifier':'analyst@alpha.com','password':'analyst-password-123'})
         analyst_csrf=analyst_login.json()['csrf']
         analyst_accounts=self.client.get('/api/accounts').json()
-        self.assertEqual([a['account_name'] for a in analyst_accounts],['Alpha Brand'])
+        self.assertEqual([a['account_name'] for a in analyst_accounts],['Demo Brand'])
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':analyst_csrf}).json()
         self.assertEqual(conversation['account_id'],brand_id)
         blocked=self.client.post(f"/api/conversations/{conversation['id']}/account",headers={'X-CSRF-Token':analyst_csrf},json={'account_id':demand_id})

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, base64, hashlib, json, os, secrets
+import asyncio, base64, hashlib, json, os, secrets, shlex, shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -197,6 +197,19 @@ def _safe_link(link_path: Path, target_path: Path):
     elif link_path.exists():
         return
     link_path.symlink_to(target_path, target_is_directory=target_path.is_dir())
+
+def _replace_runtime_copy(destination: Path, source: Path):
+    """Materialize image-owned files without crossing a writable symlink boundary."""
+    if destination.is_symlink() or destination.is_file():
+        destination.unlink()
+    elif destination.is_dir():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        shutil.copytree(source, destination)
+    else:
+        shutil.copy2(source, destination)
+
 def prepare_conversation_runtime(workspace_id: str):
     conv_root = STATE_ROOT / 'runtime' / 'conversations' / workspace_id
     workspace = conv_root / 'workspace'
@@ -210,17 +223,41 @@ def prepare_conversation_runtime(workspace_id: str):
     (state_root / '.bob').mkdir(parents=True, exist_ok=True)
     for name in ('.bob', 'data', 'wiki', 'logs', 'validation'):
         _safe_link(workspace / name, state_root / name)
-    for name in ('AGENTS.md', 'CLAUDE.md', 'SOUL.md', 'bob', 'pyproject.toml'):
+
+    # Codex's Linux sandbox treats agent instructions as read-only. A symlink
+    # from the writable workspace to /app/.agents makes bubblewrap reject the
+    # whole command before any tool can run. Refresh small, disposable runtime
+    # snapshots instead; authoritative code remains image-owned under ROOT.
+    for name in ('AGENTS.md', 'CLAUDE.md', 'SOUL.md', 'pyproject.toml'):
         target = ROOT / name
         if target.exists():
-            _safe_link(workspace / name, target)
-    for name in ('.agents', 'bin', 'lib'):
-        target = ROOT / name
-        if target.exists():
-            _safe_link(workspace / name, target)
+            _replace_runtime_copy(workspace / name, target)
+    agents_source = ROOT / '.agents'
+    if agents_source.exists():
+        _replace_runtime_copy(workspace / '.agents', agents_source)
+
+    # Do not expose image-owned bin/lib trees through writable symlinks. The
+    # local wrapper executes the image launcher, which resolves /app/.venv and
+    # the canonical source tree itself.
+    for name in ('bin', 'lib'):
+        stale = workspace / name
+        if stale.is_symlink() or stale.is_file():
+            stale.unlink()
+        elif stale.is_dir():
+            shutil.rmtree(stale)
+    bob_launcher = ROOT / 'bob'
+    if bob_launcher.exists():
+        local_bob = workspace / 'bob'
+        if local_bob.is_symlink() or local_bob.exists():
+            local_bob.unlink()
+        local_bob.write_text(f'#!/bin/sh\nexec {shlex.quote(str(bob_launcher))} "$@"\n')
+        local_bob.chmod(0o755)
+
     garf_workspace = workspace / 'garf'
     garf_workspace.mkdir(parents=True, exist_ok=True)
-    _safe_link(garf_workspace / 'queries', ROOT / 'garf' / 'queries')
+    queries_source = ROOT / 'garf' / 'queries'
+    if queries_source.exists():
+        _replace_runtime_copy(garf_workspace / 'queries', queries_source)
     _safe_link(garf_workspace / 'outputs', state_root / 'garf' / 'outputs')
     return workspace, state_root
 def runtime_google_config(store, user_id, client_instance_id, state_root: Path, account_id=None):

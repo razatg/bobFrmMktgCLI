@@ -41,11 +41,12 @@ departed from local development in several concrete ways:
 The key lesson is to test the artifact built from a **fresh Git clone**, because gitignored generated
 files can make a developer checkout appear complete while the production image is incomplete. Bob's
 Dockerfile now generates `/app/bob` during the image build, and the entrypoint refuses to start if
-that launcher is missing. Conversation workspaces link image-owned `.agents`, `bin`, `lib`, and
-`bob` from `/app` while keeping client state in `/data/client`. The launcher resolves symlinks before
-choosing its project root; otherwise invoking `workspace/bob -> /app/bob` incorrectly treats the
-conversation directory as the project, creates a duplicate `.venv` there, and reaches uv cache paths
-outside the hosted sandbox. The resolved launcher reuses the image-built `/app/.venv`.
+that launcher is missing. Conversation workspaces now materialize small disposable snapshots of
+image-owned instructions, `.agents`, and GARF query templates. They use a real local `./bob` wrapper
+that executes `/app/bob`, while client state remains linked within `/data/client`. Linking `.agents`
+from a writable workspace to read-only `/app/.agents` is not safe: Bubblewrap refuses to construct
+the sandbox because the protected instruction path crosses a writable symlink. The launcher itself
+resolves to `/app`, reuses `/app/.venv`, and never creates a per-conversation virtual environment.
 
 For reliable parity, all of these must match:
 
@@ -68,10 +69,10 @@ boundaries and authentication flows.
 | Concern | Local desktop | Hosted VM | Required solution/status |
 | --- | --- | --- | --- |
 | Source | Developer checkout may contain generated/ignored files | Fresh Git clone contains tracked files only | Docker build generates every required runtime artifact, including `/app/bob` — fixed |
-| Bob launcher | Usually invoked as a real file from the repo root | Invoked through a conversation-workspace symlink to `/app/bob` | Launcher resolves symlinks and uses `/app` as project root — fixed |
+| Bob launcher | Usually invoked as a real file from the repo root | Real workspace wrapper executes image-owned `/app/bob` | Launcher resolves to `/app` and reuses the image environment — fixed |
 | Python environment | Local project `.venv` | Image-built `/app/.venv` | Hosted launcher must reuse `/app/.venv`; no per-conversation environments — fixed, verify on VM |
 | Codex sandbox | Desktop mode may use Docker as the outer boundary and bypass nested sandboxing | Hosted mode uses Codex `workspace-write` with `bubblewrap` | Runtime switch and `bwrap` installation — fixed, verify command execution on VM |
-| Skills/code | Read from local checkout | Image-owned under `/app`, linked into each conversation workspace | New sessions allow `/app`; resumed sessions reuse original permissions — fixed |
+| Skills/code | Read from local checkout | Image-owned under `/app`; small runtime snapshots are copied into each writable conversation workspace | Avoids Bubblewrap's writable-symlink rejection while preserving image ownership — fixed |
 | Shell environment | Local shell naturally sees developer environment | Codex filters custom variables before running tools | Runner explicitly passes only Bob state/config paths through `shell_environment_policy.set` — fixed |
 | Client state | Local `data/` paths | Named volumes under `/data/*` | All code must use configured state roots; volume ownership must permit user `bob` — fixed, existing volumes may need one repair |
 | Codex state | Local Codex home | Persistent `codex-data` volume at `/data/codex` | Use device auth on headless VM; rebuilds retain login — fixed |
@@ -520,8 +521,10 @@ Permanent, required fixes:
 - pass `BOB_STATE_ROOT`, shared-state root, client scope, and the per-user Google Ads config path to
   Codex shell commands through an explicit allowlist; never inherit the full container environment;
 - generate `/app/bob` during Docker build and fail startup if it is missing;
-- resolve the workspace `bob` symlink back to `/app` so jobs reuse `/app/.venv` instead of creating
-  one virtual environment per conversation;
+- execute image-owned `/app/bob` through a real workspace wrapper so jobs reuse `/app/.venv`
+  instead of creating one virtual environment per conversation;
+- materialize disposable conversation copies of `.agents`, instruction files, and GARF query
+  templates instead of symlinking them across the writable workspace/read-only image boundary;
 - run Bob as the unprivileged `bob` user and keep named-volume ownership compatible with that user;
 - use Codex `--device-auth` on a headless VM;
 - use HTTPS for the hosted Google OAuth callback;
