@@ -10,8 +10,10 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_container_build_generates_bob_launcher(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text()
+        datapull = (ROOT / "lib" / "datapull.py").read_text()
         self.assertIn("_write_bob_launcher", dockerfile)
         self.assertIn('if [ ! -x "$APP_ROOT/bob" ]', entrypoint)
+        self.assertIn('while [ -h "$SOURCE" ]', datapull)
 
     def test_local_runtime_paths_are_ignored(self):
         ignored = (ROOT / ".gitignore").read_text()

@@ -23,6 +23,42 @@ The repository already contains the image and Compose setup in [Dockerfile](../D
 The image installs `bubblewrap` (`bwrap`) for Codex's hosted Linux sandbox. Desktop mode uses the
 Docker boundary with Codex's sandbox bypass; hosted mode must retain Codex `workspace-write`.
 
+## Docker parity retrospective
+
+Docker makes the image reproducible; it does not make two deployments identical when the image,
+environment, volumes, session history, or host architecture differ. The first hosted rollout
+departed from local development in several concrete ways:
+
+| Area | Local development | Fresh GCP deployment | Result |
+| --- | --- | --- | --- |
+| Source tree | Included the generated, gitignored `./bob` launcher | Fresh clone did not contain `./bob` | Codex could load `.agents` but could not run Bob's CLI |
+| Runtime policy | `BOB_RUNTIME=desktop` bypassed Codex's nested Linux sandbox | `BOB_RUNTIME=hosted` used `workspace-write` | Hosted mode exposed path and sandbox assumptions hidden locally |
+| State | Existing local files and permissions | New Docker named volumes | Secret-volume ownership initially blocked the unprivileged `bob` user |
+| Sessions | Local/new Codex sessions | Persisted sessions created before runner fixes | `exec resume` retained stale session capabilities and context |
+| Build state | Existing development image/cache | Repeated `--no-cache` VM builds | Old layers consumed the small VM disk until Docker cache was pruned |
+| Networking | Localhost browser callbacks | Headless VM and public OAuth callback | Codex needed device auth; Google OAuth needed an HTTPS hostname |
+
+The key lesson is to test the artifact built from a **fresh Git clone**, because gitignored generated
+files can make a developer checkout appear complete while the production image is incomplete. Bob's
+Dockerfile now generates `/app/bob` during the image build, and the entrypoint refuses to start if
+that launcher is missing. Conversation workspaces link image-owned `.agents`, `bin`, `lib`, and
+`bob` from `/app` while keeping client state in `/data/client`. The launcher resolves symlinks before
+choosing its project root; otherwise invoking `workspace/bob -> /app/bob` incorrectly treats the
+conversation directory as the project, creates a duplicate `.venv` there, and reaches uv cache paths
+outside the hosted sandbox. The resolved launcher reuses the image-built `/app/.venv`.
+
+For reliable parity, all of these must match:
+
+```text
+same Git commit
++ image rebuilt from that commit
++ same required environment variables
++ expected named-volume ownership and contents
++ compatible CPU architecture
++ fresh or compatible Codex session state
+= comparable local and VM behaviour
+```
+
 ## First deployment
 
 Provision an Ubuntu VM, install Docker and Git, then run:
@@ -325,6 +361,127 @@ docker-compose logs --tail=100 web
 For a routine code-only update, `docker-compose build` is usually sufficient; use
 `--no-cache` after Dockerfile, Python dependency, Codex, or system-package changes. Never run
 `docker-compose down -v` during an update because `-v` deletes the named data volumes.
+
+### Verify the hosted runtime after an image update
+
+Run these checks before browser testing:
+
+```bash
+docker-compose exec web ls -l /app/bob
+docker-compose exec web /app/bob
+docker-compose exec web which bwrap
+docker-compose exec web codex login status
+curl http://127.0.0.1:8000/api/health
+```
+
+`/app/bob` must exist and be executable. The conversation runtime creates `./bob` as a symlink to
+this image-owned launcher; if `/app/bob` is absent, performance questions can still receive a model
+response but no verified CLI data can be fetched.
+
+### Controlled Codex diagnostics
+
+Codex process diagnostics are disabled by default:
+
+```env
+BOB_DEBUG_LOGGING=false
+```
+
+To investigate a hosted job, edit the VM's `.env` and temporarily set:
+
+```env
+BOB_DEBUG_LOGGING=true
+```
+
+Recreate the container so Compose passes the changed environment:
+
+```bash
+docker-compose up -d --force-recreate
+docker-compose exec web printenv BOB_DEBUG_LOGGING
+docker-compose logs -f web
+```
+
+The log records the runtime, new-versus-resumed session, working directory, safe Codex arguments,
+exit code, duration, and stderr on process failure. It deliberately excludes the user prompt and
+does not print developer tokens, OAuth secrets, refresh tokens, passwords, or authorization URLs.
+
+Typical lines are:
+
+```text
+codex start runtime=hosted session=False cwd=... args=[...]
+codex completed exit=0 duration=... session=...
+codex failed exit=... duration=... stderr=...
+```
+
+Turn diagnostics off after the issue is resolved:
+
+```env
+BOB_DEBUG_LOGGING=false
+```
+
+Then recreate the container again with `docker-compose up -d --force-recreate`.
+
+### New and resumed Codex sessions
+
+A new hosted session receives `--sandbox workspace-write` and the required `--add-dir` paths. Codex
+`exec resume` does not accept `--add-dir`; it reuses the permissions captured when the session was
+created. After changing sandbox paths or runner capabilities, old sessions may therefore need to be
+invalidated once. This preserves users, messages, wiki, credentials, and client data:
+
+```bash
+docker-compose exec web python -c 'import sqlite3;x=sqlite3.connect("/data/metadata/metadata.sqlite3");x.execute("UPDATE conversations SET agent_session_id=NULL");x.commit();print("sessions cleared")'
+```
+
+Use this only after a runner/sandbox migration, not as routine maintenance. The next request creates
+a fresh native Codex session; later requests resume it normally.
+
+### Disk space after repeated builds
+
+Repeated `docker-compose build --no-cache` runs retain old layers and can fill a small VM disk. Check:
+
+```bash
+df -h
+docker system df
+```
+
+Remove unused images and build cache without deleting named volumes:
+
+```bash
+docker system prune -af
+docker builder prune -af
+```
+
+Never add `--volumes`, and never use `docker-compose down -v`, because Bob's persistent client data,
+metadata, secrets, and Codex state live in named volumes.
+
+### Which rollout steps were permanent versus temporary
+
+Permanent, required fixes:
+
+- install `bubblewrap` in the hosted image for Codex's Linux sandbox;
+- allow the image-owned application root when creating a new hosted Codex session;
+- generate `/app/bob` during Docker build and fail startup if it is missing;
+- resolve the workspace `bob` symlink back to `/app` so jobs reuse `/app/.venv` instead of creating
+  one virtual environment per conversation;
+- run Bob as the unprivileged `bob` user and keep named-volume ownership compatible with that user;
+- use Codex `--device-auth` on a headless VM;
+- use HTTPS for the hosted Google OAuth callback;
+- retain controlled, redacted job diagnostics for future incidents.
+
+Temporary or one-time recovery actions:
+
+- resetting `agent_session_id` was needed only to discard sessions created before runner fixes;
+- changing ownership of `/data/secrets` repaired an existing volume and should not be a recurring task;
+- pruning Docker build cache repaired disk exhaustion caused by repeated diagnostic rebuilds;
+- `nip.io` is a temporary HTTPS hostname until a real domain is configured.
+
+Redundant or superseded steps:
+
+- the SSH tunnel and port `1455` mapping are unnecessary because Codex supports `--device-auth`;
+- repeatedly refreshing the browser could not repair a persisted native Codex session;
+- repeatedly rebuilding before adding diagnostics obscured the actual failure and consumed disk;
+- broad Docker privileges such as `SYS_ADMIN` or `seccomp:unconfined` were not shown to fix the
+  missing-launcher problem and should not be added unless a reproducible namespace error proves they
+  are required. They weaken the container boundary.
 
 ## Complete deployment steps
 

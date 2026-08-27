@@ -541,7 +541,13 @@ def _write_bob_launcher() -> None:
         "# bob - launcher backed by uv-managed, self-healing Python dependencies.\n"
         "set -e\n"
         "\n"
-        'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'SOURCE="${BASH_SOURCE[0]}"\n'
+        'while [ -h "$SOURCE" ]; do\n'
+        '    SOURCE_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"\n'
+        '    SOURCE_TARGET="$(readlink "$SOURCE")"\n'
+        '    if [[ "$SOURCE_TARGET" = /* ]]; then SOURCE="$SOURCE_TARGET"; else SOURCE="$SOURCE_DIR/$SOURCE_TARGET"; fi\n'
+        'done\n'
+        'DIR="$(cd "$(dirname "$SOURCE")" && pwd)"\n'
         "\n"
         'UV_DIR="$DIR/runtime/uv"\n'
         'UV_BIN="$UV_DIR/uv"\n'
