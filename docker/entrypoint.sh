@@ -4,6 +4,11 @@ set -eu
 APP_ROOT=/app
 STATE_ROOT=${BOB_STATE_ROOT:-/data/client}
 
+if [ ! -x "$APP_ROOT/bob" ]; then
+  echo "Bob CLI launcher is missing from the image: $APP_ROOT/bob" >&2
+  exit 1
+fi
+
 mkdir -p \
   "$STATE_ROOT/.bob" \
   "$STATE_ROOT/data" \

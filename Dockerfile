@@ -12,7 +12,8 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --no-dev --no-install-project
 COPY . .
 COPY docker/entrypoint.sh /usr/local/bin/bob-entrypoint
-RUN mkdir -p /data/client /data/codex /data/metadata \
+RUN .venv/bin/python -c "from lib.datapull import _write_bob_launcher; _write_bob_launcher()" \
+    && mkdir -p /data/client /data/codex /data/metadata \
     && chown -R bob:bob /app /data
 USER bob
 EXPOSE 8000
