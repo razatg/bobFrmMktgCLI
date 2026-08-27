@@ -14,6 +14,13 @@ class ExecutionPolicy:
     environment: dict[str, str] | None = None
 
 class AgentRunner:
+    SHELL_ENV_KEYS = (
+        'BOB_STATE_ROOT',
+        'BOB_SHARED_STATE_ROOT',
+        'BOB_CLIENT_INSTANCE_ID',
+        'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
+    )
+
     def __init__(self, executable=None): self.executable = executable or shutil.which('codex') or 'codex'
     @staticmethod
     def _hosted_sandbox_available():
@@ -49,6 +56,14 @@ class AgentRunner:
             if not self._hosted_sandbox_available():
                 raise RuntimeError('Hosted Codex sandbox is unavailable: bubblewrap (bwrap) is not installed in the container')
             args += ['--sandbox', 'workspace-write']
+        # Codex intentionally filters the environment inherited by shell
+        # commands. Pass only Bob's non-secret state paths and client scope;
+        # never inherit the container environment wholesale because it also
+        # contains admin credentials and deployment secrets.
+        for key in self.SHELL_ENV_KEYS:
+            value = environment.get(key)
+            if value:
+                args += ['-c', f'shell_environment_policy.set.{key}={json.dumps(str(value))}']
         if not session_id: args += ['--cd', str(workspace)]
         args += ['--json', '--skip-git-repo-check']
         # Conversation workspaces contain symlinks to image-owned skills and

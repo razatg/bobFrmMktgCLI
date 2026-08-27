@@ -59,6 +59,64 @@ same Git commit
 = comparable local and VM behaviour
 ```
 
+### Local versus hosted contract
+
+The two environments are intentionally not identical in every detail. They must share the same Bob
+code, skills, CLI behavior, calculations, and account isolation, while using different operating
+boundaries and authentication flows.
+
+| Concern | Local desktop | Hosted VM | Required solution/status |
+| --- | --- | --- | --- |
+| Source | Developer checkout may contain generated/ignored files | Fresh Git clone contains tracked files only | Docker build generates every required runtime artifact, including `/app/bob` — fixed |
+| Bob launcher | Usually invoked as a real file from the repo root | Invoked through a conversation-workspace symlink to `/app/bob` | Launcher resolves symlinks and uses `/app` as project root — fixed |
+| Python environment | Local project `.venv` | Image-built `/app/.venv` | Hosted launcher must reuse `/app/.venv`; no per-conversation environments — fixed, verify on VM |
+| Codex sandbox | Desktop mode may use Docker as the outer boundary and bypass nested sandboxing | Hosted mode uses Codex `workspace-write` with `bubblewrap` | Runtime switch and `bwrap` installation — fixed, verify command execution on VM |
+| Skills/code | Read from local checkout | Image-owned under `/app`, linked into each conversation workspace | New sessions allow `/app`; resumed sessions reuse original permissions — fixed |
+| Shell environment | Local shell naturally sees developer environment | Codex filters custom variables before running tools | Runner explicitly passes only Bob state/config paths through `shell_environment_policy.set` — fixed |
+| Client state | Local `data/` paths | Named volumes under `/data/*` | All code must use configured state roots; volume ownership must permit user `bob` — fixed, existing volumes may need one repair |
+| Codex state | Local Codex home | Persistent `codex-data` volume at `/data/codex` | Use device auth on headless VM; rebuilds retain login — fixed |
+| Conversation context | Local sessions | Persistent native Codex session IDs in metadata | Reset session IDs once after sandbox/runner migrations; normal resume afterward — operational step |
+| Google OAuth | Localhost callback allowed for development | Public HTTPS callback required | `nip.io` + Caddy for MVP, real domain for production — configured operationally |
+| Networking | Localhost | GCP firewall, static IP, reverse proxy | Permit 80/443; close direct 8000 after HTTPS is stable — remaining hardening |
+| Secrets | Local ignored files | Protected secret volume | Keep out of Git; migrate to GCP Secret Manager for stronger production protection — later phase |
+| Logs | Developer terminal | Controlled container diagnostics | `BOB_DEBUG_LOGGING`, redacted and disabled normally — fixed |
+| Disk | Developer machine storage | Small VM boot disk and Docker layers | Monitor `df -h`/`docker system df`; avoid unnecessary `--no-cache` builds — operational requirement |
+
+What must behave identically in both environments:
+
+- the same Git commit and Bob version;
+- the same skill routing and CLI command map;
+- deterministic Google Ads pulls and calculations;
+- per-user conversation context and per-account permissions;
+- wiki and processed-data behavior;
+- no fabricated metrics when a CLI command fails.
+
+What may legitimately differ:
+
+- desktop versus hosted Codex sandbox policy;
+- localhost versus HTTPS OAuth callback;
+- local directories versus Docker named volumes;
+- interactive local login versus headless device authentication;
+- CPU architecture, provided the image is built natively on the target VM or for `linux/amd64`.
+
+Before declaring a VM release ready, test from a fresh clone and a fresh conversation—not from a
+developer checkout or a pre-migration Codex session. The release gate is:
+
+```bash
+git rev-parse HEAD
+docker-compose build
+docker-compose up -d --force-recreate
+docker-compose exec web ls -l /app/bob
+docker-compose exec web /app/bob
+docker-compose exec web which bwrap
+docker-compose exec web codex login status
+curl http://127.0.0.1:8000/api/health
+```
+
+Then verify through the browser that a newly created conversation can answer one account question
+using verified CLI data, resume the same conversation for a follow-up, switch accounts, enforce a
+`NONE` permission, and load the wiki.
+
 ## First deployment
 
 Provision an Ubuntu VM, install Docker and Git, then run:
@@ -459,6 +517,8 @@ Permanent, required fixes:
 
 - install `bubblewrap` in the hosted image for Codex's Linux sandbox;
 - allow the image-owned application root when creating a new hosted Codex session;
+- pass `BOB_STATE_ROOT`, shared-state root, client scope, and the per-user Google Ads config path to
+  Codex shell commands through an explicit allowlist; never inherit the full container environment;
 - generate `/app/bob` during Docker build and fail startup if it is missing;
 - resolve the workspace `bob` symlink back to `/app` so jobs reuse `/app/.venv` instead of creating
   one virtual environment per conversation;

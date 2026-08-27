@@ -15,6 +15,17 @@ class RepositoryHygieneTests(unittest.TestCase):
         self.assertIn('if [ ! -x "$APP_ROOT/bob" ]', entrypoint)
         self.assertIn('while [ -h "$SOURCE" ]', datapull)
 
+    def test_runner_passes_only_bob_runtime_environment_to_codex_shell(self):
+        runner = (ROOT / "server" / "agent_runner.py").read_text()
+        for key in (
+            "BOB_STATE_ROOT",
+            "BOB_SHARED_STATE_ROOT",
+            "BOB_CLIENT_INSTANCE_ID",
+            "BOB_GOOGLE_ADS_RUNTIME_CONFIG",
+        ):
+            self.assertIn(key, runner)
+        self.assertNotIn("shell_environment_policy.inherit=all", runner)
+
     def test_local_runtime_paths_are_ignored(self):
         ignored = (ROOT / ".gitignore").read_text()
         for rule in ("data/", "tmp/", "*.sqlite3"):
