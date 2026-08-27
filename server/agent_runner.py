@@ -1,8 +1,10 @@
 """Process-boundary Codex adapter with cancellation, timeout, and JSONL events."""
 from __future__ import annotations
-import asyncio, json, os, shutil
+import asyncio, json, logging, os, shutil, time
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger('bob.agent_runner')
 
 @dataclass
 class ExecutionPolicy:
@@ -16,6 +18,14 @@ class AgentRunner:
     @staticmethod
     def _hosted_sandbox_available():
         return bool(shutil.which('bwrap'))
+
+    @staticmethod
+    def _debug_enabled():
+        return os.getenv('BOB_DEBUG_LOGGING', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def _debug(self, message, *args):
+        if self._debug_enabled():
+            logger.warning(message, *args)
 
     async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
         if backend != 'codex': raise ValueError('only the Codex backend is enabled in Phase 1')
@@ -62,6 +72,8 @@ class AgentRunner:
         if session_id: args.append(session_id)
         args.append(prompt)
         if not Path(workspace).exists(): Path(workspace).mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        self._debug('codex start runtime=%s session=%s cwd=%s args=%r', runtime, bool(session_id), workspace, args[:-1])
         proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(workspace), env=environment)
         output = 0; thread_id = session_id; final = ''
         async def read():
@@ -105,5 +117,7 @@ class AgentRunner:
                 await asyncio.gather(task, return_exceptions=True)
         if proc.returncode != 0:
             err = (await proc.stderr.read()).decode(errors='replace')[-4000:]
+            self._debug('codex failed exit=%s duration=%.2fs stderr=%s', proc.returncode, time.monotonic() - started, err)
             raise RuntimeError(err or f'agent exited {proc.returncode}')
+        self._debug('codex completed exit=0 duration=%.2fs session=%s', time.monotonic() - started, thread_id)
         return thread_id, final
