@@ -41,16 +41,19 @@ class AgentRunner:
             args += ['--sandbox', 'workspace-write']
         if not session_id: args += ['--cd', str(workspace)]
         args += ['--json', '--skip-git-repo-check']
-        add_dirs = []
+        # Conversation workspaces contain symlinks to image-owned skills and
+        # CLI code under the application root. Hosted Codex must be told that
+        # this root is an allowed sandbox directory, otherwise `.agents` is
+        # rejected when the skill is loaded through the symlink.
+        add_dirs = [str(Path(__file__).resolve().parents[1])]
         for key in ('BOB_STATE_ROOT', 'BOB_SHARED_STATE_ROOT'):
             root = environment.get(key)
             if root:
                 resolved = str(Path(root).expanduser().resolve())
                 if resolved not in add_dirs:
                     add_dirs.append(resolved)
-        if not session_id:
-            for root in add_dirs:
-                args += ['--add-dir', root]
+        for root in add_dirs:
+            args += ['--add-dir', root]
         if policy.model: args += ['--model', policy.model]
         if session_id: args.append(session_id)
         args.append(prompt)
