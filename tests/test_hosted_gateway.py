@@ -178,6 +178,58 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue((prepared / '.bob').is_symlink())
         self.assertEqual((prepared / '.bob').resolve(), (state_root / '.bob').resolve())
 
+    def test_artifacts_include_yaml_and_enforce_account_access(self):
+        admin_csrf = self.bootstrap()
+        store = self.app.state.store
+        client_id = store.one('SELECT id FROM client_instances')['id']
+        demand_id = 'artifact-demand'
+        supply_id = 'artifact-supply'
+        store.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',
+                  (demand_id, client_id, '1112223333', 'Demo Demand', 1, '2026-08-28T00:00:00+00:00'))
+        store.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',
+                  (supply_id, client_id, '9998887777', 'Demo Supply', 1, '2026-08-28T00:00:00+00:00'))
+        invite = self.client.post('/api/admin/invites', headers={'X-CSRF-Token':admin_csrf}, json={}).json()['code']
+        redeemed = self.client.post('/auth/invite/redeem', json={
+            'code': invite, 'identifier': 'artifact-user', 'password': 'artifact-password-123'
+        })
+        member_csrf = redeemed.json()['csrf']
+        user_id = store.one('SELECT id FROM users WHERE email_or_identifier=?', ('artifact-user',))['id']
+        store.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',
+                  (user_id, demand_id, 'read', user_id, '2026-08-28T00:00:00+00:00'))
+
+        from server import app as app_module
+        runtime_root = Path(self.workspace)
+        demand_root = runtime_root / 'wiki' / '1112223333'
+        supply_root = runtime_root / 'wiki' / '9998887777'
+        (demand_root / 'action-items').mkdir(parents=True)
+        supply_root.mkdir(parents=True)
+        (demand_root / 'Index.md').write_text(
+            '# Demo Demand Wiki\n\n[Bid/Budget Plan](action-items/bid-budget.yaml)\n'
+        )
+        (demand_root / 'action-items' / 'bid-budget.yaml').write_text('status: proposed\n')
+        (supply_root / 'secret.md').write_text('# Supply only\n')
+
+        with patch.object(app_module, 'STATE_ROOT', runtime_root):
+            conversation = self.client.post('/api/conversations', headers={'X-CSRF-Token':member_csrf}).json()
+            index = self.client.get('/api/artifacts', params={'conversation_id':conversation['id']})
+            self.assertEqual(index.status_code, 200, index.text)
+            paths = [artifact['path'] for artifact in index.json()]
+            self.assertEqual(paths, [
+                '1112223333/Index.md',
+                '1112223333/action-items/bid-budget.yaml',
+            ])
+            yaml_page = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.yaml')
+            self.assertEqual(yaml_page.status_code, 200, yaml_page.text)
+            self.assertEqual(yaml_page.json()['type'], 'yaml')
+            self.assertIn('status: proposed', yaml_page.json()['content'])
+            download = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.yaml?download=1')
+            self.assertEqual(download.status_code, 200, download.text)
+            self.assertIn('attachment', download.headers['content-disposition'])
+            blocked = self.client.get('/api/artifacts/9998887777/secret.md')
+            self.assertEqual(blocked.status_code, 404, blocked.text)
+            legacy = self.client.get('/api/wiki')
+            self.assertNotIn('9998887777/secret.md', [page['path'] for page in legacy.json()])
+
     def test_set_me_up_is_a_chat_response_with_google_url(self):
         admin_csrf=self.bootstrap()
         self.client.post('/api/admin/google-ads/config',headers={'X-CSRF-Token':admin_csrf},json={
@@ -270,6 +322,10 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("$('#admin').classList.add('active')",js)
         self.assertIn("document.querySelector('aside').hidden=true",js)
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
+        self.assertIn('ARTIFACTS', html)
+        self.assertIn('/api/artifacts', js)
+        self.assertIn('artifact-chat-link', js)
+        self.assertNotIn('loadWiki()', js)
 
     def test_client_edit_accepts_dashed_nine_digit_mcc(self):
         csrf=self.bootstrap()

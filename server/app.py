@@ -775,15 +775,121 @@ def safe_wiki_path(path: str):
     root=wiki_root().resolve(); target=(root/path).resolve()
     if target!=root and root not in target.parents: raise HTTPException(400,'invalid wiki path')
     return target
+
+ARTIFACT_SUFFIXES = {'.md': 'markdown', '.yaml': 'yaml', '.yml': 'yaml', '.csv': 'csv', '.json': 'json'}
+
+def artifact_accounts(store, user, conversation_id=None):
+    client = membership(store, user)
+    if not client:
+        return []
+    accounts = permitted_accounts(store, user, client['client_instance_id'])
+    if conversation_id:
+        conversation = store.one(
+            'SELECT account_id FROM conversations WHERE id=? AND user_id=? AND client_instance_id=?',
+            (conversation_id, user['id'], client['client_instance_id']),
+        )
+        if not conversation:
+            raise HTTPException(404, 'conversation not found')
+        accounts = [account for account in accounts if account['id'] == conversation['account_id']]
+    return accounts
+
+def artifact_title(path: Path):
+    if path.suffix.lower() == '.md':
+        try:
+            heading = next(
+                (line.lstrip('#').strip() for line in path.read_text(errors='replace').splitlines()
+                 if line.startswith('#') and line.lstrip('#').strip()),
+                '',
+            )
+            if heading:
+                return heading
+        except OSError:
+            pass
+    return path.stem.replace('-', ' ').replace('_', ' ').strip().title()
+
+def permitted_artifact(store, user, path: str):
+    normalized = path.strip('/')
+    parts = Path(normalized).parts
+    if len(parts) < 2 or not parts[0].isdigit():
+        raise HTTPException(404, 'artifact not found')
+    customer_id = parts[0]
+    client = membership(store, user)
+    if not client:
+        raise HTTPException(404, 'artifact not found')
+    account = next(
+        (account for account in permitted_accounts(store, user, client['client_instance_id'])
+         if account['customer_id'] == customer_id),
+        None,
+    )
+    if not account:
+        raise HTTPException(404, 'artifact not found')
+    target = safe_wiki_path(normalized)
+    if target.suffix.lower() not in ARTIFACT_SUFFIXES or not target.is_file():
+        raise HTTPException(404, 'artifact not found')
+    return target, account
+
+@app.get('/api/artifacts')
+async def artifact_index(request: Request):
+    user = await current_user(request)
+    root = wiki_root()
+    if not root.exists():
+        return []
+    accounts = artifact_accounts(request.app.state.store, user, request.query_params.get('conversation_id'))
+    results = []
+    for account in accounts:
+        account_root = root / account['customer_id']
+        if not account_root.exists():
+            continue
+        for path in account_root.rglob('*'):
+            kind = ARTIFACT_SUFFIXES.get(path.suffix.lower())
+            if path.is_symlink() or not path.is_file() or not kind:
+                continue
+            resolved = path.resolve()
+            if account_root.resolve() not in resolved.parents:
+                continue
+            relative = str(path.relative_to(root))
+            results.append({
+                'path': relative,
+                'title': artifact_title(path),
+                'type': kind,
+                'account_name': account['account_name'],
+                'customer_id': account['customer_id'],
+                'updated_at': path.stat().st_mtime,
+            })
+    return sorted(results, key=lambda item: (
+        item['customer_id'],
+        0 if Path(item['path']).name.lower() == 'index.md' else 1,
+        item['path'].lower(),
+    ))
+
+@app.get('/api/artifacts/{path:path}')
+async def artifact_page(path: str, request: Request):
+    user = await current_user(request)
+    target, account = permitted_artifact(request.app.state.store, user, path)
+    if request.query_params.get('download') == '1':
+        return FileResponse(target, filename=target.name, media_type='application/octet-stream')
+    return {
+        'path': path,
+        'title': artifact_title(target),
+        'type': ARTIFACT_SUFFIXES[target.suffix.lower()],
+        'content': target.read_text(errors='replace'),
+        'account_name': account['account_name'],
+        'customer_id': account['customer_id'],
+        'updated_at': target.stat().st_mtime,
+    }
+
 @app.get('/api/wiki')
 async def wiki_index(request: Request):
-    await current_user(request); root=wiki_root()
+    user=await current_user(request); root=wiki_root()
     if not root.exists(): return []
-    return [{'path':str(p.relative_to(root)),'updated_at':p.stat().st_mtime} for p in root.rglob('*.md') if p.is_file()]
+    accounts=artifact_accounts(request.app.state.store,user,request.query_params.get('conversation_id'))
+    allowed={account['customer_id'] for account in accounts}
+    return [{'path':str(p.relative_to(root)),'updated_at':p.stat().st_mtime}
+            for p in root.rglob('*.md') if p.is_file() and p.relative_to(root).parts[0] in allowed]
 @app.get('/api/wiki/{path:path}')
 async def wiki_page(path: str, request: Request):
-    await current_user(request); target=safe_wiki_path(path)
-    if not target.is_file(): raise HTTPException(404,'wiki page not found')
+    user=await current_user(request); target,_=permitted_artifact(request.app.state.store,user,path)
+    if target.suffix.lower()!='.md': raise HTTPException(404,'wiki page not found')
     return {'path':path,'content':target.read_text(errors='replace'),'updated_at':target.stat().st_mtime}
 @app.get('/api/jobs/{jid}/events')
 async def events(jid: str, request: Request):
