@@ -853,6 +853,28 @@ docker compose logs --tail=100 web
 curl http://127.0.0.1:8000/api/health
 ```
 
+Hosted job protection and diagnostics are configured in the server-only `.env`:
+
+```env
+BOB_JOB_TIMEOUT_SECONDS=600
+BOB_MAX_CONCURRENT_JOBS=1
+BOB_DEBUG_LOGGING=false
+```
+
+The single-worker limit keeps the only VM from running multiple heavy Codex/data-pull processes at
+once. A second request remains queued. A timed-out job terminates its full Codex child process
+group, including shell, Bob, Python, and GARF children. Job diagnostics are written to the
+persistent metadata volume:
+
+```bash
+docker compose exec web tail -f /data/metadata/logs/bob-runtime.jsonl
+docker compose exec web grep -E 'job_failed|job_cancelled|timed out' /data/metadata/logs/bob-runtime.jsonl
+```
+
+The runtime log rotates at 5 MB and does not contain prompts, OAuth tokens, or developer tokens.
+Set `BOB_DEBUG_LOGGING=true` only while diagnosing a problem, then recreate the web container and
+set it back to `false`.
+
 Back up these Docker volumes before major upgrades:
 
 - `/data/client`

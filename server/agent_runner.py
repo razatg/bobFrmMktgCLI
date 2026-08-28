@@ -1,6 +1,6 @@
 """Process-boundary Codex adapter with cancellation, timeout, and JSONL events."""
 from __future__ import annotations
-import asyncio, json, logging, os, shutil, time
+import asyncio, json, logging, os, shutil, signal, time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +33,31 @@ class AgentRunner:
     def _debug(self, message, *args):
         if self._debug_enabled():
             logger.warning(message, *args)
+
+    @staticmethod
+    def _kill_process_group(proc, force=False):
+        """Stop Codex and every shell/tool child it started."""
+        if proc.returncode is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill() if force else proc.terminate()
+            except ProcessLookupError:
+                pass
+
+    @staticmethod
+    async def _read_stderr(stream, max_bytes=4000):
+        data = bytearray()
+        while True:
+            chunk = await stream.read(64 * 1024)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > max_bytes:
+                del data[:-max_bytes]
+        return bytes(data)
 
     @staticmethod
     async def _read_jsonl(stream, max_output_bytes, emit, session_id=None):
@@ -134,34 +159,45 @@ class AgentRunner:
         if not Path(workspace).exists(): Path(workspace).mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
         self._debug('codex start runtime=%s session=%s cwd=%s args=%r', runtime, bool(session_id), workspace, args[:-1])
-        proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(workspace), env=environment)
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(workspace),
+            env=environment,
+            start_new_session=True,
+        )
         thread_id = session_id; final = ''
         async def read():
             return await self._read_jsonl(proc.stdout, policy.max_output_bytes, emit, session_id)
-        task = None
+        task = None; stderr_task = asyncio.create_task(self._read_stderr(proc.stderr))
         try:
             task = asyncio.create_task(read())
             deadline = asyncio.get_running_loop().time() + policy.timeout_seconds
             while not task.done():
                 if cancel_event and cancel_event.is_set():
-                    proc.terminate()
+                    self._kill_process_group(proc)
                     raise asyncio.CancelledError
                 if asyncio.get_running_loop().time() >= deadline:
-                    proc.kill()
-                    raise asyncio.TimeoutError
+                    self._kill_process_group(proc, force=True)
+                    raise RuntimeError(f'agent timed out after {policy.timeout_seconds} seconds')
                 await asyncio.sleep(.05)
             thread_id, final = await task
             remaining = max(0.1, deadline - asyncio.get_running_loop().time())
             await asyncio.wait_for(proc.wait(), remaining)
         except asyncio.TimeoutError:
-            proc.kill(); await proc.wait(); raise
+            self._kill_process_group(proc, force=True); await proc.wait()
+            raise RuntimeError(f'agent timed out after {policy.timeout_seconds} seconds') from None
         finally:
-            if proc.returncode is None: proc.kill(); await proc.wait()
+            if proc.returncode is None:
+                self._kill_process_group(proc, force=True); await proc.wait()
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            if not stderr_task.done():
+                await asyncio.gather(stderr_task, return_exceptions=True)
         if proc.returncode != 0:
-            err = (await proc.stderr.read()).decode(errors='replace')[-4000:]
+            err = (await stderr_task).decode(errors='replace')[-4000:]
             self._debug('codex failed exit=%s duration=%.2fs stderr=%s', proc.returncode, time.monotonic() - started, err)
             raise RuntimeError(err or f'agent exited {proc.returncode}')
         self._debug('codex completed exit=0 duration=%.2fs session=%s', time.monotonic() - started, thread_id)

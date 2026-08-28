@@ -1,11 +1,37 @@
 import asyncio
 import json
+import os
+import stat
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from server.agent_runner import AgentRunner
 
 
 class AgentRunnerTests(unittest.TestCase):
+    def test_timeout_is_explicit_and_process_group_is_stopped(self):
+        async def exercise():
+            with tempfile.TemporaryDirectory() as directory:
+                executable = os.path.join(directory, 'fake-codex')
+                with open(executable, 'w', encoding='utf-8') as handle:
+                    handle.write('#!/bin/sh\nsleep 30\n')
+                os.chmod(executable, os.stat(executable).st_mode | stat.S_IXUSR)
+                runner = AgentRunner(executable=executable)
+
+                async def emit(_event):
+                    pass
+
+                with patch.dict(os.environ, {'BOB_RUNTIME': 'desktop'}):
+                    with self.assertRaisesRegex(RuntimeError, 'agent timed out after 1 seconds'):
+                        await runner.run('codex', None, 'test', directory,
+                                         type('Policy', (), {'environment': None, 'model': None,
+                                                             'timeout_seconds': 1,
+                                                             'max_output_bytes': 1000})(),
+                                         emit)
+
+        asyncio.run(exercise())
+
     def test_large_codex_jsonl_event_exceeds_default_stream_line_limit(self):
         async def exercise():
             stream = asyncio.StreamReader(limit=64 * 1024)

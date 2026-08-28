@@ -39,6 +39,10 @@ class OffScopeRunner(FakeRunner):
         await emit({'type':'command','message':'fake bob command'})
         return (session_id or 'thread-one', '[[BOB_OUT_OF_SCOPE]] Outside Bob scope.')
 
+class TimeoutRunner(FakeRunner):
+    async def run(self, *args, **kwargs):
+        raise RuntimeError('agent timed out after 600 seconds')
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -88,6 +92,18 @@ class GatewayTests(unittest.TestCase):
         data=self.client.get(f'/api/conversations/{conversation}').json()
         self.assertEqual(data['conversation']['agent_session_id'],'thread-one')
         self.assertIn('You are Bob for this workspace only.', self.app.state.runner.calls[0]['prompt'])
+
+    def test_failed_job_has_explicit_error_and_central_runtime_log(self):
+        csrf=self.bootstrap(); self.app.state.runner=TimeoutRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'run a report'}).json()['job_id']
+        import time; time.sleep(.05)
+        events=self.client.get(f'/api/jobs/{job}/events').text
+        self.assertIn('FAILED',events); self.assertIn('agent timed out after 600 seconds',events)
+        stored=self.client.get(f'/api/jobs/{job}').json()
+        self.assertEqual(stored['error'],'agent timed out after 600 seconds')
+        log=(Path(self.db).parent/'logs'/'bob-runtime.jsonl').read_text()
+        self.assertIn('job_failed',log); self.assertIn(job,log)
     def test_csrf_and_workspace_isolation(self):
         self.bootstrap(); self.assertEqual(self.client.post('/api/conversations').status_code,403)
         # A path traversal cannot escape the configured wiki root.
@@ -326,6 +342,9 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('/api/artifacts', js)
         self.assertIn('artifact-chat-link', js)
         self.assertNotIn('loadWiki()', js)
+        self.assertIn('watchJob', js)
+        self.assertIn('/api/jobs/${jid}', js)
+        self.assertIn('RECONNECTING', js)
 
     def test_client_edit_accepts_dashed_nine_digit_mcc(self):
         csrf=self.bootstrap()

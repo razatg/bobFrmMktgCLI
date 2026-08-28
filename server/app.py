@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, base64, hashlib, json, os, secrets, shlex, shutil
+import asyncio, base64, hashlib, json, logging, os, secrets, shlex, shutil, time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -17,6 +17,36 @@ ROOT = Path(__file__).resolve().parent.parent
 STATE_ROOT = Path(os.getenv('BOB_STATE_ROOT', str(ROOT / 'data' / 'client'))).expanduser().resolve()
 OFF_SCOPE_SENTINEL = '[[BOB_OUT_OF_SCOPE]]'
 OFF_SCOPE_REPLY = "That’s outside this Bob workspace, mate. I’m here for the ads accounts, reports, wiki, setup, and related project work."
+runtime_logger = logging.getLogger('bob.runtime')
+
+def runtime_log_path():
+    metadata_db = Path(os.getenv('BOB_METADATA_DB', str(ROOT / 'data' / 'metadata.sqlite3'))).expanduser()
+    return metadata_db.parent / 'logs' / 'bob-runtime.jsonl'
+
+def runtime_log(event, **fields):
+    """Write one safe, durable diagnostic record without prompts or secrets."""
+    record = {'ts': now(), 'event': event, **fields}
+    try:
+        path = runtime_log_path(); path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size >= 5 * 1024 * 1024:
+            rotated = path.with_suffix('.jsonl.1')
+            os.replace(path, rotated)
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record, separators=(',', ':'), default=str) + '\n')
+    except OSError:
+        runtime_logger.exception('unable to write runtime log event=%s', event)
+
+def job_timeout_seconds():
+    try:
+        return max(1, int(os.getenv('BOB_JOB_TIMEOUT_SECONDS', '600')))
+    except ValueError:
+        return 600
+
+def max_concurrent_jobs():
+    try:
+        return max(1, int(os.getenv('BOB_MAX_CONCURRENT_JOBS', '1')))
+    except ValueError:
+        return 1
 class Credentials(BaseModel): identifier: str; password: str
 class Bootstrap(BaseModel): secret: str; identifier: str; password: str; client_name: str = 'Bob Client'
 class Invite(BaseModel): expires_hours: int = 72
@@ -67,6 +97,7 @@ async def lifespan(app):
     for path in (STATE_ROOT / '.bob', STATE_ROOT / 'data', STATE_ROOT / 'garf' / 'outputs' / 'raw', STATE_ROOT / 'wiki', STATE_ROOT / 'logs', STATE_ROOT / 'validation' / 'reports'):
         path.mkdir(parents=True, exist_ok=True)
     app.state.runner = AgentRunner(); app.state.locks = {}; app.state.cancel = {}
+    app.state.job_slots = asyncio.Semaphore(max_concurrent_jobs())
     yield; app.state.store.close()
 
 app = FastAPI(title='Bob Hosted Gateway', lifespan=lifespan)
@@ -675,34 +706,34 @@ async def message(cid: str, body: MessageIn, request: Request):
     # isolated runtime state and may run concurrently.
     lock=app.state.locks.setdefault(cid,asyncio.Lock())
     if lock.locked(): raise HTTPException(409,'conversation is busy')
-    mid,jid=new_id(),new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t)); s.run('INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?)',(jid,cid,mid,'queued',None,None,None,t)); asyncio.create_task(run_job(request,jid,cid,body.content,row,lock)); return {'job_id':jid,'message_id':mid}
+    mid,jid=new_id(),new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t)); s.run('INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?)',(jid,cid,mid,'queued',None,None,None,t)); runtime_log('job_queued',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id')); asyncio.create_task(run_job(request,jid,cid,body.content,row,lock)); return {'job_id':jid,'message_id':mid}
 async def run_job(request,jid,cid,prompt,row,lock):
     s=request.app.state.store
     async with lock:
-        s.run('UPDATE jobs SET status="running",started_at=? WHERE id=?',(now(),jid)); s.event(jid,'status',{'status':'THINKING'})
-        try:
-            async def emit(event): s.event(jid,'agent',event)
-            workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
-            runtime_config=runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
-            environment = {
-                'BOB_STATE_ROOT': str(state_root),
-                'BOB_SHARED_STATE_ROOT': str(STATE_ROOT),
-                'BOB_CLIENT_INSTANCE_ID': row['client_instance_id'],
-            }
-            if runtime_config:
-                environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
-            policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),environment=environment)
-            selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
-            sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
-            final = final or 'No final response returned.'
-            if final.startswith(OFF_SCOPE_SENTINEL):
-                learned = load_learned_offscope()
-                learned.add(normalize_scope_prompt(prompt))
-                save_learned_offscope(learned)
-                final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
-            s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid,now(),cid)); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',final,'completed',now())); s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'COMPLETED','response':final})
-        except asyncio.CancelledError: s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'CANCELLED'})
-        except Exception as exc: s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=?',(str(exc)[-1000:],now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':str(exc)[-1000:]})
+        async with app.state.job_slots:
+            if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
+                s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'CANCELLED'}); runtime_log('job_cancelled',job_id=jid,conversation_id=cid); return
+            started=time.monotonic(); s.run('UPDATE jobs SET status="running",started_at=? WHERE id=?',(now(),jid)); s.event(jid,'status',{'status':'THINKING'}); runtime_log('job_started',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id'),timeout_seconds=job_timeout_seconds())
+            try:
+                async def emit(event): s.event(jid,'agent',event)
+                workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
+                runtime_config=runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
+                environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id']}
+                if runtime_config:
+                    environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
+                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment)
+                selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
+                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
+                final = final or 'No final response returned.'
+                if final.startswith(OFF_SCOPE_SENTINEL):
+                    learned = load_learned_offscope()
+                    learned.add(normalize_scope_prompt(prompt))
+                    save_learned_offscope(learned)
+                    final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
+                s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid,now(),cid)); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',final,'completed',now())); s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'COMPLETED','response':final}); runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+            except asyncio.CancelledError: s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'CANCELLED'}); runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+            except Exception as exc:
+                detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=?',(detail[-1000:],now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':detail[-1000:]}); runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=detail[-4000:],exception_type=type(exc).__name__)
 @app.get('/api/jobs/{jid}')
 async def job(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));

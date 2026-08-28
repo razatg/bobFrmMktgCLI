@@ -260,7 +260,7 @@ If a matching pull is already running, another job waits for or reuses that resu
 
 ## 7. Mutation safety
 
-Read-only analysis jobs may run concurrently. Bid, budget, creative, account, or other mutation workflows require:
+The single-worker hosted MVP limits active Codex jobs globally to one, so read-only jobs from different users are queued rather than competing for the VM. Bid, budget, creative, account, or other mutation workflows require:
 
 1. proposal generation;
 2. explicit user approval;
@@ -764,3 +764,48 @@ The UI checks should run as browser-level end-to-end tests against a fake agent 
 - Cost controls for concurrent users and strong-model fallback.
 - Backup and restore behavior for Bob state and native agent session files.
 - Operational behavior when an agent process exits after a Google Ads mutation may have started.
+
+## 15. Resilient jobs and single-VM protection
+
+The hosted gateway remains a thin wrapper around Codex sessions. It does not replace Codex's
+native session history or add a distributed queue. The gateway adds only the lifecycle controls
+needed to keep one VM healthy:
+
+- `BOB_JOB_TIMEOUT_SECONDS` defaults to `600`; a hung Codex/data-pull job is stopped after ten
+  minutes and is reported as a timeout, never as a blank error.
+- `BOB_MAX_CONCURRENT_JOBS` defaults to `1`; a second user's heavy request stays queued until the
+  active job completes, fails, is cancelled, or times out. This preserves both users' conversations
+  and session IDs without starting a second resource-heavy process on the VM.
+- Codex is launched in its own process group. Timeout and cancellation terminate the whole group,
+  including shell, `./bob fetch`, Python, and GARF children, so orphan processes cannot accumulate
+  and exhaust CPU or memory.
+- stdout and stderr are drained concurrently, preventing a full stderr pipe from blocking Codex.
+- Job lifecycle records are written to `/data/metadata/logs/bob-runtime.jsonl`, with job/session IDs,
+  phase, duration, exit code, timeout/cancellation state, and stderr. Prompts and credentials are
+  excluded; the file rotates at 5 MB.
+
+The browser keeps Bob's loader visible while a job is queued or running. Codex agent messages are
+translated into short progress messages; keep-alive comments are invisible. If SSE disconnects,
+the browser reconnects and polls `GET /api/jobs/{job_id}`. A completed job reloads its saved
+conversation response, so a browser/network interruption does not lose the answer. Only a real
+`failed`, `cancelled`, or timeout state enables retry and displays a retry message; retry creates a
+new job and never revives the old process.
+
+Operational settings:
+
+```text
+BOB_JOB_TIMEOUT_SECONDS=600
+BOB_MAX_CONCURRENT_JOBS=1
+BOB_DEBUG_LOGGING=false
+```
+
+For diagnostics on the VM:
+
+```bash
+docker-compose exec web tail -f /data/metadata/logs/bob-runtime.jsonl
+docker-compose exec web grep -E 'job_failed|timed out|job_cancelled' /data/metadata/logs/bob-runtime.jsonl
+```
+
+Acceptance tests must cover process-group cleanup, stderr backpressure, explicit timeout errors,
+queueing, SSE reconnect, status polling, saved-response recovery, retry idempotency, and the
+absence of orphan Codex/Bob processes after timeout.
