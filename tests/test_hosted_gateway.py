@@ -336,6 +336,8 @@ class GatewayTests(unittest.TestCase):
         js=(Path('server/static/app.js')).read_text()
         for label in ('DASHBOARD','CLIENTS','GOOGLE ADS APP'):
             self.assertIn(label,html)
+        self.assertIn('CODEX SESSIONS', html)
+        self.assertIn('admin-codex-sessions', html)
         for screen in ('admin-dashboard','admin-clients','admin-google-app'):
             self.assertIn(screen,html)
         for section in ('OVERVIEW','ACCOUNTS','USERS & ACCESS','GOOGLE ADS'):
@@ -358,6 +360,41 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('safeActivityText', js)
         self.assertIn('job-activity', js)
         self.assertIn('state.retries<=5', js)
+        self.assertIn('appendActivity', js)
+        self.assertIn('pagehide', js)
+
+    def test_user_cancel_terminates_job_and_records_terminal_state(self):
+        csrf=self.bootstrap(); self.app.state.runner=SlowRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'long report'}).json()['job_id']
+        import time; time.sleep(.05)
+        cancelled=self.client.post(f'/api/jobs/{job}/cancel',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(cancelled.status_code,200,cancelled.text)
+        deadline=time.time()+1
+        stored=self.client.get(f'/api/jobs/{job}').json()
+        while stored['status'] not in {'cancelled','failed','completed'} and time.time()<deadline:
+            time.sleep(.02)
+            stored=self.client.get(f'/api/jobs/{job}').json()
+        self.assertEqual(stored['status'],'cancelled')
+        self.assertIn('CANCELLED',self.client.get(f'/api/jobs/{job}/events').text)
+        # Let the deliberately slow fake runner unwind before TestClient closes
+        # the SQLite connection during teardown.
+        time.sleep(.4)
+
+    def test_admin_can_inspect_codex_session_events_without_schema_changes(self):
+        csrf=self.bootstrap()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'hello'}).json()['job_id']
+        import time; time.sleep(.05)
+        sessions=self.client.get('/api/admin/codex-sessions',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(sessions.status_code,200,sessions.text)
+        self.assertEqual(sessions.json()[0]['job_id'],job)
+        self.assertEqual(sessions.json()[0]['agent_session_id'],'thread-one')
+        events=self.client.get(f'/api/admin/codex-sessions/{job}/events',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(events.status_code,200,events.text)
+        self.assertEqual(events.json()[0]['event_type'],'status')
+        self.assertEqual(events.json()[1]['event_type'],'agent')
+        self.assertEqual(events.json()[1]['payload']['message'],'fake bob command')
 
     def test_active_job_blocks_duplicate_prompt_and_is_discoverable(self):
         csrf=self.bootstrap(); self.app.state.runner=SlowRunner()

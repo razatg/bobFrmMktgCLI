@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, base64, hashlib, json, logging, os, secrets, shlex, shutil, time
+import asyncio, base64, hashlib, json, logging, os, secrets, shlex, shutil, signal, time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -395,6 +395,66 @@ async def admin_users(request: Request):
       FROM users u JOIN client_memberships cm ON cm.user_id=u.id
       LEFT JOIN google_ads_connections g ON g.user_id=u.id AND g.client_instance_id=cm.client_instance_id
       WHERE (? IS NULL OR cm.client_instance_id=?) ORDER BY u.created_at''',(client_id,client_id))]
+
+@app.get('/api/admin/codex-sessions')
+async def admin_codex_sessions(request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    rows=s.all('''SELECT j.id AS job_id,j.conversation_id,j.status,j.started_at,j.completed_at,j.error,
+      j.created_at,c.agent_session_id,c.user_id,c.client_instance_id,c.account_id,
+      u.email_or_identifier AS user_identifier,ci.display_name AS client_name,
+      COALESCE(NULLIF(ci.codex_model,''),?) AS model,
+      a.account_name,a.customer_id,
+      (SELECT je.event_type FROM job_events je WHERE je.job_id=j.id ORDER BY je.event_id DESC LIMIT 1) AS last_event_type,
+      (SELECT je.payload FROM job_events je WHERE je.job_id=j.id ORDER BY je.event_id DESC LIMIT 1) AS last_event_payload
+      FROM jobs j JOIN conversations c ON c.id=j.conversation_id
+      JOIN users u ON u.id=c.user_id
+      LEFT JOIN client_instances ci ON ci.id=c.client_instance_id
+      LEFT JOIN client_accounts a ON a.id=c.account_id
+      ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,j.created_at DESC LIMIT 100''',(default_codex_model(),))
+    registry=getattr(request.app.state.runner,'process_registry',{})
+    result=[]
+    for row in rows:
+        item=dict(row); process=registry.get(item['job_id'])
+        if process:
+            pid=process['pid']; alive=False
+            try: os.kill(pid,0); alive=True
+            except (ProcessLookupError,PermissionError): pass
+            item['process']={'pid':pid,'process_group_id':process['process_group_id'],'alive':alive,
+                             'elapsed_seconds':round(max(0,time.monotonic()-process['started_monotonic']),1)}
+        else: item['process']=None
+        result.append(item)
+    return result
+
+@app.get('/api/admin/codex-sessions/{jid}/events')
+async def admin_codex_session_events(jid: str, request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    if not s.one('SELECT id FROM jobs WHERE id=?',(jid,)): raise HTTPException(404,'job not found')
+    rows=s.all('SELECT event_id,event_type,payload,created_at FROM job_events WHERE job_id=? ORDER BY event_id',(jid,))
+    events=[]
+    for row in rows:
+        item=dict(row)
+        try: item['payload']=json.loads(item['payload'])
+        except (TypeError,json.JSONDecodeError): pass
+        events.append(item)
+    return events
+
+@app.post('/api/admin/codex-sessions/{jid}/cancel')
+async def admin_cancel_codex_session(jid: str, request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    row=s.one('SELECT id,status FROM jobs WHERE id=?',(jid,))
+    if not row: raise HTTPException(404,'job not found')
+    if row['status'] not in {'queued','running'}: return {'ok':True,'status':row['status']}
+    app.state.cancel.setdefault(jid,asyncio.Event()).set()
+    changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
+    if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+    process=getattr(request.app.state.runner,'process_registry',{}).get(jid)
+    if process:
+        try: os.killpg(process['process_group_id'],signal.SIGTERM)
+        except (ProcessLookupError,PermissionError): pass
+    return {'ok':True,'status':'cancelled'}
 @app.get('/api/admin/clients')
 async def admin_clients(request: Request):
     user=await csrf(request); s=request.app.state.store
@@ -711,8 +771,12 @@ async def run_job(request,jid,cid,prompt,row,lock):
     s=request.app.state.store
     async with lock:
         async with app.state.job_slots:
-            if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
-                s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'CANCELLED'}); runtime_log('job_cancelled',job_id=jid,conversation_id=cid); return
+            current=s.one('SELECT status FROM jobs WHERE id=?',(jid,))
+            if (current and current['status']=='cancelled') or (app.state.cancel.get(jid) and app.state.cancel[jid].is_set()):
+                if current and current['status']!='cancelled':
+                    changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
+                    if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+                runtime_log('job_cancelled',job_id=jid,conversation_id=cid); return
             started=time.monotonic(); s.run('UPDATE jobs SET status="running",started_at=? WHERE id=?',(now(),jid)); s.event(jid,'status',{'status':'THINKING'}); runtime_log('job_started',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id'),timeout_seconds=job_timeout_seconds())
             try:
                 async def emit(event): s.event(jid,'agent',event)
@@ -721,9 +785,11 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id']}
                 if runtime_config:
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
-                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment)
+                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
                 selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
                 sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
+                if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
+                    raise asyncio.CancelledError
                 final = final or 'No final response returned.'
                 if final.startswith(OFF_SCOPE_SENTINEL):
                     learned = load_learned_offscope()
@@ -731,9 +797,17 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     save_learned_offscope(learned)
                     final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
                 s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid,now(),cid)); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',final,'completed',now())); s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'COMPLETED','response':final}); runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
-            except asyncio.CancelledError: s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'CANCELLED'}); runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+            except asyncio.CancelledError:
+                changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
+                if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+                runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
             except Exception as exc:
-                detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=?',(detail[-1000:],now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':detail[-1000:]}); runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=detail[-4000:],exception_type=type(exc).__name__)
+                if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
+                    changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
+                    if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+                    runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+                else:
+                    detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=? AND status IN ("queued","running")',(detail[-1000:],now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':detail[-1000:]}); runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=detail[-4000:],exception_type=type(exc).__name__)
 @app.get('/api/jobs/{jid}')
 async def job(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));
@@ -947,4 +1021,14 @@ async def events(jid: str, request: Request):
 async def cancel(jid: str, request: Request):
     user=await csrf(request); row=request.app.state.store.one('SELECT j.* FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));
     if not row: raise HTTPException(404,'job not found')
-    app.state.cancel[jid]=asyncio.Event(); app.state.cancel[jid].set(); return {'ok':True}
+    if row['status'] not in {'queued','running'}: return {'ok':True,'status':row['status']}
+    app.state.cancel.setdefault(jid,asyncio.Event()).set()
+    changed=request.app.state.store.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
+    if changed.rowcount:
+        request.app.state.store.event(jid,'terminal',{'status':'CANCELLED'})
+    process=getattr(request.app.state.runner,'process_registry',{}).get(jid)
+    if process:
+        try: os.killpg(process['process_group_id'],signal.SIGTERM)
+        except (ProcessLookupError,PermissionError): pass
+    runtime_log('job_cancel_requested',job_id=jid,conversation_id=row['conversation_id'],user_id=user['id'])
+    return {'ok':True,'status':'cancelled'}

@@ -12,6 +12,7 @@ class ExecutionPolicy:
     timeout_seconds: int = 240
     max_output_bytes: int = 2_000_000
     environment: dict[str, str] | None = None
+    job_id: str | None = None
 
 class AgentRunner:
     SHELL_ENV_KEYS = (
@@ -21,7 +22,9 @@ class AgentRunner:
         'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
     )
 
-    def __init__(self, executable=None): self.executable = executable or shutil.which('codex') or 'codex'
+    def __init__(self, executable=None):
+        self.executable = executable or shutil.which('codex') or 'codex'
+        self.process_registry = {}
     @staticmethod
     def _hosted_sandbox_available():
         return bool(shutil.which('bwrap'))
@@ -167,6 +170,13 @@ class AgentRunner:
             env=environment,
             start_new_session=True,
         )
+        job_id = getattr(policy, 'job_id', None)
+        if job_id:
+            self.process_registry[job_id] = {
+                'pid': proc.pid,
+                'process_group_id': proc.pid,
+                'started_monotonic': started,
+            }
         thread_id = session_id; final = ''
         async def read():
             return await self._read_jsonl(proc.stdout, policy.max_output_bytes, emit, session_id)
@@ -185,10 +195,14 @@ class AgentRunner:
             thread_id, final = await task
             remaining = max(0.1, deadline - asyncio.get_running_loop().time())
             await asyncio.wait_for(proc.wait(), remaining)
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError
         except asyncio.TimeoutError:
             self._kill_process_group(proc, force=True); await proc.wait()
             raise RuntimeError(f'agent timed out after {policy.timeout_seconds} seconds') from None
         finally:
+            if job_id:
+                self.process_registry.pop(job_id, None)
             if proc.returncode is None:
                 self._kill_process_group(proc, force=True); await proc.wait()
             if task is not None and not task.done():
