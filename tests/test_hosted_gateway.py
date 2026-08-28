@@ -43,6 +43,12 @@ class TimeoutRunner(FakeRunner):
     async def run(self, *args, **kwargs):
         raise RuntimeError('agent timed out after 600 seconds')
 
+class SlowRunner(FakeRunner):
+    async def run(self, *args, **kwargs):
+        import asyncio
+        await asyncio.sleep(.25)
+        return await super().run(*args, **kwargs)
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -345,6 +351,23 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('watchJob', js)
         self.assertIn('/api/jobs/${jid}', js)
         self.assertIn('RECONNECTING', js)
+        self.assertIn('/api/conversations/${conversation}/active-job', js)
+        self.assertIn('STOP JOB', html)
+        self.assertIn('state.retries<=5', js)
+
+    def test_active_job_blocks_duplicate_prompt_and_is_discoverable(self):
+        csrf=self.bootstrap(); self.app.state.runner=SlowRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        first=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'slow report'})
+        self.assertEqual(first.status_code,200,first.text)
+        job_id=first.json()['job_id']
+        active=self.client.get(f'/api/conversations/{conversation}/active-job')
+        self.assertEqual(active.status_code,200,active.text)
+        self.assertEqual(active.json()['id'],job_id)
+        duplicate=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'duplicate report'})
+        self.assertEqual(duplicate.status_code,409,duplicate.text)
+        import time; time.sleep(.35)
+        self.assertEqual(self.client.get(f'/api/conversations/{conversation}/active-job').json(),None)
 
     def test_client_edit_accepts_dashed_nine_digit_mcc(self):
         csrf=self.bootstrap()

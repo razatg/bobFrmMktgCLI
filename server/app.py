@@ -91,9 +91,6 @@ async def lifespan(app):
     app.state.store = Store(os.getenv('BOB_METADATA_DB', str(ROOT/'data'/'metadata.sqlite3')))
     app.state.secrets = SecretStore()
     provision_environment_admin(app.state.store)
-    # A container restart terminates subprocesses, so do not leave their
-    # metadata looking permanently active in the chat client.
-    app.state.store.run('UPDATE jobs SET status="failed",error="gateway restarted before job completed",completed_at=? WHERE status IN ("queued","running")',(now(),))
     for path in (STATE_ROOT / '.bob', STATE_ROOT / 'data', STATE_ROOT / 'garf' / 'outputs' / 'raw', STATE_ROOT / 'wiki', STATE_ROOT / 'logs', STATE_ROOT / 'validation' / 'reports'):
         path.mkdir(parents=True, exist_ok=True)
     app.state.runner = AgentRunner(); app.state.locks = {}; app.state.cancel = {}
@@ -682,6 +679,9 @@ async def get_conversation(cid: str, request: Request):
 @app.post('/api/conversations/{cid}/messages')
 async def message(cid: str, body: MessageIn, request: Request):
     user,row=await conversation(request,cid); s=request.app.state.store; row=dict(row)
+    active = s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
+    if active:
+        raise HTTPException(409, 'Bob is still working on this conversation. Please wait for the current job or stop it before sending another prompt.')
     setup_request=body.content.strip().lower()
     if 'set me up' in setup_request or setup_request in {'setup','onboard me','onboard me bob'}:
         mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
@@ -739,6 +739,10 @@ async def job(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));
     if not row: raise HTTPException(404,'job not found')
     return dict(row)
+@app.get('/api/conversations/{cid}/active-job')
+async def active_job(cid: str, request: Request):
+    user,_=await conversation(request,cid); row=request.app.state.store.one('SELECT * FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
+    return dict(row) if row else None
 def wiki_root(): return STATE_ROOT / 'wiki'
 
 def bob_ascii():
@@ -926,7 +930,7 @@ async def wiki_page(path: str, request: Request):
 async def events(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));
     if not row: raise HTTPException(404,'job not found')
-    try: last=int(request.headers.get('Last-Event-ID','0'))
+    try: last=int(request.headers.get('Last-Event-ID') or request.query_params.get('last_event_id','0'))
     except ValueError: last=0
     async def stream():
         cursor=last

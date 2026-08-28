@@ -153,7 +153,7 @@ created_at
 last_activity_at
 ```
 
-The initial implementation uses SQLite for this small metadata set and for job status. SQLite is not a replacement for Codex or Claude history; it allows the API to authorize conversations, resume sessions, recover status after restart, and prevent duplicate work.
+The initial implementation uses SQLite for this small metadata set and for job status. SQLite is not a replacement for Codex or Claude history; it allows the API to authorize conversations, resume sessions, recover browser state, and prevent duplicate work.
 
 Claude is implemented through the same adapter interface, but its authentication, persistence, and resume behavior must be verified separately rather than assumed to match Codex.
 
@@ -189,7 +189,7 @@ Native CLI sessions provide independent contexts, but they are not themselves a 
 - captures JSON events, stdout, stderr, exit status, and duration;
 - supports timeout and cancellation;
 - cleans up terminated processes;
-- marks interrupted jobs failed or retryable after restart;
+- records job state so the browser can follow the current job while the service is running;
 - prevents duplicate mutation execution.
 
 No external queue service is required for the single-client MVP. A durable worker service or Redis-backed queue can be introduced later if one instance needs multiple application replicas or substantially higher throughput.
@@ -475,6 +475,7 @@ Additional UI endpoints:
 ```text
 GET  /api/conversations
 GET  /api/conversations/{conversation_id}
+GET  /api/conversations/{conversation_id}/active-job
 GET  /api/wiki
 GET  /api/wiki/{path}
 POST /api/wiki/{path}/ask
@@ -721,7 +722,7 @@ Out of scope for this phase:
 - A follow-up resumes the same Codex session.
 - Two different conversations run concurrently without sharing session memory or mutable account state.
 - Two messages in one conversation are serialized.
-- API restart preserves the native session mapping and reports interrupted jobs correctly.
+- Browser refresh preserves the native session mapping and reattaches to the active job.
 - Normal conversations never use `--ephemeral`.
 - Desktop credentials are never required by the deployment.
 - Unauthorized users cannot access another client instance.
@@ -748,7 +749,7 @@ Out of scope for this phase:
 - Stop, retry, timeout, and process-failure flows update the conversation and job state correctly.
 - Wiki navigation renders Markdown safely, supports the document picker/search flow, and sends `Ask Bob about this page` through the normal conversation API.
 - Wiki writes and Google Ads mutations show approval controls and cannot execute without explicit approval.
-- Browser refresh and API restart preserve the conversation mapping and recover or clearly report interrupted jobs.
+- Browser refresh preserves the conversation mapping, replays missed job events, and recovers the saved response.
 - Unauthenticated users cannot load conversations, Wiki content, or Agent Info for another client instance.
 - Browser responses, rendered messages, SSE events, and client-side state contain no developer tokens, OAuth credentials, agent credentials, or sensitive prompts.
 - The UI is keyboard navigable and readable at desktop and mobile breakpoints, including focus states, labels, and error messages.
@@ -785,11 +786,13 @@ needed to keep one VM healthy:
   excluded; the file rotates at 5 MB.
 
 The browser keeps Bob's loader visible while a job is queued or running. Codex agent messages are
-translated into short progress messages; keep-alive comments are invisible. If SSE disconnects,
-the browser reconnects and polls `GET /api/jobs/{job_id}`. A completed job reloads its saved
-conversation response, so a browser/network interruption does not lose the answer. Only a real
-`failed`, `cancelled`, or timeout state enables retry and displays a retry message; retry creates a
-new job and never revives the old process.
+translated into short progress messages; keep-alive comments are invisible. A healthy job uses one
+SSE stream and no polling. If SSE disconnects, the browser closes the failed stream, reconnects to
+the same job at most five times with exponential backoff, then performs at most five slow status
+checks before stopping automatic requests. A browser refresh calls the active-job endpoint and
+reattaches to the same job, replaying missed events. A completed job reloads its saved conversation
+response. Only a real `failed`, `cancelled`, or timeout state enables retry; retry creates a new job
+and never revives the old process.
 
 Operational settings:
 
@@ -807,5 +810,6 @@ docker-compose exec web grep -E 'job_failed|timed out|job_cancelled' /data/metad
 ```
 
 Acceptance tests must cover process-group cleanup, stderr backpressure, explicit timeout errors,
-queueing, SSE reconnect, status polling, saved-response recovery, retry idempotency, and the
-absence of orphan Codex/Bob processes after timeout.
+queueing, bounded SSE reconnect, healthy-stream no-polling, browser-refresh active-job recovery,
+saved-response recovery, duplicate submission protection, retry idempotency, and the absence of
+orphan Codex/Bob processes after timeout or cancellation.
