@@ -273,6 +273,33 @@ class TestProcessedPeriodMaterialization(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["network"], "Google Search")
         self.assertEqual(rows[0]["cost"], "200")
+
+    def test_granular_chunks_are_combined_before_aggregation(self):
+        customer = "9998887777"
+        raw_dir = dp.RAW_DIR / "campaign_network_period"
+        columns = [
+            "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
+        ] + dp.SUM_METRICS
+        for start, end, impressions in (
+            ("2026-05-01", "2026-05-07", "100"),
+            ("2026-05-08", "2026-05-14", "250"),
+        ):
+            dp.write_csv(raw_dir / f"{customer}_{start}_{end}_test.csv", [{
+                "customer_id": customer, "campaign_id": "camp-1", "campaign_name": "Campaign",
+                "campaign_status": "ENABLED", "network": "SEARCH", "impressions": impressions,
+                "clicks": "10", "cost": "20", "installs": "5", "in_app_conversions": "1",
+            }], columns)
+
+        processed = dp.ensure_processed_file_for_period(
+            "campaign_network_period", "campaign-network", self.d("2026-05-01"),
+            self.d("2026-05-14"), customer, "installs",
+        )
+
+        self.assertIsNotNone(processed)
+        rows = dp.read_csv(processed)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["impressions"], "350")
+        self.assertEqual(rows[0]["clicks"], "20")
         self.assertEqual(rows[0]["cpi"], "4")
 
     def test_compare_months_missing_guidance_uses_exact_mtd_windows(self):
@@ -950,6 +977,36 @@ class TestFetchDedupe(unittest.TestCase):
         lines = [json.loads(line) for line in dp._pull_log_path().read_text().splitlines() if line.strip()]
         self.assertEqual(sorted(line["outcome"] for line in lines), ["fetched", "skipped_inflight"])
         self.assertTrue(all(line.get("client_instance_id") == "alpha-client" for line in lines))
+
+    def test_granular_month_is_split_into_seven_day_pulls(self):
+        args = self._fetch_args()
+        args.from_date = "2026-08-01"
+        args.to = "2026-08-30"
+        calls = []
+        with mock.patch.object(dp, "_fetch_one", side_effect=lambda child: calls.append(child)):
+            dp.fetch(args)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(
+            [(c.from_date, c.to) for c in calls],
+            [
+                ("2026-08-01", "2026-08-07"),
+                ("2026-08-08", "2026-08-14"),
+                ("2026-08-15", "2026-08-21"),
+                ("2026-08-22", "2026-08-28"),
+                ("2026-08-29", "2026-08-30"),
+            ],
+        )
+
+    def test_account_period_month_is_not_split(self):
+        args = self._fetch_args()
+        args.query = "account_network_period"
+        args.from_date = "2026-08-01"
+        args.to = "2026-08-30"
+        calls = []
+        with mock.patch.object(dp, "_fetch_one", side_effect=lambda child: calls.append(child)):
+            dp.fetch(args)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0], args)
 
 
 if __name__ == "__main__":

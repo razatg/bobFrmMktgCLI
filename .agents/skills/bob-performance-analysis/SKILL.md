@@ -30,6 +30,7 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
   - `--reason "user asked what happened yesterday vs SDLW" --question "what happened yesterday"`
   - `--reason "delta diagnosis: W20 vs W19 campaign files missing" --question "why did CPA go up last week"`
   - `--reason "daily bootstrap for account review" --question "bootstrap"`
+- **Granular pull limit:** campaign, ad-group, network-daily, and creative-level queries are limited to seven inclusive calendar days per Google Ads pull. If a larger range is requested, `fetch` runs sequential seven-day chunks automatically (a 30–31 day range is normally five pulls). Every chunk is deduplicated and logged; aggregation must use the complete `--from`/`--to` range so all chunks are combined before metrics are calculated. Account-level period queries are not chunked.
 - **Use the project launcher after onboarding.** Once onboarding has created `./bob`, run Bob commands through `./bob <subcommand>` so the project virtual environment is used. Use `python3 lib/datapull.py onboard` only to start onboarding before the launcher exists.
 - **Log wiki cache hits.** When the wiki cache check finds a valid recent analysis and you return it without fetching, record this: `./bob log-pull --query {relevant_query} --reason "wiki cache hit — {intent} analysis from {date} still valid" --question "{user's exact question}" --outcome skipped_wiki`. This keeps the pull log as a complete question-to-outcome trail.
 

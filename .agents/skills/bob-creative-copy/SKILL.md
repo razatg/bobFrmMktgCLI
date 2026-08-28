@@ -23,9 +23,11 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 # Check processed creative data exists
 ls data/processed/creative/
 
-# If missing or older than 7 days, re-fetch:
+# If missing or older than 7 days, re-fetch. `fetch` automatically splits this
+# 30-day granular request into sequential chunks of at most 7 days, then the
+# range-aware aggregate recombines the complete window:
 python3 lib/datapull.py fetch --query creative_period --days 30 --reason "creative copy plan"
-python3 lib/datapull.py aggregate --grain creative_period
+python3 lib/datapull.py aggregate --grain creative_period --from <start> --to <end>
 
 # Generate YAML plan + batch prompt files
 python3 lib/datapull.py suggest-creative-copy

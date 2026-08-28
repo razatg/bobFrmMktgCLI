@@ -76,6 +76,23 @@ DATE_QUERIES = {
     "creative_period",
 }
 
+# Granular entity-level queries are intentionally capped so a single Codex job
+# cannot create a large burst of rows/CPU on the hosted VM. Account-level period
+# queries remain whole-period pulls because their result is already rolled up.
+GRANULAR_QUERY_MAX_DAYS = 7
+GRANULAR_DATE_QUERIES = {
+    "campaign_daily",
+    "campaign_reach_daily",
+    "network_daily",
+    "creative_asset_daily",
+    "conversion_action_daily",
+    "creative_conversion_action_daily",
+    "campaign_network_period",
+    "campaign_reach_period",
+    "adgroup_network_period",
+    "creative_period",
+}
+
 DEFAULT_CREATIVE_MIN_IMPRESSIONS = 50000
 STATIC_BANNER_REFRESH_DAYS = 90
 
@@ -379,6 +396,21 @@ def resolve_range(args: argparse.Namespace) -> tuple[dt.date, dt.date]:
     if start > end:
         die(f"start date {start} is after end date {end}")
     return start, end
+
+
+def split_date_range(
+    start: dt.date, end: dt.date, max_days: int = GRANULAR_QUERY_MAX_DAYS
+) -> list[tuple[dt.date, dt.date]]:
+    """Split an inclusive date range into contiguous, non-overlapping windows."""
+    if max_days < 1:
+        raise ValueError("max_days must be positive")
+    windows: list[tuple[dt.date, dt.date]] = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + dt.timedelta(days=max_days - 1), end)
+        windows.append((cursor, chunk_end))
+        cursor = chunk_end + dt.timedelta(days=1)
+    return windows
 
 
 def resolve_period_dates(period: str) -> list[tuple[dt.date, dt.date]]:
@@ -769,6 +801,27 @@ def find_raw_file_for_period(
     return sorted(matches, key=lambda p: (p.stem.split("_")[-1], p.stat().st_mtime), reverse=True)[0]
 
 
+def find_raw_files_for_range(
+    query_name: str,
+    start: dt.date,
+    end: dt.date,
+    customer_id: str | None = None,
+) -> list[Path] | None:
+    """Return every exact contiguous chunk needed to cover an inclusive range."""
+    files: list[Path] = []
+    windows = (
+        split_date_range(start, end)
+        if query_name in GRANULAR_DATE_QUERIES
+        else [(start, end)]
+    )
+    for chunk_start, chunk_end in windows:
+        path = find_raw_file_for_period(query_name, chunk_start, chunk_end, customer_id)
+        if not path:
+            return None
+        files.append(path)
+    return files
+
+
 def find_period_files(query_name: str, n: int) -> list[Path]:
     """Return up to n raw CSV files for a query, sorted by start_date in filename descending."""
     query_dir = RAW_DIR / query_name
@@ -815,19 +868,20 @@ def ensure_processed_file_for_period(
     if found:
         return found
 
-    raw_path = find_raw_file_for_period(grain, start, end, customer_id)
-    if not raw_path:
+    raw_paths = find_raw_files_for_range(grain, start, end, customer_id)
+    if not raw_paths:
         return None
 
     aggregate(argparse.Namespace(
         grain=grain,
         source=None,
         goal=primary_goal,
-        input=str(raw_path),
+        input=None,
+        input_paths=[str(path) for path in raw_paths],
         customer=customer_id,
         output=None,
-        from_date=None,
-        to=None,
+        from_date=start.isoformat(),
+        to=end.isoformat(),
     ))
     return find_processed_files_for_period(subdir, [(start, end)], customer_id)[0]
 
@@ -1072,7 +1126,7 @@ def garf_failure_message(query_name: str, meta_file: Path, stdout: str, stderr: 
     return f"GARF failed for {query_name}. See {meta_file}"
 
 
-def fetch(args: argparse.Namespace) -> None:
+def _fetch_one(args: argparse.Namespace) -> None:
     ensure_dirs()
     profile = load_profile(required=not bool(args.account))
     query_name = args.query
@@ -1215,8 +1269,53 @@ def fetch(args: argparse.Namespace) -> None:
         )
 
 
+def fetch(args: argparse.Namespace) -> None:
+    """Fetch one query, chunking granular ranges into sequential seven-day pulls."""
+    if args.query not in GRANULAR_DATE_QUERIES:
+        _fetch_one(args)
+        return
+
+    start, end = resolve_range(args)
+    windows = split_date_range(start, end)
+    if len(windows) == 1:
+        _fetch_one(args)
+        return
+
+    print(
+        f"{args.query}: {start}..{end} -> {len(windows)} sequential pulls "
+        f"(maximum {GRANULAR_QUERY_MAX_DAYS} days each)"
+    )
+    failures: list[str] = []
+    for index, (chunk_start, chunk_end) in enumerate(windows, start=1):
+        print(f"\n==> granular pull {index}/{len(windows)}: {chunk_start}..{chunk_end}")
+        child = argparse.Namespace(
+            query=args.query,
+            days=None,
+            from_date=chunk_start.isoformat(),
+            to=chunk_end.isoformat(),
+            account=args.account,
+            config=args.config,
+            dry_run=args.dry_run,
+            run_id=(f"{args.run_id}-{index:03d}" if args.run_id else None),
+            reason=args.reason,
+            question=args.question,
+            force=args.force,
+        )
+        try:
+            _fetch_one(child)
+        except SystemExit as exc:
+            failures.append(f"{chunk_start}..{chunk_end}: exit {exc.code}")
+            break
+    if failures:
+        print("\ncompleted with failures:")
+        for failure in failures:
+            print(f"- {failure}")
+        raise SystemExit(1)
+
+
 def bootstrap(args: argparse.Namespace) -> None:
     failures: list[str] = []
+    aggregate_ranges: dict[str, tuple[dt.date, dt.date]] = {}
     for entry in DEFAULT_BOOTSTRAP:
         query_name = entry["query"]
         if "period" in entry:
@@ -1225,6 +1324,10 @@ def bootstrap(args: argparse.Namespace) -> None:
         else:
             windows = [None]
             label = f"{query_name} ({entry['days']} days)"
+            if query_name in GRANULAR_DATE_QUERIES:
+                end = parse_date(args.to) or (today() - dt.timedelta(days=1))
+                start = parse_date(args.from_date) or (end - dt.timedelta(days=entry["days"] - 1))
+                aggregate_ranges[query_name] = (start, end)
         print(f"\n==> fetching {label}")
         for window in windows:
             _reason = getattr(args, "reason", "") or ""
@@ -1275,7 +1378,12 @@ def bootstrap(args: argparse.Namespace) -> None:
     if not args.dry_run:
         for grain in ("account_network_period", "campaign_network_period", "creative_period", "campaign_weekly_trend"):
             try:
-                agg_args = argparse.Namespace(grain=grain, source=None, goal=None, input=None, customer=None, output=None)
+                date_range = aggregate_ranges.get(grain)
+                agg_args = argparse.Namespace(
+                    grain=grain, source=None, goal=None, input=None, customer=None, output=None,
+                    from_date=date_range[0].isoformat() if date_range else None,
+                    to=date_range[1].isoformat() if date_range else None,
+                )
                 aggregate(agg_args)
             except SystemExit:
                 print(f"  aggregate {grain}: skipped (no data yet)")
@@ -1628,32 +1736,47 @@ def _agg_network_period(
     customer = (args.customer or profile.get("google_ads_customer_id") or "unknown").replace("-", "")
     from_date = getattr(args, "from_date", None)
     to_date = getattr(args, "to", None)
+    input_paths: list[Path]
+    range_start: dt.date | None = None
+    range_end: dt.date | None = None
+    if from_date and to_date:
+        try:
+            range_start = dt.date.fromisoformat(from_date)
+            range_end = dt.date.fromisoformat(to_date)
+        except ValueError:
+            die("--from and --to must be ISO dates: YYYY-MM-DD")
     if args.input:
-        input_path = Path(args.input).expanduser()
+        input_paths = [Path(args.input).expanduser()]
+    elif getattr(args, "input_paths", None):
+        input_paths = [Path(path).expanduser() for path in args.input_paths]
     elif from_date or to_date:
         if not from_date or not to_date:
             die("aggregate period selection requires both --from and --to")
-        try:
-            start = dt.date.fromisoformat(from_date)
-            end = dt.date.fromisoformat(to_date)
-        except ValueError:
-            die("--from and --to must be ISO dates: YYYY-MM-DD")
-        selected = find_raw_file_for_period(source, start, end, customer)
-        if not selected:
-            die(f"no raw CSV found for {source} {start}–{end} for account {customer}")
-        input_path = selected
+        input_paths = find_raw_files_for_range(source, range_start, range_end, customer) or []
+        if not input_paths:
+            missing = next(
+                (f"{start}–{end}" for start, end in split_date_range(range_start, range_end)
+                 if not find_raw_file_for_period(source, start, end, customer)),
+                f"{range_start}–{range_end}",
+            )
+            die(f"no raw CSV found for {source} chunk {missing} for account {customer}")
     else:
-        input_path = newest_raw(source)
-    rows = read_csv(input_path)
+        input_paths = [newest_raw(source)]
+    rows: list[dict[str, Any]] = []
+    for input_path in input_paths:
+        rows.extend(read_csv(input_path))
     # Reach is optional; network is only present for the network-split grains.
     for row in rows:
         if "network" in row:
             row["network"] = _canonical_network(row.get("network", ""))
     out_rows = _aggregate_period_rows(rows, _NETWORK_PERIOD_KEY_COLS[grain], primary_goal)
 
-    parts = input_path.stem.split("_")
-    file_start = parts[1] if len(parts) >= 3 else "unknown"
-    file_end = parts[2] if len(parts) >= 3 else "unknown"
+    if range_start and range_end:
+        file_start, file_end = range_start.isoformat(), range_end.isoformat()
+    else:
+        parts = input_paths[-1].stem.split("_")
+        file_start = parts[1] if len(parts) >= 3 else "unknown"
+        file_end = parts[2] if len(parts) >= 3 else "unknown"
     if args.output:
         output_path = Path(args.output).expanduser()
     else:
@@ -1663,7 +1786,7 @@ def _agg_network_period(
     print(f"processed aggregate written: {output_path}")
     if not out_rows:
         print(
-            f"WARNING: aggregate {grain} produced 0 rows from {input_path.name}.",
+            f"WARNING: aggregate {grain} produced 0 rows from {len(input_paths)} raw file(s).",
             file=sys.stderr,
         )
 
@@ -1672,8 +1795,30 @@ def _agg_creative_period(
     args: argparse.Namespace, profile: dict, primary_goal: str
 ) -> None:
     source = args.source or "creative_period"
-    input_path = Path(args.input).expanduser() if args.input else newest_raw(source)
-    rows = read_csv(input_path)
+    range_start: dt.date | None = None
+    range_end: dt.date | None = None
+    customer = (args.customer or profile.get("google_ads_customer_id") or "unknown").replace("-", "")
+    if getattr(args, "from_date", None) and getattr(args, "to", None):
+        try:
+            range_start = dt.date.fromisoformat(args.from_date)
+            range_end = dt.date.fromisoformat(args.to)
+        except ValueError:
+            die("--from and --to must be ISO dates: YYYY-MM-DD")
+    if args.input:
+        input_paths = [Path(args.input).expanduser()]
+    elif getattr(args, "input_paths", None):
+        input_paths = [Path(path).expanduser() for path in args.input_paths]
+    elif getattr(args, "from_date", None) or getattr(args, "to", None):
+        if not args.from_date or not args.to:
+            die("aggregate period selection requires both --from and --to")
+        input_paths = find_raw_files_for_range(source, range_start, range_end, customer) or []
+        if not input_paths:
+            die(f"no complete raw CSV range found for {source} {range_start}–{range_end}")
+    else:
+        input_paths = [newest_raw(source)]
+    rows: list[dict[str, Any]] = []
+    for input_path in input_paths:
+        rows.extend(read_csv(input_path))
     key_cols = [
         "customer_id", "campaign_id", "campaign_name",
         "ad_group_id", "ad_group_name",
@@ -1685,10 +1830,12 @@ def _agg_creative_period(
     min_imp = int(profile.get("creative_min_impressions", DEFAULT_CREATIVE_MIN_IMPRESSIONS))
     out_rows = [r for r in out_rows if number(r.get("impressions")) >= min_imp]
 
-    parts = input_path.stem.split("_")
-    file_start = parts[1] if len(parts) >= 3 else "unknown"
-    file_end = parts[2] if len(parts) >= 3 else "unknown"
-    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
+    if range_start and range_end:
+        file_start, file_end = range_start.isoformat(), range_end.isoformat()
+    else:
+        parts = input_paths[-1].stem.split("_")
+        file_start = parts[1] if len(parts) >= 3 else "unknown"
+        file_end = parts[2] if len(parts) >= 3 else "unknown"
     if args.output:
         output_path = Path(args.output).expanduser()
     else:

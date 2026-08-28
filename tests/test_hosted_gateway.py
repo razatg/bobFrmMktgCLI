@@ -352,7 +352,11 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('/api/jobs/${jid}', js)
         self.assertIn('RECONNECTING', js)
         self.assertIn('/api/conversations/${conversation}/active-job', js)
-        self.assertIn('STOP JOB', html)
+        self.assertNotIn('STOP JOB', html)
+        self.assertIn('press Esc to stop', js)
+        self.assertIn('cancelActiveJob', js)
+        self.assertIn('safeActivityText', js)
+        self.assertIn('job-activity', js)
         self.assertIn('state.retries<=5', js)
 
     def test_active_job_blocks_duplicate_prompt_and_is_discoverable(self):

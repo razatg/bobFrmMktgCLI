@@ -9,7 +9,7 @@ Use for questions asking which creatives are underperforming after enough delive
 ## Required Inputs
 
 - `.bob/profile.json`
-- `creative_period` processed slice (impression-filtered, 30-day window)
+- `creative_period` processed slice (impression-filtered, complete 30-day window assembled from granular pulls of at most 7 days each)
 
 ## CLI Commands
 
@@ -22,7 +22,7 @@ python3 lib/datapull.py aggregate --grain creative_period
 If bootstrap data is stale:
 ```bash
 python3 lib/datapull.py fetch --query creative_period --days 30 --reason "creative underperformance review"
-python3 lib/datapull.py aggregate --grain creative_period
+python3 lib/datapull.py aggregate --grain creative_period --from <start> --to <end>
 ```
 
 **Step 2 — Run the underperformance slicer:**

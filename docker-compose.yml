@@ -1,6 +1,8 @@
 services:
   web:
     build: .
+    cpus: "1.0"
+    mem_limit: 3g
     env_file:
       - .env
     ports: ["8000:8000"]
