@@ -16,6 +16,7 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 - **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, read `logs/pull-log.jsonl` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - **Never call `creative-copy-apply` without explicit user approval** at the approval table.
 - Never generate copy suggestions yourself inline. The subagent in Step 2 does this — always.
+- All creative-copy artefacts are account-scoped. First identify the active account's customer ID with `./bob list-accounts`, remove dashes, and use `wiki/<customer_id>/action-items/` for every plan, batch, suggestion, and final artefact path. Never use the flat `wiki/action-items/` directory.
 
 ## Step 1 — Generate the candidate list
 
@@ -27,17 +28,17 @@ ls data/processed/creative/
 # requests. The account profile supplies the lookback (default 15 days) and
 # impression threshold (default 50,000). These requests are deliberately not
 # daily-segmented or combined with image/video rows.
-python3 lib/datapull.py fetch --query creative_headline_period --reason "creative copy plan: headlines"
-python3 lib/datapull.py aggregate --grain creative_period --source creative_headline_period
-python3 lib/datapull.py fetch --query creative_description_period --reason "creative copy plan: descriptions"
-python3 lib/datapull.py aggregate --grain creative_period --source creative_description_period
+./bob fetch --query creative_headline_period --reason "creative copy plan: headlines"
+./bob aggregate --grain creative_period --source creative_headline_period
+./bob fetch --query creative_description_period --reason "creative copy plan: descriptions"
+./bob aggregate --grain creative_period --source creative_description_period
 
 # Generate YAML plan + batch prompt files
-python3 lib/datapull.py suggest-creative-copy
+./bob suggest-creative-copy --output-dir wiki/<customer_id>/action-items
 # Outputs:
-#   wiki/action-items/creative-copy-YYYY-MM-DD.yaml           — per-asset plan
-#   wiki/action-items/creative-copy-YYYY-MM-DD-batch-001.txt  — assets 1–25
-#   wiki/action-items/creative-copy-YYYY-MM-DD-batch-002.txt  — assets 26–50
+#   wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD.yaml           — per-asset plan
+#   wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-batch-001.txt  — assets 1–25
+#   wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-batch-002.txt  — assets 26–50
 #   ... (one file per 25 assets)
 ```
 
@@ -62,7 +63,7 @@ Process them STRICTLY ONE AT A TIME. Each batch is a blocking round-trip:
 
 **CHECKPOINT A — Read one file** (use the Read tool directly, not Explore):
 ```
-Read: wiki/action-items/creative-copy-YYYY-MM-DD-batch-NNN.txt
+Read: wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-batch-NNN.txt
 ```
 
 **CHECKPOINT B — Spawn ONE Agent call** and WAIT for it to return before continuing:
@@ -89,11 +90,11 @@ Show the user the combined JSON from Step 2. Then write it to a file (use the Wr
 ```bash
 # Write combined suggestions to a file first (avoids shell arg-length limits)
 # Use the Write tool to write the JSON array to:
-#   wiki/action-items/creative-copy-YYYY-MM-DD-suggestions.json
+#   wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-suggestions.json
 
-python3 lib/datapull.py creative-copy-apply \
-  --plan wiki/action-items/creative-copy-YYYY-MM-DD.yaml \
-  --suggestions "$(cat wiki/action-items/creative-copy-YYYY-MM-DD-suggestions.json)"
+./bob creative-copy-apply \
+  --plan wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD.yaml \
+  --suggestions "$(cat wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-suggestions.json)"
 ```
 
 The CLI prints a per-asset approval table. Wait for explicit user confirmation ("yes", "apply", "go ahead") before proceeding. The user may type `edit N` to revise individual suggestions at the prompt.
@@ -106,11 +107,11 @@ After `creative-copy-apply` completes:
 
 1. **Clean up working files** — delete all batch and suggestions files for this run:
 ```bash
-rm wiki/action-items/creative-copy-YYYY-MM-DD-batch-*.txt
-rm wiki/action-items/creative-copy-YYYY-MM-DD-suggestions.json
+rm wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-batch-*.txt
+rm wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-suggestions.json
 ```
 
-2. **Update `wiki/Index.md`** under `## Action Items` without asking:
+2. **Update `wiki/<customer_id>/Index.md`** under `## Action Items` without asking:
 ```
 - [Creative Copy — YYYY-MM-DD](action-items/creative-copy-YYYY-MM-DD.yaml) — N new assets live, M paused — applied YYYY-MM-DD
 ```

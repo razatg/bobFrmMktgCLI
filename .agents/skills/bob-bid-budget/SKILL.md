@@ -21,7 +21,7 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 - Use `.bob/profile.json` for `cac_ceiling`, `bid_budget_change_pct`, `primary_goal`, and `currency`.
 - For retrospective questions, require an applied YAML plan path. If not provided, ask the user which plan to evaluate.
 - **Always pass `--reason` when calling `fetch` or `bootstrap`.** This is logged to `logs/pull-log.jsonl`.
-- **Write all outputs to `wiki/` only** — analyses to `wiki/analyses/`, mutation plans to `wiki/action-items/`. Never write to agent brain directories, temp paths, or any other location.
+- **Write all outputs to the active account's wiki only** — first read the active account customer ID from `.bob/accounts.json`, remove dashes, and use `wiki/{customer_id_no_hyphens}/analyses/` and `wiki/{customer_id_no_hyphens}/action-items/`. Never write to the flat `wiki/analyses/` or `wiki/action-items/` directories, agent brain directories, temp paths, or any other location.
 - **Do not use `--dry-run` in normal operation.** Run `bid-budget-recommend` directly — it writes the CSV and YAML plan that the user reviews. `--dry-run` is for development only and does not produce the files needed for review or apply.
 
 ## Intent Routing
@@ -60,9 +60,9 @@ If the output contains `STATUS: FILE NOT FOUND` under the write config block:
 
 **Do NOT ask the user to run anything manually.** The agent handles the full flow.
 
-**Step 0 — Check `wiki/Index.md` for a recent bid/budget plan (do this first, before any `ls` or CLI command):**
+**Step 0 — Check `wiki/{customer_id_no_hyphens}/Index.md` for a recent bid/budget plan (do this first, before any `ls` or CLI command):**
 
-Read `wiki/Index.md`. It is small and must always be checked first.
+Read `wiki/{customer_id_no_hyphens}/Index.md`. It is small and must always be checked first.
 
 - If an entry under `## Action Items` for `bid_budget_recommend` exists within 7 days, tell the user:
   > "I generated a plan on \<date\> — [link]. Want a fresh one this week, or is that still current?"
@@ -104,7 +104,7 @@ If `bid-budget-recommend` errors with "no processed file found", it means Step 1
 
 ## Post-Apply Wiki Update
 
-After `bid-budget-apply` completes (whether fully applied or partially applied), immediately update `wiki/Index.md` **without asking**:
+After `bid-budget-apply` completes (whether fully applied or partially applied), immediately update `wiki/{customer_id_no_hyphens}/Index.md` **without asking**:
 
 - Find the existing line for this plan under `## Action Items`
 - Append the apply result inline, e.g.:
@@ -117,7 +117,7 @@ This prevents duplicate apply runs and gives future sessions the outcome at a gl
 
 ## Wiki Save Rules
 
-Follow the wiki save rules in `CLAUDE.md` → "Wiki save rules" whenever the user confirms a save: write from conversation output only (no re-running CLI, no CSV reads, no scripts), **never truncate** (every row of every table), update `Index.md` with a one-line entry under `## Analyses`/`## Action Items`, start each file with the `← [Wiki Index](../Index.md)` backlink (for a `.yaml` plan, add a `# See: wiki/Index.md` comment instead), pad tables for raw-text readability, and write only under `analyses/`/`action-items/`. For prior context on a fresh run, read the Index one-liner only — never open the full YAML.
+Follow the wiki save rules in `CLAUDE.md` → "Wiki save rules" whenever the user confirms a save: write from conversation output only (no re-running CLI, no CSV reads, no scripts), **never truncate** (every row of every table), update `wiki/{customer_id_no_hyphens}/Index.md` with a one-line entry under `## Analyses`/`## Action Items`, start each file with the `← [Wiki Index](../Index.md)` backlink (for a `.yaml` plan, add a `# See: Index.md` comment instead), pad tables for raw-text readability, and write only under that account's `analyses/`/`action-items/`. For prior context on a fresh run, read the Index one-liner only — never open the full YAML.
 
 ## Failsafe — Unanswerable Questions
 

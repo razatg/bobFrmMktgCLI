@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio, base64, hashlib, json, logging, os, secrets, shlex, shutil, signal, time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request as URLRequest, urlopen
 from urllib.error import HTTPError, URLError
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -370,7 +370,9 @@ async def health(): return {'status':'ok'}
 async def session(request: Request):
     row = request.app.state.store.session_user(request.cookies.get('bob_session'))
     if not row: return {'authenticated':False}
-    return {'authenticated':True,'user':{'id':row['id'],'identifier':row['email_or_identifier'],'role':row['role'],'status':row['status']},'csrf':row['csrf_token']}
+    client = membership(request.app.state.store, row, None)
+    google_connected = bool(client and request.app.state.store.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(row['id'],client['client_instance_id'])))
+    return {'authenticated':True,'user':{'id':row['id'],'identifier':row['email_or_identifier'],'role':row['role'],'status':row['status']},'google_connected':google_connected,'csrf':row['csrf_token']}
 @app.post('/auth/bootstrap')
 async def bootstrap(body: Bootstrap, request: Request):
     s=request.app.state.store
@@ -726,24 +728,28 @@ async def google_oauth_start(request: Request):
 
 @app.get('/api/google-ads/oauth/callback')
 async def google_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None, request: Request = None):
-    if not state: raise HTTPException(400,'missing OAuth state')
+    if not state: return RedirectResponse(url='/?google_auth=failed', status_code=303)
     s=request.app.state.store; tx=s.one('SELECT * FROM oauth_transactions WHERE state_hash=? AND status="pending"',(hash_code(state),))
-    if not tx or tx['expires_at'] < now(): raise HTTPException(400,'invalid or expired OAuth state')
-    if error: s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); return {'ok':False,'error':error}
-    if not code: raise HTTPException(400,'missing OAuth code')
+    if not tx or tx['expires_at'] < now(): return RedirectResponse(url='/?google_auth=failed', status_code=303)
+    def result(status):
+        path=tx['return_path'] or '/'; parts=urlsplit(path); query=dict(parse_qsl(parts.query,keep_blank_values=True)); query['google_auth']=status
+        return RedirectResponse(url=urlunsplit(('', '', parts.path or '/', urlencode(query), '')), status_code=303)
+    if error: s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); return result('failed')
+    if not code: s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); return result('failed')
     config=s.one('SELECT * FROM client_google_configs WHERE client_instance_id=?',(tx['client_instance_id'],))
     try:
+        if not config: raise HTTPException(503,'Google Ads application is not configured')
         token=exchange_google_code(code,config['oauth_client_id'],app.state.secrets.get(config['oauth_client_secret_ref']),app.state.secrets.get(tx['pkce_verifier_ref']),configured_redirect_uri(s))
-    except HTTPException as exc:
-        s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); raise exc
+    except Exception as exc:
+        s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); runtime_log('oauth_failed',user_id=tx['user_id'],client_instance_id=tx['client_instance_id'],error_type=type(exc).__name__); return result('failed')
     refresh=token.get('refresh_token')
-    if not refresh: raise HTTPException(502,'Google did not return a refresh token; reconnect with consent')
+    if not refresh: s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); return result('failed')
     existing=s.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(tx['user_id'],tx['client_instance_id']))
     ref=app.state.secrets.put(refresh); t=now()
     if existing: s.run('UPDATE google_ads_connections SET refresh_token_ref=?,scopes=?,status="connected",last_error=NULL,last_verified_at=?,updated_at=? WHERE id=?',(ref,token.get('scope','https://www.googleapis.com/auth/adwords'),t,t,existing['id']))
     else: s.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(new_id(),tx['user_id'],tx['client_instance_id'],None,None,ref,token.get('scope','https://www.googleapis.com/auth/adwords'),'connected',t,None,t,t))
     s.run('UPDATE oauth_transactions SET status="consumed" WHERE id=?',(tx['id'],))
-    return RedirectResponse(url=tx['return_path'] or '/', status_code=303)
+    return result('success')
 
 def datetime_plus(hours):
     from datetime import datetime,timedelta,timezone

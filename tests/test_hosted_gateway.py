@@ -134,6 +134,7 @@ class GatewayTests(unittest.TestCase):
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
         member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member@example.com','password':'another-secure-password'})
         member_csrf=member.json()['csrf']
+        self.assertFalse(self.client.get('/auth/session').json()['google_connected'])
         start=self.client.post('/api/google-ads/oauth/start',headers={'X-CSRF-Token':member_csrf})
         self.assertEqual(start.status_code,200,start.text)
         query=parse_qs(urlparse(start.json()['authorization_url']).query)
@@ -143,6 +144,7 @@ class GatewayTests(unittest.TestCase):
         with patch.object(app_module,'exchange_google_code',return_value={'refresh_token':'user-refresh','scope':'https://www.googleapis.com/auth/adwords'}):
             callback=self.client.get('/api/google-ads/oauth/callback',params={'code':'auth-code','state':query['state'][0]})
         self.assertEqual(callback.status_code,200,callback.text)
+        self.assertTrue(self.client.get('/auth/session').json()['google_connected'])
         connection=self.app.state.store.one('SELECT * FROM google_ads_connections')
         self.assertEqual(connection['status'],'connected')
         self.assertEqual(self.app.state.secrets.get(connection['refresh_token_ref']),'user-refresh')
