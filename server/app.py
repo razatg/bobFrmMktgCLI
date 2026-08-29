@@ -54,7 +54,17 @@ class Redeem(BaseModel): code: str; identifier: str; password: str
 class MessageIn(BaseModel): content: str
 class AccountSelectIn(BaseModel): account_id: str
 class PasswordIn(BaseModel): current_password: str; new_password: str
-class AccountIn(BaseModel): customer_id: str; account_name: str | None = None; permission: str = 'read'
+class AccountIn(BaseModel):
+    customer_id: str
+    account_name: str | None = None
+    permission: str = 'read'
+    primary_goal: str = 'in_app_conversions'
+    currency: str = ''
+    creative_lookback_days: int = 15
+    creative_min_impressions: int = 50000
+    cac_ceiling: float = 200
+    bid_budget_change_pct: float = 10
+    bid_budget_cooldown_days: int = 14
 class ClientIn(BaseModel):
     name: str; slug: str | None = None; identifier: str; password: str
     mcc_name: str | None = None; mcc_id: str | None = None; codex_model: str | None = None
@@ -70,6 +80,15 @@ class GoogleConfigIn(BaseModel):
     base_url: str | None = None
     redirect_uri: str | None = None
 class AccountPermissionIn(BaseModel): permission: str
+
+def account_settings(body):
+    goal = body.primary_goal if body.primary_goal in {'installs', 'in_app_conversions'} else None
+    if not goal: raise HTTPException(400, 'primary goal must be installs or in_app_conversions')
+    if body.currency.strip() and (len(body.currency.strip()) != 3 or not body.currency.strip().isalpha()): raise HTTPException(400, 'currency must be a 3-letter code such as INR or USD')
+    if not 1 <= body.creative_lookback_days <= 30: raise HTTPException(400, 'creative lookback must be 1–30 days')
+    if body.creative_min_impressions < 0 or body.cac_ceiling < 0 or body.bid_budget_change_pct < 0 or body.bid_budget_change_pct > 20 or body.bid_budget_cooldown_days < 0:
+        raise HTTPException(400, 'account thresholds must be non-negative and bid/budget change must be at most 20%')
+    return (goal, body.currency.strip().upper(), 'app_installs' if goal == 'installs' else 'app_in_app_conversions', body.creative_lookback_days, body.creative_min_impressions, body.cac_ceiling, body.bid_budget_change_pct, body.bid_budget_cooldown_days)
 def default_codex_model(): return os.getenv('BOB_CODEX_MODEL', 'gpt-5.6-luna').strip() or 'gpt-5.6-luna'
 def client_codex_model(store, client_instance_id):
     row=store.one('SELECT codex_model FROM client_instances WHERE id=?',(client_instance_id,))
@@ -304,7 +323,7 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
     # Rebuild the CLI-facing account registry in the conversation-local state
     # root so one web conversation's account choice never mutates another's.
     user=store.one('SELECT role FROM users WHERE id=?',(user_id,))
-    account_sql='SELECT id,customer_id,account_name,is_active FROM client_accounts WHERE client_instance_id=? AND is_active=1'
+    account_sql='SELECT id,customer_id,account_name,is_active,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days FROM client_accounts WHERE client_instance_id=? AND is_active=1'
     account_args=[client_instance_id]
     if not user or user['role']!='admin':
         account_sql+=' AND EXISTS (SELECT 1 FROM user_account_access ua WHERE ua.account_id=client_accounts.id AND ua.user_id=?)'
@@ -329,6 +348,14 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
             'google_ads_customer_id': account['customer_id'],
             'account_name': account['account_name'],
             'google_ads_read_config_path': str(path),
+            'primary_goal': account['primary_goal'],
+            'currency': account['currency'],
+            'campaign_goal_type': account['campaign_goal_type'],
+            'creative_lookback_days': account['creative_lookback_days'],
+            'creative_min_impressions': account['creative_min_impressions'],
+            'cac_ceiling': account['cac_ceiling'],
+            'bid_budget_change_pct': account['bid_budget_change_pct'],
+            'bid_budget_cooldown_days': account['bid_budget_cooldown_days'],
         }, indent=2) + '\n')
         try: profile_path.chmod(0o600)
         except OSError: pass
@@ -486,15 +513,17 @@ async def create_client(body: ClientIn, request: Request):
         customer_id=''.join(ch for ch in account.customer_id if ch.isdigit())
         if len(customer_id)!=10: raise HTTPException(400,'customer ID must contain 10 digits')
         if customer_id in seen_accounts: raise HTTPException(409,'duplicate account customer ID')
-        seen_accounts.add(customer_id); normalized_accounts.append((account,customer_id))
+        seen_accounts.add(customer_id); normalized_accounts.append((account,customer_id,account_settings(account)))
     cid,uid=new_id(),new_id(); t=now(); source_config=s.one('''SELECT g.developer_token_ref,g.oauth_client_id,g.oauth_client_secret_ref
       FROM client_google_configs g JOIN client_memberships m ON m.client_instance_id=g.client_instance_id
       WHERE m.user_id=? AND m.role="admin" AND m.status="approved" ORDER BY g.updated_at DESC LIMIT 1''',(user['id'],))
     s.run('INSERT INTO client_instances (id,slug,display_name,worker_ref,status,created_at,mcc_id,mcc_name,codex_model) VALUES (?,?,?,?,?,?,?,?,?)',(cid,slug,name,cid,'active',t,(body.mcc_id or '').replace('-',''),body.mcc_name or '',(body.codex_model or '').strip())); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(user['id'],cid,'admin','approved',user['id'],t)); s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,body.identifier.strip(),hash_password(body.password),'member','approved',0,t,None)); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,cid,'member','approved',user['id'],t))
     if source_config: s.run('INSERT INTO client_google_configs (client_instance_id,developer_token_ref,oauth_client_id,oauth_client_secret_ref,mcc_id,mcc_name,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',(cid,source_config['developer_token_ref'],source_config['oauth_client_id'],source_config['oauth_client_secret_ref'],(body.mcc_id or '').replace('-',''),body.mcc_name or '',t,t))
-    for account,customer_id in normalized_accounts:
+    for account,customer_id,settings in normalized_accounts:
         if s.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=?',(cid,customer_id)): raise HTTPException(409,'duplicate account customer ID')
-        account_id=new_id(); s.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',(account_id,cid,customer_id,(account.account_name or customer_id).strip(),1,t))
+        account_id=new_id(); s.run('''INSERT INTO client_accounts
+          (id,client_instance_id,customer_id,account_name,is_active,created_at,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(account_id,cid,customer_id,(account.account_name or customer_id).strip(),1,t,*settings))
         if account.permission in {'read','mutate'}:
             s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',(uid,account_id,account.permission,user['id'],t))
     return {'ok':True,'client':{'id':cid,'slug':slug,'display_name':name},'user':{'id':uid,'identifier':body.identifier.strip()}}
@@ -505,7 +534,7 @@ async def admin_client_detail(client_id: str, request: Request):
     client=s.one('SELECT * FROM client_instances WHERE id=?',(client_id,))
     if not client: raise HTTPException(404,'client not found')
     cfg=s.one('SELECT mcc_id,mcc_name FROM client_instances WHERE id=?',(client_id,))
-    accounts=[dict(x) for x in s.all('SELECT id,customer_id,account_name,is_active FROM client_accounts WHERE client_instance_id=? ORDER BY account_name',(client_id,))]
+    accounts=[dict(x) for x in s.all('SELECT * FROM client_accounts WHERE client_instance_id=? ORDER BY account_name',(client_id,))]
     users=[dict(x) for x in s.all('''SELECT u.id,u.email_or_identifier,u.role,u.status,COALESCE(g.status,'not_connected') google_status
       FROM users u JOIN client_memberships m ON m.user_id=u.id LEFT JOIN google_ads_connections g ON g.user_id=u.id AND g.client_instance_id=m.client_instance_id
       WHERE m.client_instance_id=? AND m.role='member' ORDER BY u.email_or_identifier''',(client_id,))]
@@ -519,7 +548,10 @@ async def add_client_account(client_id: str, body: AccountIn, request: Request):
     customer_id=''.join(ch for ch in body.customer_id if ch.isdigit())
     if len(customer_id)!=10: raise HTTPException(400,'customer ID must contain 10 digits')
     if s.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=?',(client_id,customer_id)): raise HTTPException(409,'account already exists')
-    aid=new_id(); s.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',(aid,client_id,customer_id,(body.account_name or customer_id).strip(),1,now()))
+    settings=account_settings(body); aid=new_id(); t=now()
+    s.run('''INSERT INTO client_accounts
+      (id,client_instance_id,customer_id,account_name,is_active,created_at,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(aid,client_id,customer_id,(body.account_name or customer_id).strip(),1,t,*settings))
     return {'ok':True,'account':{'id':aid,'customer_id':customer_id,'account_name':body.account_name or customer_id}}
 class ClientUpdateIn(BaseModel):
     name: str; slug: str; mcc_name: str | None = None; mcc_id: str | None = None; codex_model: str | None = None
@@ -535,7 +567,17 @@ async def update_client(client_id: str, body: ClientUpdateIn, request: Request):
     if s.one('SELECT client_instance_id FROM client_google_configs WHERE client_instance_id=?',(client_id,)):
         s.run('UPDATE client_google_configs SET mcc_id=?,mcc_name=?,updated_at=? WHERE client_instance_id=?',(mcc_id,body.mcc_name or '',now(),client_id))
     return {'ok':True,'client_id':client_id,'display_name':name,'slug':slug,'mcc_id':mcc_id,'mcc_name':body.mcc_name or ''}
-class AccountUpdateIn(BaseModel): account_name: str; customer_id: str; is_active: bool = True
+class AccountUpdateIn(BaseModel):
+    account_name: str = ''
+    customer_id: str
+    is_active: bool = True
+    primary_goal: str = 'in_app_conversions'
+    currency: str = ''
+    creative_lookback_days: int = 15
+    creative_min_impressions: int = 50000
+    cac_ceiling: float = 200
+    bid_budget_change_pct: float = 10
+    bid_budget_cooldown_days: int = 14
 @app.patch('/api/admin/clients/{client_id}/accounts/{account_id}')
 async def update_client_account(client_id: str, account_id: str, body: AccountUpdateIn, request: Request):
     user=await csrf(request); s=request.app.state.store; client_for_user(s,user,client_id)
@@ -546,8 +588,9 @@ async def update_client_account(client_id: str, account_id: str, body: AccountUp
     if len(customer_id)!=10: raise HTTPException(400,'customer ID must contain 10 digits')
     if s.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=? AND id<>?',(client_id,customer_id,account_id)): raise HTTPException(409,'account customer ID already exists')
     name=body.account_name.strip() or customer_id
-    s.run('UPDATE client_accounts SET account_name=?,customer_id=?,is_active=? WHERE id=?',(name,customer_id,int(body.is_active),account_id))
-    return {'ok':True,'account_id':account_id,'account_name':name,'customer_id':customer_id,'is_active':body.is_active}
+    settings=account_settings(body)
+    s.run('''UPDATE client_accounts SET account_name=?,customer_id=?,is_active=?,primary_goal=?,currency=?,campaign_goal_type=?,creative_lookback_days=?,creative_min_impressions=?,cac_ceiling=?,bid_budget_change_pct=?,bid_budget_cooldown_days=? WHERE id=?''',(name,customer_id,int(body.is_active),*settings,account_id))
+    return {'ok':True,'account_id':account_id,'account_name':name,'customer_id':customer_id,'is_active':body.is_active,**dict(zip(('primary_goal','currency','campaign_goal_type','creative_lookback_days','creative_min_impressions','cac_ceiling','bid_budget_change_pct','bid_budget_cooldown_days'),settings))}
 class UserCreateIn(BaseModel): identifier: str; password: str; status: str = 'approved'
 @app.post('/api/admin/clients/{client_id}/users')
 async def add_client_user(client_id: str, body: UserCreateIn, request: Request):
@@ -855,7 +898,9 @@ def sync_state_accounts(store, client_instance_id):
         if not isinstance(account,dict): continue
         customer=str(account.get('google_ads_customer_id','')).replace('-','').strip()
         if not customer or store.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=?',(client_instance_id,customer)): continue
-        store.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',(new_id(),client_instance_id,customer,account.get('account_name') or customer,1,now()))
+        store.run('''INSERT INTO client_accounts
+          (id,client_instance_id,customer_id,account_name,is_active,created_at)
+          VALUES (?,?,?,?,?,?)''',(new_id(),client_instance_id,customer,account.get('account_name') or customer,1,now()))
 
 @app.get('/api/agent-info')
 async def agent_info(request: Request):

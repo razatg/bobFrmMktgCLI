@@ -74,6 +74,8 @@ DATE_QUERIES = {
     "campaign_network_period",
     "adgroup_network_period",
     "creative_period",
+    "creative_headline_period", "creative_description_period",
+    "creative_image_period", "creative_video_period",
 }
 
 # Granular entity-level queries are intentionally capped so a single Codex job
@@ -94,6 +96,12 @@ GRANULAR_DATE_QUERIES = {
 }
 
 DEFAULT_CREATIVE_MIN_IMPRESSIONS = 50000
+CREATIVE_ASSET_QUERIES = {
+    "headline": "creative_headline_period",
+    "description": "creative_description_period",
+    "image": "creative_image_period",
+    "video": "creative_video_period",
+}
 STATIC_BANNER_REFRESH_DAYS = 90
 
 STATIC_BANNER_SPECS: dict[str, dict[str, Any]] = {
@@ -502,14 +510,14 @@ def run_id() -> str:
     return dt.datetime.now().strftime("%Y%m%dT%H%M%S")
 
 
-def render_query(query_name: str, start: dt.date, end: dt.date) -> str:
+def render_query(query_name: str, start: dt.date, end: dt.date, substitutions: dict[str, Any] | None = None) -> str:
     query_file = QUERIES_DIR / f"{query_name}.sql"
     if not query_file.exists():
         die(f"query file not found: {query_file}")
     text = query_file.read_text()
     yesterday = today() - dt.timedelta(days=1)
     sdlw = yesterday - dt.timedelta(days=7)
-    return text.format(
+    values = dict(
         start_date=start.isoformat(),
         end_date=end.isoformat(),
         period_start=start.isoformat(),
@@ -517,6 +525,8 @@ def render_query(query_name: str, start: dt.date, end: dt.date) -> str:
         yesterday=yesterday.isoformat(),
         sdlw=sdlw.isoformat(),
     )
+    values.update(substitutions or {})
+    return text.format(**values)
 
 
 def ensure_dirs() -> None:
@@ -1198,7 +1208,10 @@ def _fetch_one(args: argparse.Namespace) -> None:
             log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(reused), reason, question, outcome="skipped_inflight")
             return
 
-    rendered_query = render_query(query_name, start, end)
+    substitutions = {}
+    if query_name in CREATIVE_ASSET_QUERIES.values():
+        substitutions['min_impressions'] = int(profile.get('creative_min_impressions', DEFAULT_CREATIVE_MIN_IMPRESSIONS))
+    rendered_query = render_query(query_name, start, end, substitutions)
     rendered_query_path = raw_query_dir / f"{account}_{start}_{end}_{rid}.sql"
     rendered_query_path.write_text(rendered_query)
 
@@ -1270,7 +1283,17 @@ def _fetch_one(args: argparse.Namespace) -> None:
 
 
 def fetch(args: argparse.Namespace) -> None:
-    """Fetch one query, chunking granular ranges into sequential seven-day pulls."""
+    """Fetch one query, chunking ordinary granular ranges into sequential seven-day pulls.
+
+    Asset-specific creative queries intentionally use the configured total lookback
+    window as one server-filtered request; they are not daily-segmented or split.
+    """
+    if args.query in CREATIVE_ASSET_QUERIES.values():
+        profile = load_profile(required=not bool(args.account))
+        if not args.from_date and not args.to and not args.days:
+            args.days = int(profile.get('creative_lookback_days', 15))
+        _fetch_one(args)
+        return
     if args.query not in GRANULAR_DATE_QUERIES:
         _fetch_one(args)
         return
@@ -1839,7 +1862,8 @@ def _agg_creative_period(
     if args.output:
         output_path = Path(args.output).expanduser()
     else:
-        output_path = account_processed_dir(customer, "creative") / f"{customer}_{file_start}_{file_end}.csv"
+        suffix = f"_{source}" if source in CREATIVE_ASSET_QUERIES.values() else ""
+        output_path = account_processed_dir(customer, "creative") / f"{customer}_{file_start}_{file_end}{suffix}.csv"
     write_csv(output_path, out_rows, CREATIVE_PERIOD_COLUMNS)
     print(f"processed aggregate written: {output_path} ({len(out_rows)} creatives >= {min_imp} impressions)")
     if not out_rows:
@@ -3603,8 +3627,13 @@ def slice_creatives(args: argparse.Namespace) -> None:
     currency = _currency_symbol(profile.get("currency", ""))
     customer_id = profile.get("google_ads_customer_id")
 
-    creative_path = newest_processed("creative", customer_id)
-    rows = read_csv(creative_path)
+    creative_dir = account_processed_dir(customer_id, "creative")
+    specialised = sorted(creative_dir.glob(f"{str(customer_id).replace('-', '')}_*creative_*_period.csv"))
+    creative_paths = specialised or [newest_processed("creative", customer_id)]
+    creative_path = creative_paths[-1]
+    rows = []
+    for creative_path in creative_paths:
+        rows.extend(read_csv(creative_path))
     if not rows:
         print(
             f"No creative data in {creative_path.name} (account {customer_id}). "
@@ -5334,8 +5363,12 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
     primary_goal = profile.get("primary_goal", "in_app_conversions")
     customer_id = profile.get("google_ads_customer_id", "unknown")
 
-    creative_path = newest_processed("creative", customer_id)
-    rows = read_csv(creative_path)
+    creative_dir = account_processed_dir(customer_id, "creative")
+    specialised = sorted(creative_dir.glob(f"{str(customer_id).replace('-', '')}_*creative_*_period.csv"))
+    creative_paths = specialised or [newest_processed("creative", customer_id)]
+    rows = []
+    for creative_path in creative_paths:
+        rows.extend(read_csv(creative_path))
     eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
 
     # Campaign-level averages per (campaign_id, asset_type)
@@ -6353,6 +6386,7 @@ def _onboard_from_answers(args: argparse.Namespace, existing: list[dict]) -> Non
         "primary_goal": primary_goal,
         "currency": currency,
         "campaign_goal_type": campaign_goal_type,
+        "creative_lookback_days": _int_field("creative_lookback_days", 15),
         "google_ads_read_config_path": google_ads_read_config_path,
         "google_ads_write_config_path": google_ads_write_config_path,
         "creative_min_impressions": 50000,

@@ -30,6 +30,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS client_accounts (
   id TEXT PRIMARY KEY, client_instance_id TEXT NOT NULL, customer_id TEXT NOT NULL,
   account_name TEXT, is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+  primary_goal TEXT NOT NULL DEFAULT 'in_app_conversions',
+  currency TEXT NOT NULL DEFAULT '',
+  campaign_goal_type TEXT NOT NULL DEFAULT 'app_in_app_conversions',
+  creative_lookback_days INTEGER NOT NULL DEFAULT 15,
+  creative_min_impressions INTEGER NOT NULL DEFAULT 50000,
+  cac_ceiling REAL NOT NULL DEFAULT 200,
+  bid_budget_change_pct REAL NOT NULL DEFAULT 10,
+  bid_budget_cooldown_days INTEGER NOT NULL DEFAULT 14,
   FOREIGN KEY(client_instance_id) REFERENCES client_instances(id)
 );
 CREATE TABLE IF NOT EXISTS user_account_access (

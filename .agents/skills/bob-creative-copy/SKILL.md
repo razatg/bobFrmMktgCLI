@@ -23,11 +23,14 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 # Check processed creative data exists
 ls data/processed/creative/
 
-# If missing or older than 7 days, re-fetch. `fetch` automatically splits this
-# 30-day granular request into sequential chunks of at most 7 days, then the
-# range-aware aggregate recombines the complete window:
-python3 lib/datapull.py fetch --query creative_period --days 30 --reason "creative copy plan"
-python3 lib/datapull.py aggregate --grain creative_period --from <start> --to <end>
+# If missing or stale, pull only text assets in two separate, server-filtered
+# requests. The account profile supplies the lookback (default 15 days) and
+# impression threshold (default 50,000). These requests are deliberately not
+# daily-segmented or combined with image/video rows.
+python3 lib/datapull.py fetch --query creative_headline_period --reason "creative copy plan: headlines"
+python3 lib/datapull.py aggregate --grain creative_period --source creative_headline_period
+python3 lib/datapull.py fetch --query creative_description_period --reason "creative copy plan: descriptions"
+python3 lib/datapull.py aggregate --grain creative_period --source creative_description_period
 
 # Generate YAML plan + batch prompt files
 python3 lib/datapull.py suggest-creative-copy
@@ -39,6 +42,11 @@ python3 lib/datapull.py suggest-creative-copy
 ```
 
 If `suggest-creative-copy` outputs "0 assets" there are no LOW-action TEXT assets — tell the user and stop.
+
+For a request for all creative/assets, run the four asset types sequentially in this order:
+`creative_headline_period`, `creative_description_period`, `creative_image_period`,
+`creative_video_period`. A request for one type runs only that type. Do not pull image/video
+data when the user asked for text.
 
 ## Step 2 — Spawn one subagent per batch file (SEQUENTIAL — no bulk reads)
 

@@ -161,7 +161,7 @@ class GatewayTests(unittest.TestCase):
     def test_admin_account_permission_grant_and_revoke(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
         client_id=s.one('SELECT id FROM client_instances')['id']
-        account_id='account-one'; s.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',(account_id,client_id,'1112223333','Demo Demand',1,'2026-08-24T00:00:00+00:00'))
+        account_id='account-one'; s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',(account_id,client_id,'1112223333','Demo Demand',1,'2026-08-24T00:00:00+00:00'))
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
         member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member','password':'another-secure-password'})
         uid=s.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']
@@ -206,9 +206,9 @@ class GatewayTests(unittest.TestCase):
         client_id = store.one('SELECT id FROM client_instances')['id']
         demand_id = 'artifact-demand'
         supply_id = 'artifact-supply'
-        store.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',
+        store.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',
                   (demand_id, client_id, '1112223333', 'Demo Demand', 1, '2026-08-28T00:00:00+00:00'))
-        store.run('INSERT INTO client_accounts VALUES (?,?,?,?,?,?)',
+        store.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',
                   (supply_id, client_id, '9998887777', 'Demo Supply', 1, '2026-08-28T00:00:00+00:00'))
         invite = self.client.post('/api/admin/invites', headers={'X-CSRF-Token':admin_csrf}, json={}).json()['code']
         redeemed = self.client.post('/auth/invite/redeem', json={
