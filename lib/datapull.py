@@ -171,7 +171,7 @@ CREATIVE_PERIOD_COLUMNS = [
     "customer_id", "campaign_id", "campaign_name",
     "ad_group_id", "ad_group_name",
     "asset_view_resource_name", "asset_resource_name",
-    "asset_id", "asset_name", "asset_type", "field_type", "performance_label",
+    "asset_id", "asset_name", "asset_type", "asset_text", "video_id", "field_type", "performance_label",
     "image_url", "image_width", "image_height", "mime_type", "file_size_bytes",
 ] + _METRIC_COLS
 
@@ -1846,7 +1846,7 @@ def _agg_creative_period(
         "customer_id", "campaign_id", "campaign_name",
         "ad_group_id", "ad_group_name",
         "asset_view_resource_name", "asset_resource_name",
-        "asset_id", "asset_name", "asset_type", "field_type", "performance_label",
+        "asset_id", "asset_name", "asset_type", "asset_text", "video_id", "field_type", "performance_label",
         "image_url", "image_width", "image_height", "mime_type", "file_size_bytes",
     ]
     out_rows = _aggregate_period_rows(rows, key_cols, primary_goal)
@@ -5329,14 +5329,14 @@ def static_variants_apply(args: argparse.Namespace) -> None:
 
 
 def _fetch_asset_texts(client, customer_id: str, asset_ids: list) -> dict:
-    """Fetch text content from ad_group_ad_asset_view, TEXT assets only."""
+    """Fetch text content directly from the Asset resource as a fallback."""
     if not asset_ids:
         return {}
     ga_service = client.get_service("GoogleAdsService")
     id_list = ", ".join(str(i) for i in asset_ids[:500])
     query = (
         "SELECT asset.id, asset.text_asset.text "
-        "FROM ad_group_ad_asset_view "
+        "FROM asset "
         "WHERE asset.type = 'TEXT' "
         f"AND asset.id IN ({id_list})"
     )
@@ -5434,7 +5434,7 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
             "ad_group_name": r.get("ad_group_name", ""),
             "asset_id": r.get("asset_id", ""),
             "field_type": ft,
-            "current_text": "",
+            "current_text": r.get("asset_text", ""),
             "current_asset_count": ag_field_counts.get((r.get("ad_group_id", ""), ft), 0),
             "ctr_percent": format_float(asset_ctr),
             "campaign_avg_ctr": format_float(cm.get("ctr", 0)),
@@ -5448,19 +5448,20 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
         })
 
     # Fetch asset text content via a targeted TEXT-only query
-    all_asset_ids = list({c["asset_id"] for c in changes})
     text_map: dict = {}
+    missing_asset_ids = [c["asset_id"] for c in changes if not c.get("current_text")]
     try:
         from google.ads.googleads.client import GoogleAdsClient
         config_path = str(_resolve_profile_config_path(profile, write=True))
         _ga_client = GoogleAdsClient.load_from_storage(config_path)
-        text_map = _fetch_asset_texts(_ga_client, customer_id.replace("-", ""), all_asset_ids)
+        text_map = _fetch_asset_texts(_ga_client, customer_id.replace("-", ""), missing_asset_ids)
     except ImportError:
         print("  warning: google-ads not installed — text content unavailable")
     except Exception as _exc:
         print(f"  warning: Google Ads client load failed — text content unavailable: {_exc}")
     for c in changes:
-        c["current_text"] = text_map.get(str(c["asset_id"]), "")
+        if not c.get("current_text"):
+            c["current_text"] = text_map.get(str(c["asset_id"]), "")
 
     # Assign 1-based index to each change so the subagent can reference by number
     for i, c in enumerate(changes, 1):

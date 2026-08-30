@@ -81,6 +81,18 @@ class GatewayTests(unittest.TestCase):
         secret=Path(self.workspace)/'secrets'/'x.txt'; secret.parent.mkdir(); secret.write_text('nope')
         self.assertEqual(self.client.get('/api/admin/data-explorer/file?path=secrets/x.txt',headers={'X-CSRF-Token':csrf}).status_code,404)
 
+    def test_admin_observability_is_lightweight_and_reads_history(self):
+        csrf=self.bootstrap()
+        live=self.client.get('/api/admin/observability',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(live.status_code,200,live.text)
+        self.assertEqual(live.json()['active_job'],None)
+        from server import app as app_module
+        with patch.object(app_module,'runtime_log_path',return_value=Path(self.workspace)/'logs'/'bob-runtime.jsonl'):
+            log=Path(self.workspace)/'logs'/'bob-runtime.jsonl'; log.parent.mkdir(parents=True,exist_ok=True)
+            log.write_text(json.dumps({'ts':'2026-08-29T10:00:00+00:00','event':'job_resource_summary','job_id':'job-a','status':'failed','peak_bytes':123,'oom_kill_count':1})+'\n')
+            history=self.client.get('/api/admin/observability/history?from=2026-08-29&to=2026-08-29',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(history.status_code,200,history.text); self.assertEqual(history.json()[0]['job_id'],'job-a')
+
     def test_agent_info_is_dynamic(self):
         self.bootstrap()
         accounts = [{'account_name': 'Demo Account', 'google_ads_customer_id': '123-456-7890', 'active': True}]

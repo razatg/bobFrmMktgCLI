@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio, base64, hashlib, json, logging, os, re, secrets, shlex, shutil, signal, time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -36,6 +36,43 @@ def runtime_log(event, **fields):
             handle.write(json.dumps(record, separators=(',', ':'), default=str) + '\n')
     except OSError:
         runtime_logger.exception('unable to write runtime log event=%s', event)
+
+def cgroup_memory_snapshot():
+    root=Path('/sys/fs/cgroup')
+    def read(name):
+        try: return (root/name).read_text().strip()
+        except OSError: return None
+    current=read(Path('memory.current')); maximum=read(Path('memory.max')); peak=read(Path('memory.peak'))
+    events={}
+    try:
+        for line in (root/'memory.events').read_text().splitlines():
+            k,v=line.split()[:2]; events[k]=int(v)
+    except (OSError,ValueError): pass
+    def number(value):
+        try: return int(value) if value and value!='max' else None
+        except ValueError: return None
+    current_n,limit_n,peak_n=number(current),number(maximum),number(peak)
+    return {'current_bytes':current_n,'limit_bytes':limit_n,'peak_bytes':peak_n,'oom_kill_count':events.get('oom_kill',0),'oom_count':events.get('oom',0)}
+
+def process_snapshot(pid, process_group_id, started_monotonic):
+    rows=[]; ticks=os.sysconf(os.sysconf_names.get('SC_CLK_TCK','SC_CLK_TCK'))
+    now_mono=time.monotonic()
+    for name in os.listdir('/proc'):
+        if not name.isdigit(): continue
+        try:
+            stat=Path('/proc')/name/'stat'; raw=stat.read_text(); tail=raw.rsplit(')',1)[1].split()
+            if int(tail[2])!=int(process_group_id): continue
+            rss=0
+            for line in (Path('/proc')/name/'status').read_text().splitlines():
+                if line.startswith('VmRSS:'): rss=int(line.split()[1])*1024; break
+            cpu=((int(tail[11])+int(tail[12]))/ticks)/max(.1,now_mono-started_monotonic)*100
+            cmd=(Path('/proc')/name/'comm').read_text().strip()
+            rows.append({'pid':int(name),'name':cmd[:80],'rss_bytes':rss,'cpu_percent':round(cpu,1),'runtime_seconds':round(max(0,now_mono-started_monotonic),1)})
+        except (OSError,ValueError,IndexError,ProcessLookupError): continue
+    return sorted(rows,key=lambda x:x['rss_bytes'],reverse=True)
+
+def resource_summary():
+    snap=cgroup_memory_snapshot(); return {'resource_summary':snap}
 
 def job_timeout_seconds():
     try:
@@ -469,6 +506,49 @@ async def admin_codex_sessions(request: Request):
         else: item['process']=None
         result.append(item)
     return result
+
+@app.get('/api/admin/observability')
+async def admin_observability(request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    memory=cgroup_memory_snapshot(); registry=getattr(request.app.state.runner,'process_registry',{})
+    active=s.one('''SELECT j.id AS job_id,j.status,j.started_at,j.conversation_id,a.account_name,a.customer_id
+      FROM jobs j JOIN conversations c ON c.id=j.conversation_id LEFT JOIN client_accounts a ON a.id=c.account_id
+      WHERE j.status IN ('queued','running') ORDER BY j.created_at DESC LIMIT 1''')
+    processes=[]; largest=None
+    if active and active['job_id'] in registry:
+        p=registry[active['job_id']]; processes=process_snapshot(p['pid'],p['process_group_id'],p['started_monotonic']); largest=processes[0] if processes else None
+    percent=round(memory['current_bytes']/memory['limit_bytes']*100,1) if memory['current_bytes'] is not None and memory['limit_bytes'] else None
+    if memory['oom_kill_count']:
+        state='OOM KILLED'; diagnosis='The container has killed a process for exceeding its memory limit.'
+    elif percent is not None and percent>=90:
+        state='NEAR LIMIT'; diagnosis=f'Memory is at {percent}% of the container limit.'
+    elif largest and largest['rss_bytes']>=512*1024*1024:
+        state='HIGH MEMORY'; diagnosis=f"{largest['name']} is the largest job process at {round(largest['rss_bytes']/1024**3,2)} GB."
+    elif largest and largest['cpu_percent']>=80:
+        state='HIGH CPU'; diagnosis=f"{largest['name']} is averaging {largest['cpu_percent']}% CPU."
+    else:
+        state='HEALTHY'; diagnosis='No active resource pressure detected.'
+    return {'state':state,'diagnosis':diagnosis,'memory':memory|{'percent':percent},'active_job':dict(active) if active else None,'largest_process':largest,'processes':processes[:8]}
+
+@app.get('/api/admin/observability/history')
+async def admin_observability_history(request: Request):
+    user=await csrf(request)
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    start=request.query_params.get('from',''); end=request.query_params.get('to','') or start
+    retention=(datetime.now(timezone.utc)-timedelta(days=30)).date().isoformat()
+    rows=[]; paths=[runtime_log_path(),runtime_log_path().with_suffix('.jsonl.1')]
+    for path in paths:
+        try: lines=path.read_text(errors='replace').splitlines()
+        except OSError: continue
+        for line in lines:
+            try: item=json.loads(line)
+            except json.JSONDecodeError: continue
+            if item.get('event')!='job_resource_summary': continue
+            day=str(item.get('ts',''))[:10]
+            if day<retention or start and day<start or end and day>end: continue
+            rows.append(item)
+    return sorted(rows,key=lambda x:x.get('ts',''),reverse=True)[:500]
 
 @app.get('/api/admin/codex-sessions/{jid}/events')
 async def admin_codex_session_events(jid: str, request: Request):
@@ -927,18 +1007,18 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     learned.add(normalize_scope_prompt(prompt))
                     save_learned_offscope(learned)
                     final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
-                s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid,now(),cid)); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',final,'completed',now())); s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'COMPLETED','response':final}); runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+                s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid,now(),cid)); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',final,'completed',now())); s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'COMPLETED','response':final}); runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='completed',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
             except asyncio.CancelledError:
                 changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
                 if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
-                runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+                runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='cancelled',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
             except Exception as exc:
                 if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
                     changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
                     if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
-                    runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2))
+                    runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='cancelled',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
                 else:
-                    detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=? AND status IN ("queued","running")',(detail[-1000:],now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':detail[-1000:]}); runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=detail[-4000:],exception_type=type(exc).__name__)
+                    detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=? AND status IN ("queued","running")',(detail[-1000:],now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':detail[-1000:]}); runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=detail[-4000:],exception_type=type(exc).__name__); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='failed',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
 @app.get('/api/jobs/{jid}')
 async def job(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));

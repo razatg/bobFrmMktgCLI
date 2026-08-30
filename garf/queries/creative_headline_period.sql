@@ -3,6 +3,7 @@ SELECT customer.id AS customer_id, campaign.id AS campaign_id, campaign.name AS 
   ad_group_ad_asset_view.resource_name AS asset_view_resource_name,
   ad_group_ad_asset_view.asset AS asset_resource_name, asset.id AS asset_id,
   asset.name AS asset_name, asset.type AS asset_type,
+  asset.text_asset.text AS asset_text,
   ad_group_ad_asset_view.field_type AS field_type,
   ad_group_ad_asset_view.performance_label AS performance_label,
   asset.image_asset.full_size.url AS image_url,

@@ -9,6 +9,8 @@ SELECT
   asset.id AS asset_id,
   asset.name AS asset_name,
   asset.type AS asset_type,
+  asset.text_asset.text AS asset_text,
+  asset.youtube_video_asset.youtube_video_id AS video_id,
   ad_group_ad_asset_view.field_type AS field_type,
   ad_group_ad_asset_view.performance_label AS performance_label,
   asset.image_asset.full_size.url AS image_url,

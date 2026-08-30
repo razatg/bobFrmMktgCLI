@@ -222,6 +222,23 @@ class TestAggregation(unittest.TestCase):
         out = dp._aggregate_period_rows(rows, ["network"], "installs")
         self.assertEqual([r["network"] for r in out], ["a", "z"])  # sorted by key
 
+    def test_creative_content_fields_survive_aggregation(self):
+        rows = [{"asset_id": "1", "asset_text": "Ride faster", "video_id": "vid-1",
+                 "impressions": "100", "clicks": "10", "cost": "20", "installs": "5",
+                 "in_app_conversions": "2"}]
+        out = dp._aggregate_period_rows(rows, ["asset_id", "asset_text", "video_id"], "installs")
+        self.assertEqual(out[0]["asset_text"], "Ride faster")
+        self.assertEqual(out[0]["video_id"], "vid-1")
+
+    def test_creative_queries_select_asset_content(self):
+        query_root = Path(__file__).resolve().parent.parent / "garf" / "queries"
+        headline = (query_root / "creative_headline_period.sql").read_text()
+        description = (query_root / "creative_description_period.sql").read_text()
+        video = (query_root / "creative_video_period.sql").read_text()
+        self.assertIn("asset.text_asset.text AS asset_text", headline)
+        self.assertIn("asset.text_asset.text AS asset_text", description)
+        self.assertIn("asset.youtube_video_asset.youtube_video_id AS video_id", video)
+
 
 class TestProcessedPeriodMaterialization(unittest.TestCase):
     """Exact period slices should be materialized from raw files before comparisons fail."""
