@@ -63,6 +63,17 @@ class GatewayTests(unittest.TestCase):
     def bootstrap(self):
         r=self.client.post('/auth/bootstrap',json={'secret':'test-bootstrap','identifier':'admin','password':'a-secure-password','client_name':'Test Client'})
         self.assertEqual(r.status_code,200,r.text); return r.json()['csrf']
+
+    def test_user_response_hides_internal_steps_but_allows_explicit_technical_help(self):
+        from server.app import sanitize_user_response
+        internal='''I will retrieve the spend.\n```sh\n./bob fetch --query campaign_daily\n```\nSee /data/client/logs/pull-log.jsonl.'''
+        shown=sanitize_user_response(internal)
+        self.assertNotIn('./bob',shown)
+        self.assertNotIn('/data/client',shown)
+        self.assertIn('I will retrieve the spend.',shown)
+        technical=sanitize_user_response(internal,technical=True)
+        self.assertNotIn('/data/client',technical)
+        self.assertIn('./bob fetch',technical)
     def test_health_and_bootstrap_login(self):
         self.assertEqual(self.client.get('/api/health').json(),{'status':'ok'})
         csrf=self.bootstrap(); self.assertTrue(csrf)

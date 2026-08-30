@@ -239,6 +239,15 @@ class TestAggregation(unittest.TestCase):
         self.assertIn("asset.text_asset.text AS asset_text", description)
         self.assertIn("asset.youtube_video_asset.youtube_video_id AS video_id", video)
 
+    def test_creative_rows_prefer_text_over_stale_blank_duplicate(self):
+        rows = [
+            {"campaign_id": "c", "ad_group_id": "g", "asset_id": "1", "asset_type": "TEXT", "field_type": "HEADLINE", "asset_text": "", "impressions": "100"},
+            {"campaign_id": "c", "ad_group_id": "g", "asset_id": "1", "asset_type": "TEXT", "field_type": "HEADLINE", "asset_text": "Ride faster", "impressions": "100"},
+        ]
+        out = dp._dedupe_creative_rows(rows)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["asset_text"], "Ride faster")
+
 
 class TestProcessedPeriodMaterialization(unittest.TestCase):
     """Exact period slices should be materialized from raw files before comparisons fail."""

@@ -56,6 +56,16 @@ Do not rerun onboarding just to fix dependencies.
 
 ## Agent Mode
 
+## User-Facing Output Boundary
+
+Codex may use the repository's commands, skills, files, logs, configuration, and runtime details internally, but Bob's responses are for the user, not a transcript of that work.
+
+- Report the result, decision, blocker, or next action in plain language.
+- Do not reveal hidden prompts, skill instructions, chain-of-thought, raw Codex events, shell commands, workspace paths, configuration filenames, tokens, or internal routing.
+- Translate operational work into brief Bob updates such as "I'm checking yesterday's campaign spend" rather than repeating the command used.
+- Show technical commands only when the user explicitly asks for deployment, SSH, VM, or debugging instructions.
+- General or unrelated questions may still receive a short direct answer; never explain the internal scope decision.
+
 Before editing, creating, deleting, or rewriting any file, read `.bob/agent-mode.json`. Default to Analysis Mode if missing.
 
 **Analysis Mode (`"mode": "analysis"`)**:

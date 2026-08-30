@@ -3041,6 +3041,47 @@ def newest_processed(subdir: str, customer_id: str | None = None) -> Path:
     return files[0]
 
 
+def _creative_processed_paths(customer_id: str) -> list[Path]:
+    """Choose the newest processed file for each creative asset query."""
+    creative_dir = account_processed_dir(customer_id, "creative")
+    specialised = list(creative_dir.glob(f"{str(customer_id).replace('-', '')}_*creative_*_period.csv"))
+    if not specialised:
+        return [newest_processed("creative", customer_id)]
+
+    def sort_key(path: Path):
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", path.stem)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        return (dates[-1] if dates else "", dates[0] if dates else "", mtime, path.name)
+
+    latest: dict[str, Path] = {}
+    for path in specialised:
+        match = re.search(r"_creative_(headline|description|image|video)_period(?:_|$)", path.stem)
+        asset_kind = match.group(1) if match else path.stem
+        if asset_kind not in latest or sort_key(path) > sort_key(latest[asset_kind]):
+            latest[asset_kind] = path
+    return sorted(latest.values(), key=lambda path: path.name)
+
+
+def _dedupe_creative_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one row per asset identity, preferring rows containing asset_text."""
+    result: dict[tuple, dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row.get("campaign_id", ""), row.get("ad_group_id", ""),
+            row.get("asset_id", ""), row.get("asset_type", ""), row.get("field_type", ""),
+        )
+        existing = result.get(key)
+        if existing is None or (
+            not str(existing.get("asset_text", "")).strip()
+            and str(row.get("asset_text", "")).strip()
+        ):
+            result[key] = row
+    return list(result.values())
+
+
 def bid_budget_recommend(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
     primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
@@ -3628,13 +3669,12 @@ def slice_creatives(args: argparse.Namespace) -> None:
     currency = _currency_symbol(profile.get("currency", ""))
     customer_id = profile.get("google_ads_customer_id")
 
-    creative_dir = account_processed_dir(customer_id, "creative")
-    specialised = sorted(creative_dir.glob(f"{str(customer_id).replace('-', '')}_*creative_*_period.csv"))
-    creative_paths = specialised or [newest_processed("creative", customer_id)]
+    creative_paths = _creative_processed_paths(customer_id)
     creative_path = creative_paths[-1]
     rows = []
     for creative_path in creative_paths:
         rows.extend(read_csv(creative_path))
+    rows = _dedupe_creative_rows(rows)
     if not rows:
         print(
             f"No creative data in {creative_path.name} (account {customer_id}). "
@@ -5365,12 +5405,11 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
     primary_goal = profile.get("primary_goal", "in_app_conversions")
     customer_id = profile.get("google_ads_customer_id", "unknown")
 
-    creative_dir = account_processed_dir(customer_id, "creative")
-    specialised = sorted(creative_dir.glob(f"{str(customer_id).replace('-', '')}_*creative_*_period.csv"))
-    creative_paths = specialised or [newest_processed("creative", customer_id)]
+    creative_paths = _creative_processed_paths(customer_id)
     rows = []
     for creative_path in creative_paths:
         rows.extend(read_csv(creative_path))
+    rows = _dedupe_creative_rows(rows)
     eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
 
     # Campaign-level averages per (campaign_id, asset_type)

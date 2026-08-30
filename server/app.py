@@ -20,6 +20,33 @@ OFF_SCOPE_SENTINEL = '[[BOB_OUT_OF_SCOPE]]'
 OFF_SCOPE_REPLY = "That’s outside this Bob workspace, mate. I’m here for the ads accounts, reports, wiki, setup, and related project work."
 runtime_logger = logging.getLogger('bob.runtime')
 
+def user_requested_technical_help(prompt):
+    return bool(re.search(r'\b(deploy|deployment|ssh|vm|docker|terminal|debug|debugging)\b', str(prompt).lower()))
+
+def sanitize_user_response(text, *, technical=False):
+    """Keep accidental runtime detail out of ordinary Bob answers."""
+    value = str(text or '').strip()
+    if not value:
+        return value
+    lines=[]; in_fence=False; redacted=False
+    for line in value.splitlines():
+        if line.strip().startswith('```'):
+            in_fence = not in_fence
+            redacted = True
+            continue
+        if not technical and in_fence:
+            continue
+        if not technical and re.search(r'(?:^|\s)(?:\./bob|(?:sudo\s+)?(?:sed|tail|ls|cat|grep|docker|python3?|git)\b|(?:id|event|data):\s*\{)', line, re.I):
+            redacted = True
+            continue
+        line = re.sub(r'(?:(?:/app|/data|/home|/tmp)/[^\s"\']+)', '[workspace detail]', line)
+        line = re.sub(r'(?i)(?:google-ads-(?:api|garf)\.ya?ml|pull-log\.jsonl)', '[internal config]', line)
+        lines.append(line)
+    result='\n'.join(lines).strip()
+    if redacted and not result:
+        return 'Bob completed the check. The internal execution details are kept private.'
+    return result
+
 def runtime_log_path():
     metadata_db = Path(os.getenv('BOB_METADATA_DB', str(ROOT / 'data' / 'metadata.sqlite3'))).expanduser()
     return metadata_db.parent / 'logs' / 'bob-runtime.jsonl'
@@ -1015,6 +1042,7 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     learned.add(normalize_scope_prompt(prompt))
                     save_learned_offscope(learned)
                     final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
+                final = sanitize_user_response(final, technical=user_requested_technical_help(prompt))
                 s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid,now(),cid)); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',final,'completed',now())); s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid)); s.event(jid,'terminal',{'status':'COMPLETED','response':final}); runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='completed',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
             except asyncio.CancelledError:
                 changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
