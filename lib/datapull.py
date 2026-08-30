@@ -3372,6 +3372,7 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
 
 
 def bid_budget_apply(args: argparse.Namespace) -> None:
+    _require_write_permission()
     try:
         import yaml as _yaml
     except ImportError:
@@ -3404,7 +3405,7 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
         die("google-ads library is required. Install: pip install google-ads")
 
     profile = load_profile(required=False)
-    config_path = str(_resolve_profile_config_path(profile, write=True))
+    config_path = str(_runtime_write_config_path())
     customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
 
     try:
@@ -5123,6 +5124,7 @@ def _static_variant_manifest_assets(manifest_path: Path) -> dict[str, dict[str, 
 
 
 def static_variants_apply(args: argparse.Namespace) -> None:
+    _require_write_permission()
     """Upload generated static variant images and swap them into matching app ads."""
     plan, changes, plan_path = _load_static_variant_apply_changes(args)
     if not changes:
@@ -5215,7 +5217,7 @@ def static_variants_apply(args: argparse.Namespace) -> None:
     except ImportError:
         die("google-ads and pyyaml are required for static-variants-apply")
 
-    config_path = str(_resolve_profile_config_path(profile, write=True))
+    config_path = str(_runtime_write_config_path())
     try:
         client = GoogleAdsClient.load_from_storage(config_path)
     except Exception as exc:
@@ -5447,21 +5449,9 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
             "action": "replace",
         })
 
-    # Fetch asset text content via a targeted TEXT-only query
-    text_map: dict = {}
-    missing_asset_ids = [c["asset_id"] for c in changes if not c.get("current_text")]
-    try:
-        from google.ads.googleads.client import GoogleAdsClient
-        config_path = str(_resolve_profile_config_path(profile, write=True))
-        _ga_client = GoogleAdsClient.load_from_storage(config_path)
-        text_map = _fetch_asset_texts(_ga_client, customer_id.replace("-", ""), missing_asset_ids)
-    except ImportError:
-        print("  warning: google-ads not installed — text content unavailable")
-    except Exception as _exc:
-        print(f"  warning: Google Ads client load failed — text content unavailable: {_exc}")
-    for c in changes:
-        if not c.get("current_text"):
-            c["current_text"] = text_map.get(str(c["asset_id"]), "")
+    missing_text = [c["asset_id"] for c in changes if not str(c.get("current_text", "")).strip()]
+    if missing_text:
+        die("creative copy plan blocked: asset_text is missing for asset IDs " + ", ".join(map(str, missing_text[:20])))
 
     # Assign 1-based index to each change so the subagent can reference by number
     for i, c in enumerate(changes, 1):
@@ -5530,6 +5520,7 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
 
 def creative_copy_apply(args: argparse.Namespace) -> None:
     """Review suggested copy, get user approval, push to Google Ads."""
+    _require_write_permission()
     import datetime as _dt
     try:
         import yaml as _yaml
@@ -5722,7 +5713,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         die("google-ads library required: pip install google-ads")
 
     profile = load_profile(required=False)
-    config_path = str(_resolve_profile_config_path(profile, write=True))
+    config_path = str(_runtime_write_config_path())
     customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
 
     try:
@@ -6092,6 +6083,20 @@ def _resolve_profile_config_path(profile: dict[str, Any], *, write: bool = False
     if not fallback:
         fallback = defaults[0]
     return _resolve_state_path(fallback)
+
+def _runtime_write_config_path() -> Path:
+    """Hosted writes use the connected user's runtime OAuth config only."""
+    configured = os.getenv("BOB_GOOGLE_ADS_RUNTIME_CONFIG", "").strip()
+    if not configured:
+        die("Google Ads is not connected for this user. Connect Google Ads in Bob before applying changes.")
+    path = Path(configured).expanduser()
+    if not path.exists():
+        die("Google Ads runtime authorization is unavailable. Reconnect Google Ads before applying changes.")
+    return path
+
+def _require_write_permission() -> None:
+    if os.getenv("BOB_ACCOUNT_PERMISSION", "read").strip().lower() != "read_write":
+        die("This Bob user has READ access only. READ & WRITE permission is required to apply Google Ads changes.")
 
 
 def _normalize_account_config_files(profile: dict[str, Any]) -> list[str]:

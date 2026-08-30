@@ -880,6 +880,17 @@ class TestOnboardAnswers(unittest.TestCase):
         self.assertIn("developer token", err.getvalue().lower())
 
 
+class TestHostedWritePermissions(unittest.TestCase):
+    def test_read_users_are_blocked_from_mutations(self):
+        with mock.patch.dict(os.environ, {"BOB_ACCOUNT_PERMISSION": "read"}, clear=False):
+            with self.assertRaises(SystemExit):
+                dp._require_write_permission()
+
+    def test_read_write_users_can_reach_mutation_gate(self):
+        with mock.patch.dict(os.environ, {"BOB_ACCOUNT_PERMISSION": "read_write"}, clear=False):
+            dp._require_write_permission()
+
+
 class TestUvRuntime(unittest.TestCase):
     """The launcher and setup path use uv as the runtime authority."""
 

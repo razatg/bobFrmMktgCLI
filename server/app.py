@@ -219,12 +219,12 @@ def is_obviously_bob_scope(store, row, prompt):
     if len(normalized.split()) <= 6 and recent:
         return True, 'followup'
     return True, 'pass'
-def scope_wrapped_prompt(prompt, account_context=None):
+def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'):
     return (
         "You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
         "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
         f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
-        f"Current selected account: {account_context or 'none'}. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
+        f"Current selected account: {account_context or 'none'}. Bob permission: {account_permission}. A READ user may inspect data and prepare plans but must never apply Google Ads changes. Only a READ & WRITE user may apply approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
         f"User message:\n{prompt}"
     )
 def prompt_for_selected_account(store, row, prompt):
@@ -412,6 +412,13 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
         try: profile_path.chmod(0o600)
         except OSError: pass
     return str(path)
+
+def account_permission(store, user_id, client_instance_id, account_id):
+    user = store.one('SELECT role FROM users WHERE id=?', (user_id,))
+    if user and user['role'] == 'admin':
+        return 'read_write'
+    row = store.one('SELECT permission FROM user_account_access WHERE user_id=? AND account_id=?', (user_id, account_id))
+    return row['permission'] if row and row['permission'] in {'read', 'read_write'} else 'read'
 def cookie(response, sid): response.set_cookie('bob_session',sid,httponly=True,secure=os.getenv('BOB_SECURE_COOKIES','0')=='1',samesite='lax',max_age=86400)
 
 @app.get('/')
@@ -687,7 +694,7 @@ async def create_client(body: ClientIn, request: Request):
         account_id=new_id(); s.run('''INSERT INTO client_accounts
           (id,client_instance_id,customer_id,account_name,is_active,created_at,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days)
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(account_id,cid,customer_id,(account.account_name or customer_id).strip(),1,t,*settings))
-        if account.permission in {'read','mutate'}:
+        if account.permission in {'read','read_write'}:
             s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',(uid,account_id,account.permission,user['id'],t))
     return {'ok':True,'client':{'id':cid,'slug':slug,'display_name':name},'user':{'id':uid,'identifier':body.identifier.strip()}}
 @app.get('/api/admin/clients/{client_id}')
@@ -855,7 +862,7 @@ async def grant_account(uid: str, account_id: str, body: AccountPermissionIn, re
     account=s.one('SELECT * FROM client_accounts WHERE id=?',(account_id,)); target=s.one('SELECT * FROM users WHERE id=?',(uid,))
     if not account or not target: raise HTTPException(404,'user or account not found')
     if not membership(s,admin,account['client_instance_id']) or not membership(s,target,account['client_instance_id']): raise HTTPException(403,'client membership required')
-    if body.permission not in {'read','mutate'}: raise HTTPException(400,'permission must be read or mutate')
+    if body.permission not in {'read','read_write'}: raise HTTPException(400,'permission must be read or read_write')
     s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?) ON CONFLICT(user_id,account_id) DO UPDATE SET permission=excluded.permission,granted_by=excluded.granted_by,created_at=excluded.created_at',(uid,account_id,body.permission,admin['id'],now()))
     return {'ok':True,'user_id':uid,'account_id':account_id,'permission':body.permission}
 
@@ -995,10 +1002,11 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id']}
                 if runtime_config:
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
+                environment['BOB_ACCOUNT_PERMISSION'] = account_permission(s, row['user_id'], row['client_instance_id'], row.get('account_id'))
                 policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
                 selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
                 internal_prompt=prompt_for_selected_account(s,row,prompt)
-                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
+                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION']),workspace,policy,emit,app.state.cancel.get(jid))
                 if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'

@@ -201,9 +201,11 @@ class GatewayTests(unittest.TestCase):
         uid=s.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']
         admin_login=self.client.post('/auth/login',json={'identifier':'admin','password':'a-secure-password'})
         admin_csrf=admin_login.json()['csrf']
-        grant=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'mutate'})
+        grant=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read_write'})
         self.assertEqual(grant.status_code,200,grant.text)
-        self.assertEqual(s.one('SELECT permission FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id))['permission'],'mutate')
+        self.assertEqual(s.one('SELECT permission FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id))['permission'],'read_write')
+        rejected=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'mutate'})
+        self.assertEqual(rejected.status_code,400)
         revoke=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/revoke',headers={'X-CSRF-Token':admin_csrf})
         self.assertEqual(revoke.status_code,200,revoke.text)
         self.assertIsNone(s.one('SELECT 1 FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id)))

@@ -20,6 +20,7 @@ class AgentRunner:
         'BOB_SHARED_STATE_ROOT',
         'BOB_CLIENT_INSTANCE_ID',
         'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
+        'BOB_ACCOUNT_PERMISSION',
     )
 
     def __init__(self, executable=None):

@@ -26,6 +26,9 @@ class Store:
         self._ensure_column('client_accounts', 'cac_ceiling', 'REAL NOT NULL DEFAULT 200')
         self._ensure_column('client_accounts', 'bid_budget_change_pct', 'REAL NOT NULL DEFAULT 10')
         self._ensure_column('client_accounts', 'bid_budget_cooldown_days', 'INTEGER NOT NULL DEFAULT 14')
+        # One-time rename from the old user-facing permission term.
+        self.db.execute("UPDATE user_account_access SET permission='read_write' WHERE permission='mutate'")
+        self.db.commit()
         self._ensure_column('global_google_configs', 'base_url', 'TEXT')
         self.db.execute("UPDATE global_google_configs SET base_url=? WHERE base_url IS NULL OR base_url=''", (os.getenv('BOB_PUBLIC_BASE_URL','http://localhost:8000'),))
         self.db.commit()
