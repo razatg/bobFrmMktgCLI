@@ -70,6 +70,17 @@ class GatewayTests(unittest.TestCase):
         self.client.post('/auth/logout',headers={'X-CSRF-Token':csrf})
         self.assertFalse(self.client.get('/auth/session').json()['authenticated'])
 
+    def test_admin_data_explorer_is_read_only_and_blocks_sensitive_paths(self):
+        csrf=self.bootstrap()
+        raw=Path(self.workspace)/'runtime'/'conversations'/'demo'/'state'/'garf'/'outputs'/'raw'/'demo.csv'
+        raw.parent.mkdir(parents=True,exist_ok=True); raw.write_text('asset_id,asset_name\n1,Headline\n')
+        listed=self.client.get('/api/admin/data-explorer?kind=raw',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(listed.status_code,200,listed.text); self.assertTrue(any(x['path'].endswith('demo.csv') for x in listed.json()['files']))
+        shown=self.client.get('/api/admin/data-explorer/file?path='+str(raw.relative_to(self.workspace)),headers={'X-CSRF-Token':csrf})
+        self.assertEqual(shown.json()['content'],'asset_id,asset_name\n1,Headline\n')
+        secret=Path(self.workspace)/'secrets'/'x.txt'; secret.parent.mkdir(); secret.write_text('nope')
+        self.assertEqual(self.client.get('/api/admin/data-explorer/file?path=secrets/x.txt',headers={'X-CSRF-Token':csrf}).status_code,404)
+
     def test_agent_info_is_dynamic(self):
         self.bootstrap()
         accounts = [{'account_name': 'Demo Account', 'google_ads_customer_id': '123-456-7890', 'active': True}]
@@ -122,6 +133,15 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(datapull.ACCOUNTS_DIR, Path(self.workspace).resolve() / '.bob' / 'accounts')
         self.assertEqual(datapull.PROCESSED_DIR, Path(self.workspace).resolve() / 'data' / 'processed')
         self.assertEqual(datapull.account_wiki_dir('123-456-7890'), Path(self.workspace).resolve() / 'wiki' / '1234567890')
+
+    def test_codex_prompt_uses_conversation_account_not_typed_account(self):
+        from server.app import prompt_for_selected_account
+        s=self.app.state.store; admin_csrf=self.bootstrap(); client_id=s.one('SELECT id FROM client_instances')['id']
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('captain',client_id,'1112223333','Rapido Captain',1,'2026-08-24T00:00:00+00:00'))
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('demand',client_id,'4445556666','Rapido Demand',1,'2026-08-24T00:00:00+00:00'))
+        row={'account_id':'captain','client_instance_id':client_id}
+        internal=prompt_for_selected_account(s,row,'What happened in Rapido Demand?')
+        self.assertEqual(internal,'What happened in another account?')
 
     def test_admin_google_config_and_user_oauth_connection(self):
         admin_csrf=self.bootstrap()

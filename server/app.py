@@ -1,5 +1,6 @@
 from __future__ import annotations
-import asyncio, base64, hashlib, json, logging, os, secrets, shlex, shutil, signal, time
+import asyncio, base64, hashlib, json, logging, os, re, secrets, shlex, shutil, signal, time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -189,6 +190,20 @@ def scope_wrapped_prompt(prompt, account_context=None):
         f"Current selected account: {account_context or 'none'}. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
         f"User message:\n{prompt}"
     )
+def prompt_for_selected_account(store, row, prompt):
+    """Prevent account names typed in chat from overriding the UI selection."""
+    selected = store.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?', (row.get('account_id'), row['client_instance_id'])) if row.get('account_id') else None
+    if not selected:
+        return prompt
+    names = store.all('SELECT account_name FROM client_accounts WHERE client_instance_id=? AND is_active=1 ORDER BY LENGTH(account_name) DESC', (row['client_instance_id'],))
+    result = prompt
+    for account in names:
+        name = str(account['account_name'] or '').strip()
+        if not name:
+            continue
+        replacement = 'the selected account' if name.casefold() == str(selected['account_name']).casefold() else 'another account'
+        result = re.sub(re.escape(name), replacement, result, flags=re.IGNORECASE)
+    return result
 def client_for_user(store, user, client_id=None):
     if user['role']=='admin' and client_id:
         if not store.one('SELECT id FROM client_instances WHERE id=?',(client_id,)): raise HTTPException(404,'client not found')
@@ -484,6 +499,72 @@ async def admin_cancel_codex_session(jid: str, request: Request):
         try: os.killpg(process['process_group_id'],signal.SIGTERM)
         except (ProcessLookupError,PermissionError): pass
     return {'ok':True,'status':'cancelled'}
+def explorer_state_root():
+    return Path(os.getenv('BOB_STATE_ROOT', str(STATE_ROOT))).expanduser().resolve()
+
+def explorer_relative_path(path: Path):
+    """Return a relative path only for explicitly approved diagnostic data."""
+    try: rel=path.resolve().relative_to(explorer_state_root())
+    except (OSError,ValueError): return None
+    parts=rel.parts; lower=[p.lower() for p in parts]
+    if any(p in {'secrets','codex','metadata','.bob'} or p.startswith('.env') for p in lower): return None
+    if path.is_symlink() or not path.is_file(): return None
+    if 'garf' in lower and 'outputs' in lower and 'raw' in lower: kind='raw'
+    elif 'data' in lower and 'processed' in lower: kind='processed'
+    elif 'wiki' in lower: kind='wiki'
+    elif rel.name=='pull-log.jsonl': kind='logs'
+    else: return None
+    return rel,kind
+
+def explorer_files(kind, client_id=None, account_id=None, store=None):
+    account=store.one('SELECT customer_id FROM client_accounts WHERE id=?',(account_id,)) if account_id else None
+    customer=str(account['customer_id']) if account else None
+    client_conversations=set()
+    if client_id:
+        client_conversations={r['id'] for r in store.all('SELECT id FROM conversations WHERE client_instance_id=?',(client_id,))}
+    result=[]
+    root=explorer_state_root()
+    if not root.exists(): return result
+    for path in root.rglob('*'):
+        found=explorer_relative_path(path)
+        if not found or found[1]!=kind: continue
+        rel,_=found; text='/'.join(rel.parts)
+        if customer and customer not in text.replace('-',''): continue
+        if client_id and 'conversations' in rel.parts:
+            i=rel.parts.index('conversations')
+            if i+1>=len(rel.parts) or rel.parts[i+1] not in client_conversations: continue
+        try: stat=path.stat()
+        except OSError: continue
+        result.append({'path':str(rel),'size':stat.st_size,'modified_at':datetime.fromtimestamp(stat.st_mtime,timezone.utc).isoformat()})
+        if len(result)>=500: break
+    return sorted(result,key=lambda x:x['path'])
+
+@app.get('/api/admin/data-explorer')
+async def admin_data_explorer(request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    kind=request.query_params.get('kind','raw')
+    if kind not in {'raw','processed','wiki','logs'}: raise HTTPException(400,'invalid data type')
+    client_id=request.query_params.get('client_instance_id') or None
+    account_id=request.query_params.get('account_id') or None
+    if client_id and not s.one('SELECT id FROM client_instances WHERE id=?',(client_id,)): raise HTTPException(404,'client not found')
+    if account_id and not s.one('SELECT id FROM client_accounts WHERE id=?',(account_id,)): raise HTTPException(404,'account not found')
+    return {'files':explorer_files(kind,client_id,account_id,s),'clients':[dict(r) for r in s.all('SELECT id,display_name FROM client_instances ORDER BY display_name')],'accounts':[dict(r) for r in s.all('SELECT id,client_instance_id,account_name,customer_id FROM client_accounts WHERE is_active=1 ORDER BY account_name')]}
+
+@app.get('/api/admin/data-explorer/file')
+async def admin_data_explorer_file(request: Request):
+    user=await csrf(request)
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    raw=request.query_params.get('path','')
+    if not raw or Path(raw).is_absolute() or '..' in Path(raw).parts: raise HTTPException(400,'invalid path')
+    target=explorer_state_root() / Path(raw)
+    found=explorer_relative_path(target)
+    if not found: raise HTTPException(404,'file not available')
+    try:
+        data=target.read_bytes(); truncated=len(data)>131072
+        return {'path':raw,'content':data[:131072].decode('utf-8','replace'),'truncated':truncated}
+    except OSError: raise HTTPException(404,'file not available')
+
 @app.get('/api/admin/clients')
 async def admin_clients(request: Request):
     user=await csrf(request); s=request.app.state.store
@@ -836,7 +917,8 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
                 policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
                 selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
-                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
+                internal_prompt=prompt_for_selected_account(s,row,prompt)
+                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
                 if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'
