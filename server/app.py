@@ -114,7 +114,7 @@ def max_concurrent_jobs():
         return 1
 class Credentials(BaseModel): identifier: str; password: str
 class Bootstrap(BaseModel): secret: str; identifier: str; password: str; client_name: str = 'Bob Client'
-class Invite(BaseModel): expires_hours: int = 72
+class Invite(BaseModel): expires_hours: int = 72; client_instance_id: str | None = None
 class Redeem(BaseModel): code: str; identifier: str; password: str
 class MessageIn(BaseModel): content: str
 class AccountSelectIn(BaseModel): account_id: str
@@ -483,14 +483,30 @@ async def logout(request: Request, response: Response):
 async def invite(body: Invite, request: Request):
     user=await csrf(request)
     if user['role']!='admin': raise HTTPException(403,'admin required')
-    client=membership(request.app.state.store,user); code=secrets.token_urlsafe(12); t=datetime_plus(body.expires_hours)
-    request.app.state.store.run('INSERT INTO invites VALUES (?,?,?,?,?,?,?)',(new_id(),client['client_instance_id'],hash_code(code),user['id'],t,None,None)); return {'code':code,'expires_at':t}
+    s=request.app.state.store
+    client_id=client_for_user(s,user,body.client_instance_id) if body.client_instance_id else membership(s,user)['client_instance_id']
+    code=secrets.token_urlsafe(12); t=datetime_plus(body.expires_hours)
+    s.run('INSERT INTO invites VALUES (?,?,?,?,?,?,?)',(new_id(),client_id,hash_code(code),user['id'],t,None,None)); return {'code':code,'expires_at':t,'client_instance_id':client_id}
 app.add_api_route('/api/admin/invites', invite, methods=['POST'])
 @app.post('/auth/invite/redeem')
 async def redeem(body: Redeem, request: Request):
-    s=request.app.state.store; inv=next((x for x in s.all('SELECT * FROM invites WHERE used_by IS NULL AND expires_at>?',(now(),)) if same_code(body.code,x['code_hash'])),None)
+    s=request.app.state.store; identifier=body.identifier.strip()
+    if not identifier or len(body.password)<12: raise HTTPException(400,'email or identifier and a password of at least 12 characters are required')
+    inv=next((x for x in s.all('SELECT * FROM invites WHERE used_by IS NULL AND expires_at>?',(now(),)) if same_code(body.code,x['code_hash'])),None)
     if not inv: raise HTTPException(400,'invalid invite')
-    uid=new_id(); t=now(); s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,body.identifier,hash_password(body.password),'member','approved',0,t,None)); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,inv['client_instance_id'],'member','approved',inv['created_by'],t)); s.run('UPDATE invites SET used_by=?,used_at=? WHERE id=?',(uid,t,inv['id'])); sid,token=s.create_session(uid); out=JSONResponse({'ok':True,'csrf':token}); cookie(out,sid); return out
+    if s.one('SELECT id FROM users WHERE email_or_identifier=?',(identifier,)): raise HTTPException(409,'that email or identifier is already registered')
+    client=s.one('SELECT id,display_name FROM client_instances WHERE id=? AND status="active"',(inv['client_instance_id'],))
+    if not client: raise HTTPException(400,'workspace is no longer available')
+    accounts=s.all('SELECT id FROM client_accounts WHERE client_instance_id=? AND is_active=1',(inv['client_instance_id'],))
+    uid=new_id(); t=now()
+    # Claim the code before creating the member so only one concurrent request can redeem it.
+    claimed=s.run('UPDATE invites SET used_by=?,used_at=? WHERE id=? AND used_by IS NULL',(uid,t,inv['id']))
+    if claimed.rowcount!=1: raise HTTPException(400,'invalid invite')
+    s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,identifier,hash_password(body.password),'member','approved',0,t,None))
+    s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,inv['client_instance_id'],'member','approved',inv['created_by'],t))
+    for account in accounts:
+        s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',(uid,account['id'],'read',inv['created_by'],t))
+    sid,token=s.create_session(uid); out=JSONResponse({'ok':True,'csrf':token,'client_id':client['id'],'client_name':client['display_name'],'account_count':len(accounts),'redirect':'chat'}); cookie(out,sid); return out
 
 @app.post('/api/profile/password')
 async def change_password(body: PasswordIn, request: Request):

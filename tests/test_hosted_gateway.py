@@ -133,6 +133,24 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(data['conversation']['agent_session_id'],'thread-one')
         self.assertIn('You are Bob for this workspace only.', self.app.state.runner.calls[0]['prompt'])
 
+    def test_invite_redeem_grants_all_active_client_accounts_as_read(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']
+        created='2026-08-31T00:00:00+00:00'
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('one',client_id,'1111111111','First account',1,created))
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('two',client_id,'2222222222','Second account',1,created))
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('off',client_id,'3333333333','Inactive account',0,created))
+        invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
+        redeemed=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member@example.com','password':'another-secure-password'})
+        self.assertEqual(redeemed.status_code,200,redeemed.text)
+        self.assertEqual(redeemed.json()['redirect'],'chat')
+        uid=s.one('SELECT id FROM users WHERE email_or_identifier=?',('member@example.com',))['id']
+        access=s.all('SELECT account_id,permission FROM user_account_access WHERE user_id=? ORDER BY account_id',(uid,))
+        self.assertEqual([(x['account_id'],x['permission']) for x in access],[('one','read'),('two','read')])
+        self.assertEqual([x['account_name'] for x in self.client.get('/api/accounts').json()],['First account','Second account'])
+        reused=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'second@example.com','password':'another-secure-password'})
+        self.assertEqual(reused.status_code,400)
+
     def test_failed_job_has_explicit_error_and_central_runtime_log(self):
         csrf=self.bootstrap(); self.app.state.runner=TimeoutRunner()
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
@@ -247,7 +265,7 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue((prepared / '.bob').is_symlink())
         self.assertEqual((prepared / '.bob').resolve(), (state_root / '.bob').resolve())
 
-    def test_artifacts_include_yaml_and_enforce_account_access(self):
+    def test_artifacts_include_yaml_and_enforce_client_access(self):
         admin_csrf = self.bootstrap()
         store = self.app.state.store
         client_id = store.one('SELECT id FROM client_instances')['id']
@@ -263,9 +281,6 @@ class GatewayTests(unittest.TestCase):
         })
         member_csrf = redeemed.json()['csrf']
         user_id = store.one('SELECT id FROM users WHERE email_or_identifier=?', ('artifact-user',))['id']
-        store.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',
-                  (user_id, demand_id, 'read', user_id, '2026-08-28T00:00:00+00:00'))
-
         from server import app as app_module
         runtime_root = Path(self.workspace)
         demand_root = runtime_root / 'wiki' / '1112223333'
@@ -294,10 +309,11 @@ class GatewayTests(unittest.TestCase):
             download = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.yaml?download=1')
             self.assertEqual(download.status_code, 200, download.text)
             self.assertIn('attachment', download.headers['content-disposition'])
-            blocked = self.client.get('/api/artifacts/9998887777/secret.md')
-            self.assertEqual(blocked.status_code, 404, blocked.text)
+            supply = self.client.get('/api/artifacts/9998887777/secret.md')
+            self.assertEqual(supply.status_code, 200, supply.text)
+            self.assertIn('# Supply only', supply.json()['content'])
             legacy = self.client.get('/api/wiki')
-            self.assertNotIn('9998887777/secret.md', [page['path'] for page in legacy.json()])
+            self.assertIn('9998887777/secret.md', [page['path'] for page in legacy.json()])
 
     def test_set_me_up_is_a_chat_response_with_google_url(self):
         admin_csrf=self.bootstrap()
@@ -389,6 +405,9 @@ class GatewayTests(unittest.TestCase):
             self.assertIn(screen,html)
         for section in ('OVERVIEW','ACCOUNTS','USERS & ACCESS','GOOGLE ADS'):
             self.assertIn(section,js)
+        self.assertIn('GENERATE INVITE CODE',js)
+        self.assertIn("client_instance_id:selectedClientId",js)
+        self.assertIn('read-only access to all active accounts',js)
         self.assertIn('TEST APPLICATION',html)
         self.assertIn("$('#admin').classList.add('active')",js)
         self.assertIn("document.querySelector('aside').hidden=true",js)
