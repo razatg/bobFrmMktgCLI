@@ -140,7 +140,7 @@ class GatewayTests(unittest.TestCase):
         s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('one',client_id,'1111111111','First account',1,created))
         s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('two',client_id,'2222222222','Second account',1,created))
         s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('off',client_id,'3333333333','Inactive account',0,created))
-        invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
+        invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={'max_uses':2}).json()['code']
         redeemed=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member@example.com','password':'another-secure-password'})
         self.assertEqual(redeemed.status_code,200,redeemed.text)
         self.assertEqual(redeemed.json()['redirect'],'chat')
@@ -148,8 +148,10 @@ class GatewayTests(unittest.TestCase):
         access=s.all('SELECT account_id,permission FROM user_account_access WHERE user_id=? ORDER BY account_id',(uid,))
         self.assertEqual([(x['account_id'],x['permission']) for x in access],[('one','read'),('two','read')])
         self.assertEqual([x['account_name'] for x in self.client.get('/api/accounts').json()],['First account','Second account'])
-        reused=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'second@example.com','password':'another-secure-password'})
-        self.assertEqual(reused.status_code,400)
+        second=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'second@example.com','password':'another-secure-password'})
+        self.assertEqual(second.status_code,200,second.text)
+        third=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'third@example.com','password':'another-secure-password'})
+        self.assertEqual(third.status_code,400)
 
     def test_failed_job_has_explicit_error_and_central_runtime_log(self):
         csrf=self.bootstrap(); self.app.state.runner=TimeoutRunner()
@@ -406,6 +408,7 @@ class GatewayTests(unittest.TestCase):
         for section in ('OVERVIEW','ACCOUNTS','USERS & ACCESS','GOOGLE ADS'):
             self.assertIn(section,js)
         self.assertIn('GENERATE INVITE CODE',js)
+        self.assertIn('MAXIMUM PEOPLE',js)
         self.assertIn("client_instance_id:selectedClientId",js)
         self.assertIn('read-only access to all active accounts',js)
         self.assertIn('TEST APPLICATION',html)

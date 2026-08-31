@@ -114,7 +114,7 @@ def max_concurrent_jobs():
         return 1
 class Credentials(BaseModel): identifier: str; password: str
 class Bootstrap(BaseModel): secret: str; identifier: str; password: str; client_name: str = 'Bob Client'
-class Invite(BaseModel): expires_hours: int = 72; client_instance_id: str | None = None
+class Invite(BaseModel): expires_hours: int = 72; max_uses: int = 10; client_instance_id: str | None = None
 class Redeem(BaseModel): code: str; identifier: str; password: str
 class MessageIn(BaseModel): content: str
 class AccountSelectIn(BaseModel): account_id: str
@@ -484,15 +484,16 @@ async def invite(body: Invite, request: Request):
     user=await csrf(request)
     if user['role']!='admin': raise HTTPException(403,'admin required')
     s=request.app.state.store
+    if body.expires_hours<1 or body.expires_hours>720 or body.max_uses<1 or body.max_uses>100: raise HTTPException(400,'expiry must be 1-720 hours and maximum uses must be 1-100')
     client_id=client_for_user(s,user,body.client_instance_id) if body.client_instance_id else membership(s,user)['client_instance_id']
     code=secrets.token_urlsafe(12); t=datetime_plus(body.expires_hours)
-    s.run('INSERT INTO invites VALUES (?,?,?,?,?,?,?)',(new_id(),client_id,hash_code(code),user['id'],t,None,None)); return {'code':code,'expires_at':t,'client_instance_id':client_id}
+    s.run('INSERT INTO invites (id,client_instance_id,code_hash,created_by,expires_at,used_by,used_at,max_uses,use_count) VALUES (?,?,?,?,?,?,?,?,?)',(new_id(),client_id,hash_code(code),user['id'],t,None,None,body.max_uses,0)); return {'code':code,'expires_at':t,'client_instance_id':client_id,'max_uses':body.max_uses,'uses_remaining':body.max_uses}
 app.add_api_route('/api/admin/invites', invite, methods=['POST'])
 @app.post('/auth/invite/redeem')
 async def redeem(body: Redeem, request: Request):
     s=request.app.state.store; identifier=body.identifier.strip()
     if not identifier or len(body.password)<12: raise HTTPException(400,'email or identifier and a password of at least 12 characters are required')
-    inv=next((x for x in s.all('SELECT * FROM invites WHERE used_by IS NULL AND expires_at>?',(now(),)) if same_code(body.code,x['code_hash'])),None)
+    inv=next((x for x in s.all('SELECT * FROM invites WHERE use_count<max_uses AND expires_at>?',(now(),)) if same_code(body.code,x['code_hash'])),None)
     if not inv: raise HTTPException(400,'invalid invite')
     if s.one('SELECT id FROM users WHERE email_or_identifier=?',(identifier,)): raise HTTPException(409,'that email or identifier is already registered')
     client=s.one('SELECT id,display_name FROM client_instances WHERE id=? AND status="active"',(inv['client_instance_id'],))
@@ -500,7 +501,7 @@ async def redeem(body: Redeem, request: Request):
     accounts=s.all('SELECT id FROM client_accounts WHERE client_instance_id=? AND is_active=1',(inv['client_instance_id'],))
     uid=new_id(); t=now()
     # Claim the code before creating the member so only one concurrent request can redeem it.
-    claimed=s.run('UPDATE invites SET used_by=?,used_at=? WHERE id=? AND used_by IS NULL',(uid,t,inv['id']))
+    claimed=s.run('UPDATE invites SET used_by=COALESCE(used_by,?),used_at=COALESCE(used_at,?),use_count=use_count+1 WHERE id=? AND use_count<max_uses',(uid,t,inv['id']))
     if claimed.rowcount!=1: raise HTTPException(400,'invalid invite')
     s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,identifier,hash_password(body.password),'member','approved',0,t,None))
     s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,inv['client_instance_id'],'member','approved',inv['created_by'],t))

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS client_memberships (
 CREATE TABLE IF NOT EXISTS invites (
   id TEXT PRIMARY KEY, client_instance_id TEXT NOT NULL, code_hash TEXT NOT NULL,
   created_by TEXT NOT NULL, expires_at TEXT NOT NULL, used_by TEXT, used_at TEXT,
+  max_uses INTEGER NOT NULL DEFAULT 10, use_count INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(client_instance_id) REFERENCES client_instances(id)
 );
 CREATE TABLE IF NOT EXISTS sessions (

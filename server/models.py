@@ -26,6 +26,12 @@ class Store:
         self._ensure_column('client_accounts', 'cac_ceiling', 'REAL NOT NULL DEFAULT 200')
         self._ensure_column('client_accounts', 'bid_budget_change_pct', 'REAL NOT NULL DEFAULT 10')
         self._ensure_column('client_accounts', 'bid_budget_cooldown_days', 'INTEGER NOT NULL DEFAULT 14')
+        legacy_invites = 'max_uses' not in {row['name'] for row in self.db.execute('PRAGMA table_info(invites)')}
+        self._ensure_column('invites', 'max_uses', 'INTEGER NOT NULL DEFAULT 10')
+        self._ensure_column('invites', 'use_count', 'INTEGER NOT NULL DEFAULT 0')
+        if legacy_invites:
+            self.db.execute('UPDATE invites SET max_uses=1,use_count=CASE WHEN used_by IS NULL THEN 0 ELSE 1 END')
+            self.db.commit()
         # One-time rename from the old user-facing permission term.
         self.db.execute("UPDATE user_account_access SET permission='read_write' WHERE permission='mutate'")
         self.db.commit()
