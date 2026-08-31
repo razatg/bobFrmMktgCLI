@@ -124,7 +124,10 @@ class GatewayTests(unittest.TestCase):
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':csrf},json={}).json()['code']
         redeemed=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member','password':'another-secure-password'})
         self.assertEqual(redeemed.status_code,200,redeemed.text)
-        member_csrf=redeemed.json()['csrf']; conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
+        member_csrf=redeemed.json()['csrf']; member_id=self.app.state.store.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']
+        client_id=self.app.state.store.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
+        self.app.state.store.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',('connection',member_id,client_id,None,None,'secret:refresh','scope','connected',stamp,None,stamp,stamp))
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
         job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'hello'}).json()['job_id']
         import time; time.sleep(.05)
         events=self.client.get(f'/api/jobs/{job}/events').text
@@ -330,6 +333,18 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('https://accounts.google.com/o/oauth2/v2/auth',response.json()['immediate_response'])
         self.assertEqual(self.app.state.store.one('SELECT COUNT(*) n FROM oauth_transactions')['n'],1)
 
+    def test_queries_require_google_auth_and_are_saved_without_creating_job(self):
+        admin_csrf=self.bootstrap(); invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
+        member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'no-auth-user','password':'another-secure-password'})
+        member_csrf=member.json()['csrf']; conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
+        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'What happened last week?'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertIsNone(response.json()['job_id'])
+        self.assertIn('Google Ads isn’t connected yet',response.json()['immediate_response'])
+        messages=self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        self.assertEqual([m['content'] for m in messages],['What happened last week?',response.json()['immediate_response']])
+        self.assertIsNone(self.app.state.store.one('SELECT id FROM jobs WHERE conversation_id=?',(conversation,)))
+
     def test_environment_provisions_super_admin_without_browser_setup(self):
         from server.app import provision_environment_admin
         from server.models import Store
@@ -420,6 +435,8 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('artifact-chat-link', js)
         self.assertNotIn('loadWiki()', js)
         self.assertIn('watchJob', js)
+        self.assertIn('USER QUESTION', js)
+        self.assertIn('user_prompt', js)
         self.assertIn('/api/jobs/${jid}', js)
         self.assertIn('RECONNECTING', js)
         self.assertIn('/api/conversations/${conversation}/active-job', js)
@@ -459,6 +476,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(sessions.status_code,200,sessions.text)
         self.assertEqual(sessions.json()[0]['job_id'],job)
         self.assertEqual(sessions.json()[0]['agent_session_id'],'thread-one')
+        self.assertEqual(sessions.json()[0]['user_prompt'],'hello')
         events=self.client.get(f'/api/admin/codex-sessions/{job}/events',headers={'X-CSRF-Token':csrf})
         self.assertEqual(events.status_code,200,events.text)
         self.assertEqual(events.json()[0]['event_type'],'status')
@@ -572,6 +590,8 @@ class GatewayTests(unittest.TestCase):
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':csrf},json={}).json()['code']
         redeemed=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member','password':'another-secure-password'})
         member_csrf=redeemed.json()['csrf']
+        member_id=self.app.state.store.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']; client_id=self.app.state.store.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
+        self.app.state.store.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',('connection',member_id,client_id,None,None,'secret:refresh','scope','connected',stamp,None,stamp,stamp))
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
         response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'explain lambda in python'})
         self.assertEqual(response.status_code,200,response.text)
@@ -595,6 +615,8 @@ class GatewayTests(unittest.TestCase):
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':csrf},json={}).json()['code']
         redeemed=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'member','password':'another-secure-password'})
         member_csrf=redeemed.json()['csrf']
+        member_id=self.app.state.store.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']; client_id=self.app.state.store.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
+        self.app.state.store.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',('connection',member_id,client_id,None,None,'secret:refresh','scope','connected',stamp,None,stamp,stamp))
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
         prompt = 'tell me about middleware layers'
         first=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':prompt})

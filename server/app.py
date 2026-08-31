@@ -533,13 +533,13 @@ async def admin_codex_sessions(request: Request):
     user=await csrf(request); s=request.app.state.store
     if user['role']!='admin': raise HTTPException(403,'admin required')
     rows=s.all('''SELECT j.id AS job_id,j.conversation_id,j.status,j.started_at,j.completed_at,j.error,
-      j.created_at,c.agent_session_id,c.user_id,c.client_instance_id,c.account_id,
+      j.created_at,c.agent_session_id,c.user_id,c.client_instance_id,c.account_id,m.content AS user_prompt,
       u.email_or_identifier AS user_identifier,ci.display_name AS client_name,
       COALESCE(NULLIF(ci.codex_model,''),?) AS model,
       a.account_name,a.customer_id,
       (SELECT je.event_type FROM job_events je WHERE je.job_id=j.id ORDER BY je.event_id DESC LIMIT 1) AS last_event_type,
       (SELECT je.payload FROM job_events je WHERE je.job_id=j.id ORDER BY je.event_id DESC LIMIT 1) AS last_event_payload
-      FROM jobs j JOIN conversations c ON c.id=j.conversation_id
+      FROM jobs j JOIN conversations c ON c.id=j.conversation_id JOIN messages m ON m.id=j.message_id
       JOIN users u ON u.id=c.user_id
       LEFT JOIN client_instances ci ON ci.id=c.client_instance_id
       LEFT JOIN client_accounts a ON a.id=c.account_id
@@ -1015,6 +1015,13 @@ async def message(cid: str, body: MessageIn, request: Request):
                 reply="Righto — open this Google Ads authorization link and sign in with your own Google account:\n\n"+url+"\n\nOnce Google sends you back, tell me you’re ready and I’ll verify the connection."
             except HTTPException as exc:
                 reply=f"I can start that setup once the admin configures Google Ads for this workspace. ({exc.detail})"
+        s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
+        return {'job_id':None,'message_id':mid,'immediate_response':reply}
+    connection=s.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],row['client_instance_id']))
+    if user['role']!='admin' and (not connection or connection['status']!='connected'):
+        mid=new_id(); t=now()
+        s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
+        reply="Google Ads isn’t connected yet, so I can’t run that check. You can review saved work in Artifacts, or say ‘Hey Bob, set me up’ to connect your account."
         s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
         return {'job_id':None,'message_id':mid,'immediate_response':reply}
     allowed,_reason = is_obviously_bob_scope(s, row, body.content)
