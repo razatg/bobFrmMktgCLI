@@ -475,7 +475,7 @@ async def session(request: Request):
     if not row: return {'authenticated':False}
     client = membership(request.app.state.store, row, None)
     google_connected = bool(client and request.app.state.store.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(row['id'],client['client_instance_id'])))
-    return {'authenticated':True,'user':{'id':row['id'],'identifier':row['email_or_identifier'],'role':row['role'],'status':row['status']},'google_connected':google_connected,'csrf':row['csrf_token']}
+    return {'authenticated':True,'user':{'id':row['id'],'identifier':row['email_or_identifier'],'role':row['role'],'status':row['status'],'client_role':client['role'] if client else None},'google_connected':google_connected,'csrf':row['csrf_token']}
 @app.post('/auth/bootstrap')
 async def bootstrap(body: Bootstrap, request: Request):
     s=request.app.state.store
