@@ -118,6 +118,7 @@ class GatewayTests(unittest.TestCase):
         prompt=scope_wrapped_prompt('What does GSR2Net mean?',client_instance_id='client-one',account_customer_id='1234567890')
         self.assertIn('account KT is at wiki/1234567890/KT.md',prompt)
         self.assertNotIn('client KT',prompt)
+        self.assertIn('AUTHORITATIVE CURRENT ACCOUNT:',prompt)
         self.assertIn('Ask one focused clarification',prompt)
 
     def test_admin_observability_is_lightweight_and_reads_history(self):

@@ -259,7 +259,8 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
             + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Bob permission: {account_permission}. A MANAGEMENT user may answer from saved data and the wiki but has no Google Ads authorization; if fresh data is required, report the authorization error. A READ user may inspect data and prepare plans but must never apply Google Ads changes. Only a READ & WRITE user may apply approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
-            + f"User message:\n{prompt}")
+            + f"User message:\n{prompt}\n\nAUTHORITATIVE CURRENT ACCOUNT: {account_context or 'none'} ({account_customer_id or 'no customer ID'}). Use this account for every lookup, explanation, and recommendation in this turn. Do not reuse an account name from earlier conversation turns."
+            )
 def prompt_for_selected_account(store, row, prompt):
     """Prevent account names typed in chat from overriding the UI selection."""
     selected = store.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?', (row.get('account_id'), row['client_instance_id'])) if row.get('account_id') else None
