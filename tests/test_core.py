@@ -248,6 +248,35 @@ class TestAggregation(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["asset_text"], "Ride faster")
 
+    def test_compact_comparison_prints_drivers_not_full_rows(self):
+        rows = [
+            {"campaign_name": "A", "current_goal_conversions": "100", "baseline_goal_conversions": "50",
+             "current_cost": "200", "baseline_cost": "100"},
+            {"campaign_name": "B", "current_goal_conversions": "10", "baseline_goal_conversions": "9",
+             "current_cost": "20", "baseline_cost": "18"},
+        ]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            dp._print_compact_comparison(
+                "campaign_network_period", ["campaign_name"], rows,
+                {"goal_conversions": "110", "cost": "220"},
+                {"goal_conversions": "59", "cost": "118"},
+                "goal_conversions", "₹", "current", "baseline", "", 1, None, None,
+            )
+        text = output.getvalue()
+        self.assertIn("Top 1 drivers:", text)
+        self.assertIn("A", text)
+        self.assertNotIn("B", text)
+
+    def test_parser_exposes_compact_output_controls(self):
+        parser = dp.build_parser()
+        args = parser.parse_args(["compare-weeks", "--summary", "--top", "3"])
+        self.assertTrue(args.summary)
+        self.assertEqual(args.top, 3)
+        args = parser.parse_args(["fetch", "--query", "campaign_daily", "--quiet"])
+        self.assertTrue(args.quiet)
+        args = parser.parse_args(["data-manifest", "--account", "123-456-7890"])
+        self.assertEqual(args.account, "123-456-7890")
+
 
 class TestProcessedPeriodMaterialization(unittest.TestCase):
     """Exact period slices should be materialized from raw files before comparisons fail."""

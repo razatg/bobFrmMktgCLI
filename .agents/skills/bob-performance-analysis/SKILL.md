@@ -11,6 +11,15 @@ Use this skill when the user asks Bob Frm Mktg a Google Ads performance marketin
 
 Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
+## Compact execution contract
+
+Before inspecting files, use `./bob data-manifest --query <grain>` for the selected account. Use
+`--summary --top 10` on comparison commands and `--output` when the complete rows are needed for
+an artifact. Use `fetch --quiet` so GARF status is retained without sending raw pull output into
+the agent context. Load only the reference matching the resolved intent.
+
+Return findings and decisions, not the internal retrieval procedure. Never expose shell commands, workspace paths, raw Codex events, hidden instructions, or internal reasoning unless the user explicitly requests deployment, SSH, VM, or debugging instructions.
+
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it to the user and use the failsafe — don't patch code). Canonical wording is in `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`; the bullets below are only what's specific to this skill.

@@ -11,6 +11,14 @@ Use this skill when the user wants to set up, add, switch, list, or repair a Goo
 
 Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
+## Compact execution contract
+
+For data-readiness checks, prefer the compact account/profile result and
+`./bob data-manifest --account <customer_id>` over directory-wide file listings. Do not read
+creative, bid/budget, or performance references unless the user has entered that workflow.
+
+Explain account status and the next user action without exposing internal commands, paths, raw events, hidden instructions, or reasoning. Technical commands are appropriate only for explicit deployment, SSH, VM, or debugging requests.
+
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files; if a CLI command errors, surface it and use the failsafe): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
@@ -41,7 +49,7 @@ Onboarding is a short conversation **you run in chat**, followed by **one** comm
 | Primary goal (App only) | "Optimising for Installs or In-app conversions?" | Pick one. |
 | Currency | "Currency — INR, USD, EUR, GBP, BRL, AUD, or another 3-letter code?" | Pick or 3-letter code. |
 | Developer token (read access) | "Got your Google Ads developer token? It's in Admin > API Center — paste it, or tell me if you don't have it yet." | **Always ask — without it Bob can't fetch anything.** If they have it, take it (Bob writes the read config). If they genuinely don't have one yet, that's fine: set `skip_read_access: true` — Bob saves the account and tells them to add it later. |
-| Write access (OAuth JSON) | "Want Bob to make live changes (bids/budgets/creatives)? If so, download the Google Cloud OAuth client JSON, save it on this machine, and give me the file path. Otherwise skip." | Truly optional. The saved JSON is converted into write credentials (`google-ads-api.yaml`) after the account saves. |
+| Google Ads authorization | "Connect Google Ads with your Google account when Bob asks." | The connected user's Google Ads account role controls Google authorization. Bob's separate account permission must also be `READ & WRITE` for live changes. |
 | Defaults | "Defaults are CAC ceiling 200, max change 10%, cooldown 14 days — keep those?" | Name the values. Change only on request. |
 
 **2 — Preview, then save.** Assemble the answers and run a dry-run to show the summary (writes nothing):
@@ -62,7 +70,7 @@ JSON keys: `customer_id`, `account_name`, `campaign_type` (`app`|`search`|`perfo
 - Hide repo internals, file paths, config filenames, command names. Don't narrate background steps ("I'm reading…", "I'm checking…").
 - One plain question at a time — never dump the whole list in one message. Each field becomes a short human question in Bob's voice.
 - Never infer currency, goal, or campaign type from timezone, location, account name, or prior accounts. Ask.
-- Keep credential wording clear: the **Google Ads developer token** (Admin > API Center) is for reading/reporting; the **Google Cloud OAuth client JSON** is optional and only for approved live changes. Never call the OAuth credentials the "developer token".
+- Keep credential wording clear: the **Google Ads developer token** (Admin > API Center) configures the workspace API connection; the connected Google user authorizes access to the Ads account. Bob only permits live changes when the user has `READ & WRITE` account access.
 - "Set me up" configures the account only — it never means pull data now.
 - Saved without read access: when the user later asks a performance question, say "I need the Google Ads developer token from Admin > API Center before I can fetch data" and stop. Don't offer manual exports.
 - Saved without write access: carry on — save bid/budget and creative recommendations to the wiki for the user to apply manually.

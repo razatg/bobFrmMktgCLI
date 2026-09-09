@@ -68,9 +68,13 @@ validation/
 
 # Local safety snapshots used before hosted/admin migrations
 backup/
+.local/vm-snapshot/
+.local/vm-snapshot.previous/
+.local/vm-snapshot.working/
+.local/vm-snapshot.working-staging/
 
-# Markdown policy: keep required agent/runtime instructions and project docs;
-# ignore ad-hoc Markdown notes and generated Markdown everywhere else.
+# Markdown policy: keep required agent/runtime instructions;
+# ignore local notes, generated Markdown, and the local docs directory.
 *.md
 !AGENTS.md
 !CLAUDE.md
@@ -78,5 +82,4 @@ backup/
 !README.md
 !.agents/
 !.agents/**/*.md
-!docs/
-!docs/**/*.md
+/docs/

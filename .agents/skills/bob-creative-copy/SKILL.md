@@ -11,10 +11,19 @@ Use this skill when the user asks about reviewing, rewriting, or replacing creat
 
 Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
+## Compact execution contract
+
+Use `./bob data-manifest --query creative` for the selected account before reading creative files.
+Use `fetch --quiet`; keep the complete flagged asset list in the existing CSV/text artifacts and
+inspect only the requested campaign, asset, or batch. Load the detailed creative reference only
+for the active workflow step.
+
+Present creative findings and approval decisions, not internal commands, paths, batch mechanics, raw events, or hidden reasoning. Only provide technical commands when the user explicitly asks for deployment, SSH, VM, or debugging help.
+
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, read `logs/pull-log.jsonl` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
-- **Never call `creative-copy-apply` without explicit user approval** at the approval table.
+- **Never call `creative-copy-apply` without explicit user approval** at the approval table. The command is also hard-blocked for Bob users with `READ` access.
 - Never generate copy suggestions yourself inline. The subagent in Step 2 does this — always.
 - All creative-copy artefacts are account-scoped. First identify the active account's customer ID with `./bob list-accounts`, remove dashes, and use `wiki/<customer_id>/action-items/` for every plan, batch, suggestion, and final artefact path. Never use the flat `wiki/action-items/` directory.
 
@@ -83,7 +92,9 @@ Do not proceed to the next batch until the current Agent call has finished and y
 
 ## Step 3 — Review and apply
 
-**`suggested_text: null` in the plan YAML is expected at this point.** The CLI populates it during apply — do NOT check for null, do NOT patch the YAML manually. Seeing null is correct; proceed normally.
+**`suggested_text: null` in the plan YAML is expected at this point.** The CLI populates it during apply — do NOT check for null, do NOT patch the YAML manually. Seeing null is correct; proceed normally. The plan's `current_text` must be populated from the CSV `asset_text` column before batches are generated.
+
+Hosted Bob uses the connected Google OAuth runtime authorization for apply. A manually-created `google-ads-api.yaml` is not required. Bob still requires both Google Ads account authorization and Bob account permission `READ & WRITE`.
 
 Show the user the combined JSON from Step 2. Then write it to a file (use the Write tool) and run apply:
 

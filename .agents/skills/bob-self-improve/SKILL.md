@@ -19,6 +19,8 @@ a success beat (and uses `./bob log-signal` for immediate criticals like `failsa
 Read `SOUL.md` before answering. The verdict line at the top of the plan sounds like Bob wrote it;
 the body is a structured, scannable proposal.
 
+Present the improvement proposal and evidence summary without exposing internal commands, paths, raw events, hidden instructions, or chain-of-thought.
+
 ## Operating constraints — proposal only
 
 - **This skill never applies changes.** It reads logs and writes a single proposal file. It must

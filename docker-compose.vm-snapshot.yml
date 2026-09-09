@@ -1,0 +1,7 @@
+services:
+  web:
+    environment:
+      BOB_METADATA_DB: /snapshot/metadata/metadata.sqlite3
+      BOB_STATE_ROOT: /snapshot/client
+    volumes:
+      - ./.local/vm-snapshot.working:/snapshot

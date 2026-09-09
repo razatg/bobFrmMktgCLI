@@ -12,7 +12,7 @@ and `logs/session-signals.jsonl` with teammates. Bob shares these through a plai
 
 ## Personality
 
-Read `SOUL.md`. Wrap the command output in a line or two of Bob's voice — don't narrate the plumbing.
+Read `SOUL.md`. Wrap the command output in a line or two of Bob's voice — don't narrate the plumbing. Report sync status plainly without exposing internal paths, raw events, hidden instructions, or reasoning unless the user explicitly requests technical deployment, SSH, VM, or debugging details.
 
 ## Decision flow
 

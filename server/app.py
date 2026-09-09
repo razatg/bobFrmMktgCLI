@@ -117,6 +117,7 @@ class Bootstrap(BaseModel): secret: str; identifier: str; password: str; client_
 class Invite(BaseModel): expires_hours: int = 72; max_uses: int = 10; client_instance_id: str | None = None
 class Redeem(BaseModel): code: str; identifier: str; password: str
 class MessageIn(BaseModel): content: str
+class AccountKnowledgeIn(BaseModel): customer_id: str; content: str
 class AccountSelectIn(BaseModel): account_id: str
 class PasswordIn(BaseModel): current_password: str; new_password: str
 class AccountIn(BaseModel):
@@ -177,6 +178,8 @@ async def lifespan(app):
     provision_environment_admin(app.state.store)
     for path in (STATE_ROOT / '.bob', STATE_ROOT / 'data', STATE_ROOT / 'garf' / 'outputs' / 'raw', STATE_ROOT / 'wiki', STATE_ROOT / 'logs', STATE_ROOT / 'validation' / 'reports'):
         path.mkdir(parents=True, exist_ok=True)
+    for account in app.state.store.all('SELECT customer_id FROM client_accounts WHERE is_active=1'):
+        ensure_account_kt(account['customer_id'])
     app.state.runner = AgentRunner(); app.state.locks = {}; app.state.cancel = {}
     app.state.job_slots = asyncio.Semaphore(max_concurrent_jobs())
     yield; app.state.store.close()
@@ -193,7 +196,9 @@ def permitted_accounts(store, user, client_instance_id, active_only=True):
     args = [client_instance_id]
     if active_only:
         filters += ' AND a.is_active=1'
-    if user['role'] != 'admin':
+    client_membership = membership(store, user, client_instance_id)
+    management = client_membership and client_membership['role'] == 'management'
+    if user['role'] != 'admin' and not management:
         filters += ' AND EXISTS (SELECT 1 FROM user_account_access ua WHERE ua.account_id=a.id AND ua.user_id=?)'
         args.append(user['id'])
     rows = store.all(f'''SELECT a.id,a.customer_id,a.account_name,a.is_active
@@ -246,14 +251,15 @@ def is_obviously_bob_scope(store, row, prompt):
     if len(normalized.split()) <= 6 and recent:
         return True, 'followup'
     return True, 'pass'
-def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'):
-    return (
-        "You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
-        "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
-        f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
-        f"Current selected account: {account_context or 'none'}. Bob permission: {account_permission}. A READ user may inspect data and prepare plans but must never apply Google Ads changes. Only a READ & WRITE user may apply approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
-        f"User message:\n{prompt}"
-    )
+def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', client_instance_id=None, account_customer_id=None):
+    account_kt_path = f"wiki/{account_customer_id}/KT.md" if account_customer_id else 'wiki/<customer_id>/KT.md'
+    kt_guidance = f"Selected-account terminology and clarification: the account KT is at {account_kt_path}. Read it for account-specific meanings, metrics, campaign naming, and scope. Ask one focused clarification when ambiguity could change the metric, data pull, or recommendation; otherwise proceed with a brief stated assumption. Never invent a term definition or silently map an unsupported entity (for example, city data) to a campaign label. If the user explicitly confirms a new term or meaning, add the exact clarification to the selected account KT.\n\n" if account_customer_id else ''
+    return ("You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
+            "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
+            f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
+            + kt_guidance
+            + f"Current selected account: {account_context or 'none'}. Bob permission: {account_permission}. A MANAGEMENT user may answer from saved data and the wiki but has no Google Ads authorization; if fresh data is required, report the authorization error. A READ user may inspect data and prepare plans but must never apply Google Ads changes. Only a READ & WRITE user may apply approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
+            + f"User message:\n{prompt}")
 def prompt_for_selected_account(store, row, prompt):
     """Prevent account names typed in chat from overriding the UI selection."""
     selected = store.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?', (row.get('account_id'), row['client_instance_id'])) if row.get('account_id') else None
@@ -292,7 +298,14 @@ def configured_redirect_uri(store):
     return row['redirect_uri'] if row and row['redirect_uri'] else redirect_uri()
 def client_google_config(store, client_id):
     row=store.one('SELECT * FROM client_google_configs WHERE client_instance_id=?',(client_id,))
-    if row: return row
+    if row:
+        config=dict(row)
+        if not config.get('mcc_id'):
+            client=store.one('SELECT mcc_id,mcc_name FROM client_instances WHERE id=?',(client_id,))
+            if client and client['mcc_id']:
+                config['mcc_id']=client['mcc_id']
+                config['mcc_name']=config.get('mcc_name') or client['mcc_name']
+        return config
     return global_google_config(store)
 def pkce_challenge(verifier):
     digest = hashlib.sha256(verifier.encode()).digest()
@@ -441,9 +454,12 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
     return str(path)
 
 def account_permission(store, user_id, client_instance_id, account_id):
-    user = store.one('SELECT role FROM users WHERE id=?', (user_id,))
+    user = store.one('SELECT * FROM users WHERE id=?', (user_id,))
     if user and user['role'] == 'admin':
         return 'read_write'
+    client_membership = membership(store, user, client_instance_id) if user else None
+    if client_membership and client_membership['role'] == 'management':
+        return 'management'
     row = store.one('SELECT permission FROM user_account_access WHERE user_id=? AND account_id=?', (user_id, account_id))
     return row['permission'] if row and row['permission'] in {'read', 'read_write'} else 'read'
 def cookie(response, sid): response.set_cookie('bob_session',sid,httponly=True,secure=os.getenv('BOB_SECURE_COOKIES','0')=='1',samesite='lax',max_age=86400)
@@ -749,9 +765,9 @@ async def admin_client_detail(client_id: str, request: Request):
     if not client: raise HTTPException(404,'client not found')
     cfg=s.one('SELECT mcc_id,mcc_name FROM client_instances WHERE id=?',(client_id,))
     accounts=[dict(x) for x in s.all('SELECT * FROM client_accounts WHERE client_instance_id=? ORDER BY account_name',(client_id,))]
-    users=[dict(x) for x in s.all('''SELECT u.id,u.email_or_identifier,u.role,u.status,COALESCE(g.status,'not_connected') google_status
+    users=[dict(x) for x in s.all('''SELECT u.id,u.email_or_identifier,u.role,u.status,m.role client_role,COALESCE(g.status,'not_connected') google_status
       FROM users u JOIN client_memberships m ON m.user_id=u.id LEFT JOIN google_ads_connections g ON g.user_id=u.id AND g.client_instance_id=m.client_instance_id
-      WHERE m.client_instance_id=? AND m.role='member' ORDER BY u.email_or_identifier''',(client_id,))]
+      WHERE m.client_instance_id=? AND m.role IN ('member','management') ORDER BY u.email_or_identifier''',(client_id,))]
     permissions=[dict(x) for x in s.all('''SELECT ua.user_id,ua.account_id,ua.permission FROM user_account_access ua
       JOIN client_accounts a ON a.id=ua.account_id WHERE a.client_instance_id=?''',(client_id,))]
     return {'client':dict(client),'config':dict(cfg) if cfg else None,'accounts':accounts,'users':users,'permissions':permissions}
@@ -805,7 +821,7 @@ async def update_client_account(client_id: str, account_id: str, body: AccountUp
     settings=account_settings(body)
     s.run('''UPDATE client_accounts SET account_name=?,customer_id=?,is_active=?,primary_goal=?,currency=?,campaign_goal_type=?,creative_lookback_days=?,creative_min_impressions=?,cac_ceiling=?,bid_budget_change_pct=?,bid_budget_cooldown_days=? WHERE id=?''',(name,customer_id,int(body.is_active),*settings,account_id))
     return {'ok':True,'account_id':account_id,'account_name':name,'customer_id':customer_id,'is_active':body.is_active,**dict(zip(('primary_goal','currency','campaign_goal_type','creative_lookback_days','creative_min_impressions','cac_ceiling','bid_budget_change_pct','bid_budget_cooldown_days'),settings))}
-class UserCreateIn(BaseModel): identifier: str; password: str; status: str = 'approved'
+class UserCreateIn(BaseModel): identifier: str; password: str; status: str = 'approved'; client_role: str = 'member'
 @app.post('/api/admin/clients/{client_id}/users')
 async def add_client_user(client_id: str, body: UserCreateIn, request: Request):
     admin=await csrf(request); s=request.app.state.store; client_for_user(s,admin,client_id)
@@ -813,10 +829,19 @@ async def add_client_user(client_id: str, body: UserCreateIn, request: Request):
     identifier=body.identifier.strip()
     if not identifier or len(body.password)<12: raise HTTPException(400,'identifier and password (12+ characters) are required')
     if body.status not in {'approved','waitlisted'}: raise HTTPException(400,'invalid user status')
-    if s.one('SELECT id FROM users WHERE email_or_identifier=?',(identifier,)): raise HTTPException(409,'user identifier already exists')
-    uid=new_id(); t=now(); s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,identifier,hash_password(body.password),'member',body.status,0,t,None)); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,client_id,'member',body.status,admin['id'],t))
-    return {'ok':True,'user':{'id':uid,'identifier':identifier,'status':body.status}}
-class UserUpdateIn(BaseModel): status: str | None = None; password: str | None = None
+    if body.client_role not in {'member','management'}: raise HTTPException(400,'invalid client role')
+    existing=s.one('SELECT * FROM users WHERE email_or_identifier=?',(identifier,))
+    t=now()
+    if existing:
+        if s.one('SELECT 1 FROM client_memberships WHERE user_id=?',(existing['id'],)):
+            raise HTTPException(409,'user identifier already exists')
+        uid=existing['id']
+        s.run('UPDATE users SET password_hash=?,status=?,password_must_change=0 WHERE id=?',(hash_password(body.password),body.status,uid))
+    else:
+        uid=new_id(); s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,identifier,hash_password(body.password),'member',body.status,0,t,None))
+    s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,client_id,body.client_role,body.status,admin['id'],t))
+    return {'ok':True,'user':{'id':uid,'identifier':identifier,'status':body.status,'client_role':body.client_role},'reused_orphan':bool(existing)}
+class UserUpdateIn(BaseModel): status: str | None = None; password: str | None = None; client_role: str | None = None
 @app.patch('/api/admin/clients/{client_id}/users/{uid}')
 async def update_client_user(client_id: str, uid: str, body: UserUpdateIn, request: Request):
     admin=await csrf(request); s=request.app.state.store; client_for_user(s,admin,client_id)
@@ -825,6 +850,7 @@ async def update_client_user(client_id: str, uid: str, body: UserUpdateIn, reque
     target=s.one('SELECT * FROM users WHERE id=?',(uid,))
     if not member or not target or target['role']=='admin': raise HTTPException(404,'client user not found')
     if body.status is not None and body.status not in {'approved','waitlisted','suspended'}: raise HTTPException(400,'invalid user status')
+    if body.client_role is not None and body.client_role not in {'member','management'}: raise HTTPException(400,'invalid client role')
     if body.password is not None and len(body.password)<12: raise HTTPException(400,'password must be at least 12 characters')
     if body.status is not None:
         s.run('UPDATE client_memberships SET status=? WHERE user_id=? AND client_instance_id=?',(body.status,uid,client_id))
@@ -833,6 +859,7 @@ async def update_client_user(client_id: str, uid: str, body: UserUpdateIn, reque
         # unlocks the protected chat APIs on the next login.
         s.run('UPDATE users SET status=? WHERE id=?',(body.status,uid))
     if body.password is not None: s.run('UPDATE users SET password_hash=? WHERE id=?',(hash_password(body.password),uid))
+    if body.client_role is not None: s.run('UPDATE client_memberships SET role=? WHERE user_id=? AND client_instance_id=?',(body.client_role,uid,client_id))
     return {'ok':True,'user_id':uid}
 @app.delete('/api/admin/clients/{client_id}/users/{uid}')
 async def remove_client_user(client_id: str, uid: str, request: Request):
@@ -869,12 +896,12 @@ async def save_google_config(body: GoogleConfigIn, request: Request):
     t=now(); env=environment_name(); existing_global=global_google_config(s)
     dev_ref=app.state.secrets.put(body.developer_token.strip())
     secret_ref=app.state.secrets.put(oauth_secret)
-    saved_base_url=(body.base_url or default_base_url()).rstrip('/')
-    saved_redirect=body.redirect_uri or f'{saved_base_url}/api/google-ads/oauth/callback'
+    saved_base_url=(body.base_url or default_base_url()).strip().rstrip('/')
+    saved_redirect=(body.redirect_uri or f'{saved_base_url}/api/google-ads/oauth/callback').strip()
     if existing_global:
         s.run('UPDATE global_google_configs SET developer_token_ref=?,oauth_client_id=?,oauth_client_secret_ref=?,base_url=?,redirect_uri=?,updated_at=? WHERE environment=?',(dev_ref,oauth_id,secret_ref,saved_base_url,saved_redirect,t,env))
     else:
-        s.run('INSERT INTO global_google_configs (environment,developer_token_ref,oauth_client_id,oauth_client_secret_ref,base_url,redirect_uri,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',(env,dev_ref,oauth_id,secret_ref,body.base_url or default_base_url(),body.redirect_uri or redirect_uri(),t,t))
+        s.run('INSERT INTO global_google_configs (environment,developer_token_ref,oauth_client_id,oauth_client_secret_ref,base_url,redirect_uri,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',(env,dev_ref,oauth_id,secret_ref,saved_base_url,saved_redirect,t,t))
     existing=s.one('SELECT * FROM client_google_configs WHERE client_instance_id=?',(client_id,))
     mcc_id=(body.mcc_id or '').replace('-',''); mcc_name=body.mcc_name or ''
     if existing:
@@ -1000,6 +1027,11 @@ async def get_conversation(cid: str, request: Request):
 @app.post('/api/conversations/{cid}/messages')
 async def message(cid: str, body: MessageIn, request: Request):
     user,row=await conversation(request,cid); s=request.app.state.store; row=dict(row)
+    if not row.get('account_id'):
+        available=permitted_accounts(s,user,row['client_instance_id'])
+        if len(available)==1:
+            row['account_id']=available[0]['id']
+            s.run('UPDATE conversations SET account_id=?,last_activity_at=? WHERE id=?',(row['account_id'],now(),cid))
     active = s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
     if active:
         raise HTTPException(409, 'Bob is still working on this conversation. Please wait for the current job or stop it before sending another prompt.')
@@ -1018,7 +1050,9 @@ async def message(cid: str, body: MessageIn, request: Request):
         s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
         return {'job_id':None,'message_id':mid,'immediate_response':reply}
     connection=s.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],row['client_instance_id']))
-    if user['role']!='admin' and (not connection or connection['status']!='connected'):
+    client_membership = membership(s, user, row['client_instance_id'])
+    is_management = client_membership and client_membership['role'] == 'management'
+    if user['role']!='admin' and not is_management and (not connection or connection['status']!='connected'):
         mid=new_id(); t=now()
         s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
         reply="Google Ads isn’t connected yet, so I can’t run that check. You can review saved work in Artifacts, or say ‘Hey Bob, set me up’ to connect your account."
@@ -1055,9 +1089,9 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
                 environment['BOB_ACCOUNT_PERMISSION'] = account_permission(s, row['user_id'], row['client_instance_id'], row.get('account_id'))
                 policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
-                selected_account=s.one('SELECT account_name FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
+                selected_account=s.one('SELECT account_name,customer_id FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
                 internal_prompt=prompt_for_selected_account(s,row,prompt)
-                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION']),workspace,policy,emit,app.state.cancel.get(jid))
+                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION'], None if row['agent_session_id'] else row['client_instance_id'], selected_account['customer_id'] if selected_account else None),workspace,policy,emit,app.state.cancel.get(jid))
                 if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'
@@ -1089,6 +1123,22 @@ async def active_job(cid: str, request: Request):
     user,_=await conversation(request,cid); row=request.app.state.store.one('SELECT * FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
     return dict(row) if row else None
 def wiki_root(): return STATE_ROOT / 'wiki'
+
+def account_kt_path(customer_id):
+    digits = ''.join(ch for ch in str(customer_id) if ch.isdigit())
+    if not digits:
+        raise HTTPException(400, 'invalid customer ID')
+    return wiki_root() / digits / 'KT.md'
+
+def default_account_kt():
+        return '''# Account Knowledge\n\nAdd one confirmed clarification per bullet, in plain language. This page is specific to this Google Ads account.\n\n## Clarifications\n\n- Add an account-specific meaning here.\n- Add an account-specific campaign naming or metric rule here.\n\n## When Bob should ask\n\n- Ask when an unfamiliar term or unclear scope could change the metric, data pull, or recommendation.\n- Otherwise use the confirmed meaning and continue.\n'''
+
+def ensure_account_kt(customer_id):
+    path = account_kt_path(customer_id)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(default_account_kt(), encoding='utf-8')
+    return path
 
 def bob_ascii():
     """Return Bob's canonical face from SOUL.md, keeping the UI in sync."""
@@ -1159,6 +1209,7 @@ def safe_wiki_path(path: str):
     return target
 
 ARTIFACT_SUFFIXES = {'.md': 'markdown', '.yaml': 'yaml', '.yml': 'yaml', '.csv': 'csv', '.json': 'json'}
+HIDDEN_ARTIFACT_NAMES = {'manifest.json', 'manifest.yaml', 'manifest.yml', 'kt.md'}
 
 def artifact_accounts(store, user, conversation_id=None):
     client = membership(store, user)
@@ -1224,7 +1275,7 @@ async def artifact_index(request: Request):
             continue
         for path in account_root.rglob('*'):
             kind = ARTIFACT_SUFFIXES.get(path.suffix.lower())
-            if path.is_symlink() or not path.is_file() or not kind:
+            if path.is_symlink() or not path.is_file() or not kind or path.name.lower() in HIDDEN_ARTIFACT_NAMES:
                 continue
             resolved = path.resolve()
             if account_root.resolve() not in resolved.parents:
@@ -1273,6 +1324,30 @@ async def wiki_page(path: str, request: Request):
     user=await current_user(request); target,_=permitted_artifact(request.app.state.store,user,path)
     if target.suffix.lower()!='.md': raise HTTPException(404,'wiki page not found')
     return {'path':path,'content':target.read_text(errors='replace'),'updated_at':target.stat().st_mtime}
+
+def account_for_knowledge(store, user, customer_id):
+    client = membership(store, user)
+    if not client:
+        raise HTTPException(403, 'no client access')
+    digits = ''.join(ch for ch in str(customer_id) if ch.isdigit())
+    account = next((a for a in permitted_accounts(store, user, client['client_instance_id']) if a['customer_id'] == digits), None)
+    if not account:
+        raise HTTPException(404, 'account not found')
+    return account
+
+@app.get('/api/account-knowledge')
+async def account_knowledge(request: Request):
+    user=await current_user(request); account=account_for_knowledge(request.app.state.store,user,request.query_params.get('customer_id',''))
+    path=ensure_account_kt(account['customer_id'])
+    return {'path':str(path.relative_to(wiki_root())),'customer_id':account['customer_id'],'account_name':account['account_name'],'content':path.read_text(encoding='utf-8',errors='replace'),'updated_at':path.stat().st_mtime}
+
+@app.put('/api/account-knowledge')
+async def update_account_knowledge(body: AccountKnowledgeIn, request: Request):
+    user=await csrf(request); account=account_for_knowledge(request.app.state.store,user,body.customer_id)
+    if len(body.content)>100_000: raise HTTPException(413,'account KT is limited to 100,000 characters')
+    path=ensure_account_kt(account['customer_id']); path.write_text(body.content, encoding='utf-8')
+    return {'ok':True,'updated_at':path.stat().st_mtime}
+
 @app.get('/api/jobs/{jid}/events')
 async def events(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));

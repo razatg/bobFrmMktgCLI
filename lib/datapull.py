@@ -13,9 +13,11 @@ import math
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import urllib.parse
 import urllib.request
@@ -43,6 +45,7 @@ PULL_LOG_PATH = STATE_ROOT / "logs" / "pull-log.jsonl"
 PULL_LOCKS_DIR = STATE_ROOT / "logs" / "pull-locks"
 SIGNAL_LOG_PATH = STATE_ROOT / "logs" / "session-signals.jsonl"
 SELF_IMPROVE_DIR = STATE_ROOT / "wiki" / "_self-improve"
+SNAPSHOT_DEFAULT_DIR = ROOT / ".local" / "vm-snapshot"
 
 # Team sync (./bob sync): wiki + self-improve signals shared with teammates via a plain shared
 # folder (e.g. a synced Dropbox folder) — NEVER the public GitHub origin. No git involved: the
@@ -1267,19 +1270,23 @@ def _fetch_one(args: argparse.Namespace) -> None:
 
     write_metadata(meta_file, metadata)
     log_pull(query_name, start.isoformat(), end.isoformat(), account, rid, str(output_file), reason, question, outcome="fetched")
-    print(f"raw output written: {output_file}")
-    print(f"metadata written: {meta_file}")
+    if not getattr(args, "quiet", False):
+        print(f"raw output written: {output_file}")
+        print(f"metadata written: {meta_file}")
     try:
         with open(output_file, newline="") as _f:
             _row_count = sum(1 for _ in csv.reader(_f)) - 1
     except Exception:
         _row_count = -1
+    if getattr(args, "quiet", False):
+        print(f"pull complete: {query_name} {start.isoformat()}..{end.isoformat()} ({_row_count} rows)")
     if _row_count == 0:
-        print(
-            f"WARNING: 0 rows for {account} / {query_name} / {start.isoformat()}..{end.isoformat()}. "
-            f"The account may have no activity in this window.",
-            file=sys.stderr,
-        )
+        if not getattr(args, "quiet", False):
+            print(
+                f"WARNING: 0 rows for {account} / {query_name} / {start.isoformat()}..{end.isoformat()}. "
+                f"The account may have no activity in this window.",
+                file=sys.stderr,
+            )
 
 
 def fetch(args: argparse.Namespace) -> None:
@@ -1304,13 +1311,15 @@ def fetch(args: argparse.Namespace) -> None:
         _fetch_one(args)
         return
 
-    print(
-        f"{args.query}: {start}..{end} -> {len(windows)} sequential pulls "
-        f"(maximum {GRANULAR_QUERY_MAX_DAYS} days each)"
-    )
+    if not getattr(args, "quiet", False):
+        print(
+            f"{args.query}: {start}..{end} -> {len(windows)} sequential pulls "
+            f"(maximum {GRANULAR_QUERY_MAX_DAYS} days each)"
+        )
     failures: list[str] = []
     for index, (chunk_start, chunk_end) in enumerate(windows, start=1):
-        print(f"\n==> granular pull {index}/{len(windows)}: {chunk_start}..{chunk_end}")
+        if not getattr(args, "quiet", False):
+            print(f"\n==> granular pull {index}/{len(windows)}: {chunk_start}..{chunk_end}")
         child = argparse.Namespace(
             query=args.query,
             days=None,
@@ -1323,6 +1332,7 @@ def fetch(args: argparse.Namespace) -> None:
             reason=args.reason,
             question=args.question,
             force=args.force,
+            quiet=getattr(args, "quiet", False),
         )
         try:
             _fetch_one(child)
@@ -1370,6 +1380,7 @@ def bootstrap(args: argparse.Namespace) -> None:
                     reason=_reason,
                     question=_question,
                     force=_force,
+                    quiet=getattr(args, "quiet", False),
                 )
             else:
                 child = argparse.Namespace(
@@ -1384,6 +1395,7 @@ def bootstrap(args: argparse.Namespace) -> None:
                     reason=_reason,
                     question=_question,
                     force=_force,
+                    quiet=getattr(args, "quiet", False),
                 )
             try:
                 fetch(child)
@@ -1662,6 +1674,71 @@ def _build_comparison_rows(
 
 def _write_filtered_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
     write_csv(path, [{field: row.get(field, "") for field in fields} for row in rows], fields)
+
+
+def _print_compact_comparison(
+    grain_name: str,
+    key_cols: list[str],
+    rows: list[dict[str, Any]],
+    total_current: dict[str, Any],
+    total_base: dict[str, Any],
+    goal_col: str,
+    currency_sym: str,
+    cur_label: str,
+    base_label: str,
+    name_filter: str,
+    top_n: int,
+    output_path: str | None,
+    output_account_path: str | None,
+) -> None:
+    """Print only the evidence needed for a first-pass answer.
+
+    The complete comparison remains available through --output; this renderer is
+    deliberately small because Codex sees stdout as context.
+    """
+    rows = sorted(
+        rows,
+        key=lambda r: abs(number(r.get(f"current_{goal_col}", 0)) - number(r.get(f"baseline_{goal_col}", 0))),
+        reverse=True,
+    )
+    top_n = max(1, top_n)
+    print(f"\n{grain_name} summary")
+    print(f"Period: {cur_label} vs {base_label}")
+    if name_filter:
+        print(f"Filter: {name_filter}")
+    print(
+        f"Total {goal_col}: {_fmt_display(total_current.get(goal_col, '0'), 'count')} vs "
+        f"{_fmt_display(total_base.get(goal_col, '0'), 'count')} "
+        f"({_fmt_delta_display(total_current.get(goal_col, '0'), total_base.get(goal_col, '0'))})"
+    )
+    print(
+        f"Total cost: {_fmt_display(total_current.get('cost', '0'), 'cost', currency_sym)} vs "
+        f"{_fmt_display(total_base.get('cost', '0'), 'cost', currency_sym)} "
+        f"({_fmt_delta_display(total_current.get('cost', '0'), total_base.get('cost', '0'))})"
+    )
+    print(f"Top {min(top_n, len(rows))} drivers:")
+    for index, row in enumerate(rows[:top_n], 1):
+        labels = []
+        for key in ("campaign_name", "ad_group_name", "network"):
+            if key in key_cols and row.get(key):
+                labels.append(_display_network(row[key]) if key == "network" else str(row[key]))
+        label = " / ".join(labels) or grain_name
+        print(
+            f"{index}. {label}: {goal_col} "
+            f"{_fmt_display(row.get(f'current_{goal_col}', '0'), 'count')} vs "
+            f"{_fmt_display(row.get(f'baseline_{goal_col}', '0'), 'count')} "
+            f"({_fmt_delta_display(row.get(f'current_{goal_col}', '0'), row.get(f'baseline_{goal_col}', '0'))}); "
+            f"cost {_fmt_delta_display(row.get('current_cost', '0'), row.get('baseline_cost', '0'))}"
+        )
+    if output_path:
+        fields = ADGROUP_NETWORK_COMPARISON_COLUMNS if grain_name == "adgroup_network_period" else (
+            CAMPAIGN_NETWORK_COMPARISON_COLUMNS if "network" in key_cols else CAMPAIGN_WEEK_COMPARISON_COLUMNS
+        )
+        _write_filtered_csv(Path(output_path).expanduser(), rows, fields)
+        print(f"Full comparison written: {output_path}")
+    if output_account_path:
+        _write_filtered_csv(Path(output_account_path).expanduser(), rows, ACCOUNT_WEEK_COMPARISON_COLUMNS)
+        print(f"Full account comparison written: {output_account_path}")
 
 
 def _aggregate_period_rows(
@@ -2015,6 +2092,8 @@ def _print_grain_results(
     output_path: str | None,
     output_account_path: str | None,
     reach_metrics: bool = True,
+    summary: bool = False,
+    top_n: int = 10,
 ) -> None:
     goal_col = "installs" if primary_goal == "installs" else "in_app_conversions"
     rows = _build_comparison_rows(cur_rows, base_rows, key_cols, primary_goal)
@@ -2048,6 +2127,13 @@ def _print_grain_results(
     total_base = _aggregate_period_rows(base_rows, ["customer_id"], primary_goal)
     tc = total_cur[0] if total_cur else {}
     tb = total_base[0] if total_base else {}
+
+    if summary:
+        _print_compact_comparison(
+            grain_name, key_cols, rows, tc, tb, goal_col, currency_sym,
+            cur_label, base_label, name_filter, top_n, output_path, output_account_path,
+        )
+        return
 
     _all_metric_keys = [m for _, m, _ in METRIC_DISPLAY_SPEC]
 
@@ -2456,8 +2542,10 @@ def slice_campaigns(args: argparse.Namespace) -> None:
         cur_rows, base_rows, cur_reach_rows, base_reach_rows, primary_goal, all_metrics, currency_sym,
         cur_label, base_label, pattern,
         args.output, None, reach_metrics,
+        getattr(args, "summary", False),
+        getattr(args, "top", 10),
     )
-    if network_split:
+    if network_split and not getattr(args, "summary", False):
         _print_segment_network_results(
             cur_rows,
             base_rows,
@@ -2614,6 +2702,8 @@ def compare_weeks(args: argparse.Namespace) -> None:
             args.output if grain_name in ("campaign_network_period", "adgroup_network_period") else None,
             args.output_account if grain_name == "account_network_period" else None,
             reach_metrics,
+            getattr(args, "summary", False),
+            getattr(args, "top", 10),
         )
 
     if not all_ok:
@@ -2784,6 +2874,8 @@ def compare_months(args: argparse.Namespace) -> None:
             args.output if grain_name in ("campaign_network_period", "adgroup_network_period") else None,
             args.output_account if grain_name == "account_network_period" else None,
             reach_metrics,
+            getattr(args, "summary", False),
+            getattr(args, "top", 10),
         )
 
     if not all_ok:
@@ -7309,6 +7401,190 @@ def sync(args: argparse.Namespace) -> None:
     print("\nNothing written (dry run)." if args.dry_run else "\nsync complete.")
 
 
+def snapshot_pull(args: argparse.Namespace) -> None:
+    """Pull an on-demand, read-only development snapshot from a hosted VM."""
+    host = (args.ssh_host or os.getenv("BOB_SNAPSHOT_SSH_HOST", "")).strip()
+    instance = (args.gcloud_instance or os.getenv("BOB_SNAPSHOT_GCLOUD_INSTANCE", "")).strip()
+    if not host and not instance:
+        raise SystemExit("snapshot-pull requires --ssh-host or --gcloud-instance")
+    remote_dir = args.remote_dir or os.getenv("BOB_SNAPSHOT_REMOTE_DIR", "~/bobFrmMktgCLI")
+    local_dir = Path(args.local_dir or os.getenv("BOB_SNAPSHOT_LOCAL_DIR", str(SNAPSHOT_DEFAULT_DIR))).expanduser().resolve()
+    local_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="vm-snapshot-", dir=str(local_dir.parent)))
+    archive = staging / "snapshot.tar.gz"
+    remote_db = "/data/metadata/.bob-metadata-snapshot.sqlite3"
+    if instance:
+        zone = args.gcloud_zone or os.getenv("BOB_SNAPSHOT_GCLOUD_ZONE", "")
+        project = args.gcloud_project or os.getenv("BOB_SNAPSHOT_GCLOUD_PROJECT", "")
+        if not zone or not project:
+            raise SystemExit("Google Cloud snapshots require --gcloud-zone and --gcloud-project")
+        ssh_prefix = ["gcloud", "compute", "ssh", instance, "--zone", zone, "--project", project, "--"]
+    else:
+        ssh_prefix = ["ssh", "-o", "BatchMode=yes", host]
+    remote_dir_command = f"$HOME/{shlex.quote(remote_dir[2:])}" if remote_dir.startswith("~/") else shlex.quote(remote_dir)
+    remote_base = f"cd {remote_dir_command}"
+    backup_code = (
+        "import sqlite3; "
+        "src=sqlite3.connect('/data/metadata/metadata.sqlite3'); "
+        f"dst=sqlite3.connect({remote_db!r}); "
+        "src.backup(dst); dst.close(); src.close()"
+    )
+    remote_archive = "/tmp/bob-snapshot-container.tar.gz"
+    archive_code = (
+        "import tarfile,os; "
+        f"out=tarfile.open({remote_archive!r},mode='w:gz'); "
+        f"out.add({remote_db!r},arcname='metadata/metadata.sqlite3'); "
+        "[out.add('/data/client/'+name,arcname='client/'+name) for name in "
+        "('garf','data','wiki','logs','validation','.bob/accounts','.bob/accounts.json') "
+        "if os.path.exists('/data/client/'+name)]; out.close()"
+    )
+    try:
+        subprocess.run(ssh_prefix + [f"{remote_base} && docker compose exec -T web python -c {shlex.quote(backup_code)}"], check=True)
+        if instance:
+            remote_host_archive = "/tmp/bob-snapshot.tar.gz"
+            subprocess.run(ssh_prefix + [f"{remote_base} && docker compose exec -T web python -c {shlex.quote(archive_code)} && docker compose cp web:{remote_archive} {remote_host_archive}"], check=True)
+            subprocess.run(["gcloud", "compute", "scp", f"{instance}:{remote_host_archive}", str(archive), "--zone", zone, "--project", project], check=True)
+        else:
+            with archive.open("wb") as handle:
+                subprocess.run(ssh_prefix + [f"{remote_base} && docker compose exec -T web python -c {shlex.quote(archive_code)} && docker compose cp web:{remote_archive} /tmp/bob-snapshot.tar.gz && cat /tmp/bob-snapshot.tar.gz"], stdout=handle, check=True)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        extract_root = staging / "payload"
+        extract_root.mkdir()
+        with tarfile.open(archive, "r:gz") as bundle:
+            for member in bundle.getmembers():
+                target = (extract_root / member.name).resolve()
+                if not str(target).startswith(str(extract_root.resolve()) + os.sep):
+                    raise RuntimeError("snapshot contains an unsafe path")
+            bundle.extractall(extract_root)
+        manifest = {
+            "source": host,
+            "pulled_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "archive_sha256": digest,
+            "contents": ["metadata/metadata.sqlite3", "client/"],
+            "read_only_source": True,
+        }
+        (extract_root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        previous = local_dir.with_name(local_dir.name + ".previous")
+        if previous.exists():
+            shutil.rmtree(previous)
+        if local_dir.exists():
+            local_dir.rename(previous)
+        extract_root.rename(local_dir)
+        working_dir = local_dir.with_name(local_dir.name + ".working")
+        working_staging = local_dir.with_name(local_dir.name + ".working-staging")
+        if working_staging.exists():
+            shutil.rmtree(working_staging)
+        shutil.copytree(local_dir, working_staging)
+        if working_dir.exists():
+            shutil.rmtree(working_dir)
+        working_staging.rename(working_dir)
+        print(f"snapshot pulled: {local_dir}")
+        print(f"local Docker working copy: {working_dir}")
+        print(f"source: {host} · sha256: {digest[:16]}…")
+    finally:
+        cleanup = f"{remote_base} && docker compose exec -T web rm -f {remote_db} {remote_archive}"
+        if instance:
+            cleanup += " && rm -f /tmp/bob-snapshot.tar.gz"
+        subprocess.run(ssh_prefix + [cleanup], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _manifest_pull_status(customer_id: str, query_filter: str, start_filter: dt.date | None, end_filter: dt.date | None) -> list[dict[str, Any]]:
+    """Return compact matching pull history without exposing raw JSONL records."""
+    matches: list[dict[str, Any]] = []
+    normalized_filter = query_filter.replace("_", "-")
+    for path in _pull_log_candidates():
+        if not path.exists():
+            continue
+        with path.open() as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                    query = str(entry.get("query", ""))
+                    account = str(entry.get("account", "")).replace("-", "")
+                    from_date = parse_date(str(entry.get("from_date", "")))
+                    to_date = parse_date(str(entry.get("to_date", "")))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if account != customer_id or (normalized_filter and normalized_filter not in query.lower().replace("_", "-")):
+                    continue
+                if start_filter and (not to_date or to_date < start_filter):
+                    continue
+                if end_filter and (not from_date or from_date > end_filter):
+                    continue
+                matches.append({
+                    "query": query,
+                    "from": entry.get("from_date"),
+                    "to": entry.get("to_date"),
+                    "outcome": entry.get("outcome", ""),
+                    "timestamp": entry.get("timestamp", ""),
+                })
+    matches.sort(key=lambda item: str(item.get("timestamp", "")), reverse=True)
+    return matches[:10]
+
+
+def data_manifest(args: argparse.Namespace) -> None:
+    """Describe available local data without printing rows or loading full CSVs."""
+    profile = load_profile(required=False)
+    customer_id = (args.account or profile.get("google_ads_customer_id", "")).replace("-", "")
+    if not customer_id:
+        raise SystemExit("data-manifest requires an active account or --account")
+    query_filter = (args.query or "").strip().lower()
+    start_filter = parse_date(args.from_date) if args.from_date else None
+    end_filter = parse_date(args.to) if args.to else None
+    groups: dict[str, dict[str, Any]] = {}
+    roots = [RAW_DIR, PROCESSED_DIR / customer_id]
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*.csv")):
+            if customer_id not in path.name and root == RAW_DIR:
+                continue
+            query = path.parent.name
+            query_name = {
+                "account-network": "account_network_period",
+                "campaign-network": "campaign_network_period",
+                "campaign-trend": "campaign_weekly_trend",
+                "campaign-reach": "campaign_reach_period",
+                "adgroup-network": "adgroup_network_period",
+                "creative": "creative_period",
+            }.get(query, query)
+            normalized_query = query_name.lower().replace("_", "-")
+            if query_filter and query_filter.replace("_", "-") not in normalized_query:
+                continue
+            match = re.search(rf"{re.escape(customer_id)}_(\d{{4}}-\d{{2}}-\d{{2}})_(\d{{4}}-\d{{2}}-\d{{2}})", path.name)
+            window = (match.group(1), match.group(2)) if match else (None, None)
+            if start_filter and (not window[0] or dt.date.fromisoformat(window[1]) < start_filter):
+                continue
+            if end_filter and (not window[1] or dt.date.fromisoformat(window[0]) > end_filter):
+                continue
+            key = query_name
+            item = groups.setdefault(key, {"files": 0, "windows": [], "latest": None, "columns": []})
+            item["files"] += 1
+            if window[0] and window not in item["windows"]:
+                item["windows"].append(window)
+            modified = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc).isoformat()
+            if not item["latest"] or modified > item["latest"]:
+                item["latest"] = modified
+            if not item["columns"]:
+                try:
+                    with path.open(newline="") as handle:
+                        item["columns"] = next(csv.reader(handle), [])
+                except OSError:
+                    item["columns"] = []
+    for item in groups.values():
+        item["windows"].sort()
+        item["columns"] = item["columns"][:30]
+    pulls = _manifest_pull_status(customer_id, query_filter, start_filter, end_filter)
+    print(json.dumps({
+        "client_instance_id": os.getenv("BOB_CLIENT_INSTANCE_ID", ""),
+        "account": customer_id,
+        "filters": {"query": query_filter or None, "from": args.from_date or None, "to": args.to or None},
+        "data": groups,
+        "pulls": pulls,
+    }, separators=(",", ":")))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bob-data", description="Bob Frm Mktg data pull tools")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -7325,6 +7601,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--reason", default="", help="why this data is being fetched — logged to logs/pull-log.jsonl")
     fetch_parser.add_argument("--question", default="", help="user's exact question — logged for audit trail")
     fetch_parser.add_argument("--force", action="store_true", help="re-fetch even if file already exists")
+    fetch_parser.add_argument("--quiet", action="store_true", help="print only a compact pull result")
     fetch_parser.set_defaults(func=fetch)
 
     boot_parser = sub.add_parser("bootstrap", help="run first-pull query set")
@@ -7338,6 +7615,7 @@ def build_parser() -> argparse.ArgumentParser:
     boot_parser.add_argument("--reason", default="", help="why bootstrap is running — logged to logs/pull-log.jsonl")
     boot_parser.add_argument("--question", default="", help="user's exact question — logged for audit trail")
     boot_parser.add_argument("--force", action="store_true", help="re-fetch all windows even if files exist")
+    boot_parser.add_argument("--quiet", action="store_true", help="print only compact pull results")
     boot_parser.set_defaults(func=bootstrap)
 
     lp_parser = sub.add_parser("log-pull", help="write a log entry without fetching (for cache hits)")
@@ -7416,6 +7694,8 @@ def build_parser() -> argparse.ArgumentParser:
     wk_parser.add_argument("--all-metrics", action="store_true", help="show full metric table; use --reach-metrics to include Users/Frequency")
     wk_parser.add_argument("--reach-metrics", action="store_true", help="include opt-in Users/Frequency for individual campaign rows")
     wk_parser.add_argument("--network-split", action="store_true", help="keep campaign comparisons split by network")
+    wk_parser.add_argument("--summary", action="store_true", help="print a compact driver summary; keep full rows in --output")
+    wk_parser.add_argument("--top", type=int, default=10, help="number of summary drivers to print (default: 10)")
     wk_parser.set_defaults(func=compare_weeks)
 
     mo_parser = sub.add_parser("compare-months", help="compare MTD or full-month performance across two calendar months")
@@ -7431,6 +7711,8 @@ def build_parser() -> argparse.ArgumentParser:
     mo_parser.add_argument("--all-metrics", action="store_true", help="show full metric table; use --reach-metrics to include Users/Frequency")
     mo_parser.add_argument("--reach-metrics", action="store_true", help="include opt-in Users/Frequency for individual campaign rows")
     mo_parser.add_argument("--network-split", action="store_true", help="keep campaign comparisons split by network")
+    mo_parser.add_argument("--summary", action="store_true", help="print a compact driver summary; keep full rows in --output")
+    mo_parser.add_argument("--top", type=int, default=10, help="number of summary drivers to print (default: 10)")
     mo_parser.set_defaults(func=compare_months)
 
     slice_parser = sub.add_parser("slice-campaigns", help="compare a name-filtered campaign segment across two periods")
@@ -7449,7 +7731,16 @@ def build_parser() -> argparse.ArgumentParser:
     slice_parser.add_argument("--all-metrics", action="store_true", help="show full metric table; use --reach-metrics to include Users/Frequency")
     slice_parser.add_argument("--reach-metrics", action="store_true", help="include opt-in Users/Frequency for individual campaign rows")
     slice_parser.add_argument("--network-split", action="store_true", help="show campaign × network rows plus segment network rollup")
+    slice_parser.add_argument("--summary", action="store_true", help="print a compact driver summary; keep full rows in --output")
+    slice_parser.add_argument("--top", type=int, default=10, help="number of summary drivers to print (default: 10)")
     slice_parser.set_defaults(func=slice_campaigns)
+
+    manifest_parser = sub.add_parser("data-manifest", help="summarise available raw and processed data for one account")
+    manifest_parser.add_argument("--account", help="customer ID (default: active account)")
+    manifest_parser.add_argument("--query", help="filter by query or processed grain")
+    manifest_parser.add_argument("--from", dest="from_date", help="include windows ending on or after this date")
+    manifest_parser.add_argument("--to", help="include windows starting on or before this date")
+    manifest_parser.set_defaults(func=data_manifest)
 
     sc_parser = sub.add_parser("slice-creatives", help="flag LOW-label creatives vs campaign averages")
     sc_parser.add_argument("--min-impressions", type=float, help="minimum impressions threshold (default: profile.creative_min_impressions or 50000)")
@@ -7576,6 +7867,15 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--dry-run", action="store_true", help="show what would sync; change nothing")
     sync_parser.set_defaults(func=sync)
 
+    snapshot_parser = sub.add_parser("snapshot-pull", help="pull a safe VM data snapshot for local inspection")
+    snapshot_parser.add_argument("--ssh-host", help="SSH target, e.g. user@vm-host")
+    snapshot_parser.add_argument("--gcloud-instance", help="Google Compute Engine instance, e.g. bob-frm-mktg")
+    snapshot_parser.add_argument("--gcloud-zone", help="Google Cloud zone, e.g. us-central1-b")
+    snapshot_parser.add_argument("--gcloud-project", help="Google Cloud project ID")
+    snapshot_parser.add_argument("--remote-dir", default="", help="remote Bob repository directory")
+    snapshot_parser.add_argument("--local-dir", default="", help="local snapshot directory")
+    snapshot_parser.set_defaults(func=snapshot_pull)
+
     return parser
 
 
@@ -7593,6 +7893,7 @@ DATA
   fetch                         Pull one GARF query from Google Ads
   bootstrap                     Pull the default set of period windows
   aggregate                     Build a processed grain from raw outputs
+  data-manifest                 Summarise available data for the active account
 
 ANALYSIS
   compare-weeks                 Two ISO weeks (default: last complete vs prior)
@@ -7618,6 +7919,7 @@ UTILITIES
   session-debrief               Record a batch of friction signals at a session success beat
   self-improve                  Summarise signals for a self-improvement pass
   sync                          Share wiki + signals with the team (via a shared folder, no git)
+  snapshot-pull                 Pull a safe VM data snapshot for local inspection (on demand)
 
 For any subcommand: ./bob <name> --help
 """

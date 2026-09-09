@@ -92,6 +92,34 @@ class GatewayTests(unittest.TestCase):
         secret=Path(self.workspace)/'secrets'/'x.txt'; secret.parent.mkdir(); secret.write_text('nope')
         self.assertEqual(self.client.get('/api/admin/data-explorer/file?path=secrets/x.txt',headers={'X-CSRF-Token':csrf}).status_code,404)
 
+    def test_account_knowledge_is_separate_and_editable(self):
+        csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('account-kt','%s'%client_id,'1234567890','Demand account',1,'2026-08-31T00:00:00+00:00'))
+        shown=self.client.get('/api/account-knowledge?customer_id=123-456-7890')
+        self.assertEqual(shown.status_code,200,shown.text)
+        self.assertIn('specific to this Google Ads account',shown.json()['content'])
+        updated='# Account Knowledge\n\n- FTU means first-time user for this account.\n'
+        saved=self.client.put('/api/account-knowledge',headers={'X-CSRF-Token':csrf},json={'customer_id':'1234567890','content':updated})
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertEqual(self.client.get('/api/account-knowledge?customer_id=1234567890').json()['content'],updated)
+
+    def test_admin_can_readd_orphaned_user(self):
+        csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']; orphan='orphan@example.com'
+        s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',('orphan-id',orphan,'old-hash','member','approved',0,'2026-01-01T00:00:00+00:00',None))
+        response=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':csrf},json={'identifier':orphan,'password':'a-new-secure-password'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertTrue(response.json()['reused_orphan'])
+        self.assertIsNotNone(s.one('SELECT 1 FROM client_memberships WHERE user_id=? AND client_instance_id=?',('orphan-id',client_id)))
+
+    def test_selected_account_prompt_has_compact_knowledge_rule(self):
+        from server.app import scope_wrapped_prompt
+        prompt=scope_wrapped_prompt('What does GSR2Net mean?',client_instance_id='client-one',account_customer_id='1234567890')
+        self.assertIn('account KT is at wiki/1234567890/KT.md',prompt)
+        self.assertNotIn('client KT',prompt)
+        self.assertIn('Ask one focused clarification',prompt)
+
     def test_admin_observability_is_lightweight_and_reads_history(self):
         csrf=self.bootstrap()
         live=self.client.get('/api/admin/observability',headers={'X-CSRF-Token':csrf})
@@ -584,6 +612,27 @@ class GatewayTests(unittest.TestCase):
         owner_conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':owner_csrf}).json()
         selected=self.client.get('/api/conversations/'+owner_conversation['id']).json()['conversation']['account_id']
         self.assertEqual(selected,demand_id)
+
+    def test_management_user_can_use_saved_context_without_google_auth(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('management-account',client_id,'1234567890','Management account',1,stamp))
+        added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={
+            'identifier':'management@example.com','password':'management-password','client_role':'management'})
+        self.assertEqual(added.status_code,200,added.text)
+        login=self.client.post('/auth/login',json={'identifier':'management@example.com','password':'management-password'})
+        self.assertEqual(login.status_code,200,login.text); csrf=login.json()['csrf']
+        self.assertEqual([a['account_name'] for a in self.client.get('/api/accounts').json()],['Management account'])
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
+        job=self.client.post(f"/api/conversations/{conversation['id']}/messages",headers={'X-CSRF-Token':csrf},json={'content':'What is in the saved wiki?'})
+        self.assertEqual(job.status_code,200,job.text); self.assertIsNotNone(job.json()['job_id'])
+        import time; time.sleep(.05)
+        events=self.client.get(f"/api/jobs/{job.json()['job_id']}/events").text
+        self.assertIn('COMPLETED',events)
+        call=self.app.state.runner.calls[-1]
+        self.assertEqual(call['environment'].get('BOB_ACCOUNT_PERMISSION'),'management')
+        self.assertNotIn('BOB_GOOGLE_ADS_RUNTIME_CONFIG',call['environment'])
+        self.assertIn('MANAGEMENT user',call['prompt'])
 
     def test_obvious_generic_prompt_is_blocked_before_codex(self):
         csrf=self.bootstrap()

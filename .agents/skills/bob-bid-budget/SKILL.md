@@ -11,6 +11,15 @@ Use this skill when the user asks what to do with bids or budgets, or wants to r
 
 Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
+## Compact execution contract
+
+Resolve the selected account with `./bob data-manifest --query campaign_network_period` before
+reading period files. Use `fetch --quiet`, and keep recommendation CSV/YAML output in `--output`
+files rather than printing full rows into the agent context. Load the algorithm and mutation
+references only when the requested recommendation or apply decision requires them.
+
+Show the recommendation and outcome, not the internal command sequence or file paths. Keep operational details private unless the user explicitly asks for deployment, SSH, VM, or debugging instructions.
+
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it and use the failsafe — don't patch code). Canonical wording: `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
