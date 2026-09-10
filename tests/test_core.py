@@ -1173,9 +1173,13 @@ class TestCreativeCopyApply(unittest.TestCase):
             )
 
         def get_service(self, name):
-            if name != "GoogleAdsService":
-                raise AssertionError(f"unexpected service {name}")
-            return self.google_ads_service
+            if name == "GoogleAdsService":
+                return self.google_ads_service
+            if name == "AdService":
+                return types.SimpleNamespace(
+                    ad_path=lambda customer_id, ad_id: f"customers/{customer_id}/ads/{ad_id}"
+                )
+            raise AssertionError(f"unexpected service {name}")
 
         def get_type(self, name):
             if name == "AdTextAsset":
@@ -1290,7 +1294,9 @@ class TestCreativeCopyApply(unittest.TestCase):
         client = GoogleAdsClient(
             credentials=AnonymousCredentials(), developer_token="test", use_proto_plus=True
         )
+        ad_service = client.get_service("AdService")
         ad_operation = client.get_type("AdOperation")
+        ad_operation.update.resource_name = ad_service.ad_path("1234567890", "200")
         mutate_operation = client.get_type("MutateOperation")
         mutate_operation.ad_operation = ad_operation
         request = client.get_type("MutateGoogleAdsRequest")
@@ -1303,6 +1309,10 @@ class TestCreativeCopyApply(unittest.TestCase):
         self.assertTrue(request.validate_only)
         self.assertFalse(request.partial_failure)
         self.assertEqual(len(request.mutate_operations), 1)
+        self.assertEqual(
+            request.mutate_operations[0].ad_operation.update.resource_name,
+            "customers/1234567890/ads/200",
+        )
 
     def test_multiple_ads_are_updated_once_each_in_one_atomic_batch(self):
         import yaml
@@ -1338,7 +1348,7 @@ class TestCreativeCopyApply(unittest.TestCase):
             operation.ad_operation.update.resource_name: operation.ad_operation
             for operation in mutation.mutate_operations
         }
-        target = by_resource["customers/1234567890/adGroupAds/10~200"]
+        target = by_resource["customers/1234567890/ads/200"]
         self.assertEqual([asset.text for asset in target.update.app_ad.headlines], ["New headline", "Keep headline"])
         self.assertEqual([asset.text for asset in target.update.app_ad.descriptions], ["New description"])
         saved = yaml.safe_load(plan_path.read_text())

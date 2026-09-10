@@ -5998,6 +5998,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         die(f"failed to load Google Ads client: {exc}")
 
     ga_svc = client.get_service("GoogleAdsService")
+    ad_svc = client.get_service("AdService")
     actionable = [
         (i, c) for i, c in enumerate(changes, 1)
         if c.get("action") in ("replace", "pause")
@@ -6134,7 +6135,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
 
         operation = client.get_type("AdOperation")
         ad_update = operation.update
-        ad_update.resource_name = row_ad.resource_name
+        ad_update.resource_name = ad_svc.ad_path(customer_id, ad_id)
         for text in headlines:
             text_asset = client.get_type("AdTextAsset")
             text_asset.text = text
