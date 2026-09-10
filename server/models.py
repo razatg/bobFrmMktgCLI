@@ -26,6 +26,10 @@ class Store:
         self._ensure_column('client_accounts', 'cac_ceiling', 'REAL NOT NULL DEFAULT 200')
         self._ensure_column('client_accounts', 'bid_budget_change_pct', 'REAL NOT NULL DEFAULT 10')
         self._ensure_column('client_accounts', 'bid_budget_cooldown_days', 'INTEGER NOT NULL DEFAULT 14')
+        self._ensure_column('conversations', 'thread_input_tokens_estimate', 'INTEGER NOT NULL DEFAULT 0')
+        self._ensure_column('jobs', 'input_tokens_estimate', 'INTEGER')
+        self._ensure_column('jobs', 'cached_input_tokens_estimate', 'INTEGER')
+        self._ensure_column('jobs', 'output_tokens_estimate', 'INTEGER')
         legacy_invites = 'max_uses' not in {row['name'] for row in self.db.execute('PRAGMA table_info(invites)')}
         self._ensure_column('invites', 'max_uses', 'INTEGER NOT NULL DEFAULT 10')
         self._ensure_column('invites', 'use_count', 'INTEGER NOT NULL DEFAULT 0')

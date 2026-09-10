@@ -59,7 +59,7 @@ DEFAULT_BOOTSTRAP = [
     {"query": "account_network_period", "period": "mom"},
     {"query": "account_network_period", "period": "mtd"},
     {"query": "campaign_network_period", "period": "yesterday_vs_sdlw"},
-    {"query": "campaign_network_period", "period": "3week_rolling"},
+    {"query": "campaign_network_period", "period": "bid_budget_weeks"},
     {"query": "creative_period",         "days": 30},
     {"query": "change_history",          "days": 14},
     {"query": "bid_budget_inputs",       "days": 7},
@@ -298,7 +298,9 @@ _NETWORK_PERIOD_SUBDIR: dict[str, str] = {
 }
 
 
-def die(message: str, code: int = 1) -> None:
+def die(message: str, code: int = 1, *, error_code: str | None = None) -> None:
+    if error_code:
+        print(f"BOB_ERROR_CODE={error_code}", file=sys.stderr)
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -424,9 +426,36 @@ def split_date_range(
     return windows
 
 
+def normalize_period_name(period: str) -> str:
+    """Normalize human-friendly period aliases to the CLI's canonical form."""
+    normalized = re.sub(r"[\s-]+", "_", period.strip().lower())
+    return {
+        "last_week": "last_complete_week",
+    }.get(normalized, normalized)
+
+
+def bid_budget_week_windows(reference: dt.date | None = None) -> list[tuple[dt.date, dt.date]]:
+    """Return partial W0 through yesterday plus the prior two complete ISO weeks."""
+    as_of = (reference or today()) - dt.timedelta(days=1)
+    w0_start = as_of - dt.timedelta(days=as_of.weekday())
+    w1_end = w0_start - dt.timedelta(days=1)
+    w1_start = w1_end - dt.timedelta(days=6)
+    w2_end = w1_start - dt.timedelta(days=1)
+    w2_start = w2_end - dt.timedelta(days=6)
+    return [(w0_start, as_of), (w1_start, w1_end), (w2_start, w2_end)]
+
+
 def resolve_period_dates(period: str) -> list[tuple[dt.date, dt.date]]:
     """Return [(start, end), ...] for each fetch window in the named period pattern."""
+    period = normalize_period_name(period)
     yesterday = today() - dt.timedelta(days=1)
+    if period == "yesterday":
+        return [(yesterday, yesterday)]
+    if period == "last_complete_week":
+        week, year = last_complete_iso_week(today())
+        return [iso_week_to_dates(week, year)]
+    if period == "bid_budget_weeks":
+        return bid_budget_week_windows()
     if period == "yesterday_vs_sdlw":
         sdlw = yesterday - dt.timedelta(days=7)
         return [(yesterday, yesterday), (sdlw, sdlw)]
@@ -490,7 +519,7 @@ def last_complete_iso_week(reference: dt.date) -> tuple[int, int]:
 def cmd_resolve_dates(args: argparse.Namespace) -> None:
     """Print concrete date ranges for a named period so the agent can construct fetch commands."""
     import calendar as _cal
-    period = args.period.replace("-", "_")
+    period = normalize_period_name(args.period)
     if period == "partial_wow":
         n = args.n if args.n else 3
         period = f"partial_wow_{n}"
@@ -835,24 +864,6 @@ def find_raw_files_for_range(
     return files
 
 
-def find_period_files(query_name: str, n: int) -> list[Path]:
-    """Return up to n raw CSV files for a query, sorted by start_date in filename descending."""
-    query_dir = RAW_DIR / query_name
-    if not query_dir.exists():
-        return []
-    dated: list[tuple[dt.date, Path]] = []
-    for p in query_dir.glob("*.csv"):
-        parts = p.stem.split("_")
-        # filename: {customer_id}_{YYYY-MM-DD}_{YYYY-MM-DD}_{run_id}
-        if len(parts) >= 3:
-            try:
-                dated.append((dt.date.fromisoformat(parts[1]), p))
-            except ValueError:
-                pass
-    dated.sort(key=lambda x: x[0], reverse=True)
-    return [p for _, p in dated[:n]]
-
-
 def find_processed_files_for_period(
     subdir: str, windows: list[tuple[dt.date, dt.date]], customer_id: str | None = None
 ) -> list[Path | None]:
@@ -1149,7 +1160,7 @@ def _fetch_one(args: argparse.Namespace) -> None:
     account = str(account).replace("-", "")
     config = args.config or _profile_read_config_value(profile)
     if not config and not args.dry_run:
-        die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
+        die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.", error_code="GOOGLE_AUTH_REQUIRED")
     if config:
         config = str(_resolve_state_path(config))
 
@@ -1954,24 +1965,36 @@ def _agg_campaign_weekly_trend(
     args: argparse.Namespace, profile: dict, primary_goal: str
 ) -> None:
     source = args.source or "campaign_network_period"
-    period_files = find_period_files(source, 3)
-    if len(period_files) < 3:
+    customer = str(args.customer or profile.get("google_ads_customer_id") or "").replace("-", "")
+    if not customer:
+        die("campaign_weekly_trend requires --customer or google_ads_customer_id in the active profile")
+    windows = bid_budget_week_windows()
+    period_files = [find_raw_file_for_period(source, start, end, customer) for start, end in windows]
+    missing = [f"{start}..{end}" for (start, end), path in zip(windows, period_files) if path is None]
+    if missing:
         die(
-            f"need 3 {source} raw files for campaign_weekly_trend, found {len(period_files)}. "
-            "Run: python3 lib/datapull.py bootstrap"
+            f"missing exact {source} windows for account {customer}: {', '.join(missing)}. "
+            "Run: ./bob resolve-dates --period bid-budget-weeks, then fetch the missing windows"
         )
 
     campaign_key_cols = ["customer_id", "campaign_id", "campaign_name", "campaign_status"]
     week_data: list[tuple[int, str, str, dict[str, dict]]] = []
-    for path in period_files:
-        parts = path.stem.split("_")
-        w_start = parts[1] if len(parts) >= 3 else ""
-        w_end = parts[2] if len(parts) >= 3 else ""
-        try:
-            iso_week = dt.date.fromisoformat(w_start).isocalendar().week
-        except (ValueError, AttributeError):
-            iso_week = 0
-        agg = _aggregate_period_rows(read_csv(path), campaign_key_cols, primary_goal)
+    for path, (start, end) in zip(period_files, windows):
+        assert path is not None
+        rows = read_csv(path)
+        foreign_accounts = sorted({
+            str(row.get("customer_id", "")).replace("-", "")
+            for row in rows
+            if str(row.get("customer_id", "")).replace("-", "") not in {"", customer}
+        })
+        if foreign_accounts:
+            die(
+                f"{path.name} contains rows for another account: {', '.join(foreign_accounts)}; "
+                f"expected only {customer}"
+            )
+        w_start, w_end = start.isoformat(), end.isoformat()
+        iso_week = start.isocalendar().week
+        agg = _aggregate_period_rows(rows, campaign_key_cols, primary_goal)
         week_data.append((iso_week, w_start, w_end, {r["campaign_id"]: r for r in agg}))
 
     w0_iso, w0_start, w0_end, w0 = week_data[0]
@@ -2042,7 +2065,6 @@ def _agg_campaign_weekly_trend(
         row_out["signal_strength"] = signal
         out_rows.append(row_out)
 
-    customer = args.customer or profile.get("google_ads_customer_id") or "unknown"
     if args.output:
         output_path = Path(args.output).expanduser()
     else:
@@ -3011,7 +3033,7 @@ def check_config(args: argparse.Namespace) -> None:
     migration_notes = [] if args.config else _normalize_account_config_files(profile)
     config = args.config or _profile_read_config_value(profile)
     if not config:
-        die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.")
+        die("I need the Google Ads developer token from Google Ads > Admin > API Center before I can fetch data from Google Ads.", error_code="GOOGLE_AUTH_REQUIRED")
     config_path = _resolve_state_path(config)
     if not config_path.exists():
         die(f"Google Ads GARF config not found: {config_path}\nExpected at {config_path} — create it or set google_ads_read_config_path in your account profile (.bob/accounts/<id>/profile.json)")
@@ -3158,11 +3180,12 @@ def _creative_processed_paths(customer_id: str) -> list[Path]:
 
 
 def _dedupe_creative_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep one row per asset identity, preferring rows containing asset_text."""
+    """Keep one row per ad-level asset identity, preferring populated text."""
     result: dict[tuple, dict[str, Any]] = {}
     for row in rows:
-        key = (
-            row.get("campaign_id", ""), row.get("ad_group_id", ""),
+        asset_view = str(row.get("asset_view_resource_name", "")).strip()
+        key = ("asset_view", asset_view) if asset_view else (
+            "legacy", row.get("campaign_id", ""), row.get("ad_group_id", ""),
             row.get("asset_id", ""), row.get("asset_type", ""), row.get("field_type", ""),
         )
         existing = result.get(key)
@@ -5484,6 +5507,13 @@ def _fetch_asset_texts(client, customer_id: str, asset_ids: list) -> dict:
     return result
 
 
+def _creative_ad_id(asset_view_resource_name: Any) -> str:
+    """Extract the ad ID from an ad-group-ad-asset-view resource name."""
+    tail = str(asset_view_resource_name or "").rsplit("/", 1)[-1]
+    parts = tail.split("~")
+    return parts[1] if len(parts) == 4 and parts[1].isdigit() else ""
+
+
 def suggest_creative_copy(args: argparse.Namespace) -> None:
     """Generate a copy plan YAML + compact agent-agnostic prompt for LOW-action text assets."""
     import datetime as _dt
@@ -5565,6 +5595,7 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
             "campaign_name": cname,
             "ad_group_id": r.get("ad_group_id", ""),
             "ad_group_name": r.get("ad_group_name", ""),
+            "ad_id": _creative_ad_id(r.get("asset_view_resource_name", "")),
             "asset_id": r.get("asset_id", ""),
             "field_type": ft,
             "current_text": r.get("asset_text", ""),
@@ -5580,9 +5611,16 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
             "action": "replace",
         })
 
-    missing_text = [c["asset_id"] for c in changes if not str(c.get("current_text", "")).strip()]
-    if missing_text:
-        die("creative copy plan blocked: asset_text is missing for asset IDs " + ", ".join(map(str, missing_text[:20])))
+    invalid_sources = [
+        c["asset_id"] for c in changes
+        if not str(c.get("current_text", "")).strip() or not c.get("ad_id")
+    ]
+    if invalid_sources:
+        die(
+            "creative copy plan blocked: exact ad identity or asset text is missing for asset IDs "
+            + ", ".join(map(str, invalid_sources[:20]))
+            + ". Refresh the creative data and regenerate the plan."
+        )
 
     # Assign 1-based index to each change so the subagent can reference by number
     for i, c in enumerate(changes, 1):
@@ -5673,7 +5711,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
     groups = plan.get("groups", [])
     LIMITS = {"HEADLINE": 30, "DESCRIPTION": 90}
 
-    # Merge --suggestions JSON
+    # Merge --suggestions JSON without changing the persisted plan.
     sug_map: dict = {}
     if getattr(args, "suggestions", None):
         import json as _json
@@ -5681,7 +5719,18 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
             suggestions = _json.loads(args.suggestions)
         except Exception as e:
             die(f"invalid --suggestions JSON: {e}")
-        sug_map = {int(s["id"]): s["text"] for s in suggestions}
+        if not isinstance(suggestions, list) or not all(isinstance(s, dict) for s in suggestions):
+            die('invalid --suggestions JSON: expected a list of {"id": ..., "text": ...} objects')
+        try:
+            suggestion_ids = [int(s["id"]) for s in suggestions]
+            sug_map = {int(s["id"]): str(s["text"]).strip() for s in suggestions}
+        except (KeyError, TypeError, ValueError) as exc:
+            die(f"invalid --suggestions JSON: {exc}")
+        from collections import Counter as _Counter
+        duplicates = [i for i, count in _Counter(suggestion_ids).items() if count > 1]
+        if duplicates:
+            print(f"  ERROR: duplicate suggestion IDs: {duplicates[:5]}{'...' if len(duplicates) > 5 else ''}")
+            return
 
     def _broadcast_groups() -> None:
         """Apply sug_map group texts to all matching changes."""
@@ -5700,47 +5749,58 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
     else:
         _broadcast_legacy()
 
-    # Validate suggestion IDs before doing anything irreversible
-    if not groups and sug_map:
-        from collections import Counter as _Counter
+    # Validate suggestion IDs before doing anything irreversible.
+    if not groups:
         sug_ids = list(sug_map.keys())
         n = len(changes)
         out_of_range = [i for i in sug_ids if i < 1 or i > n]
-        duplicates = [i for i, cnt in _Counter(sug_ids).items() if cnt > 1]
         missing = [i for i in range(1, n + 1)
                    if i not in sug_map and changes[i - 1].get("action") == "replace"]
         if out_of_range:
             print(f"  ERROR: {len(out_of_range)} suggestion IDs out of range (1–{n}): "
                   f"{out_of_range[:5]}{'...' if len(out_of_range) > 5 else ''}")
-        if duplicates:
-            print(f"  ERROR: duplicate suggestion IDs: "
-                  f"{duplicates[:5]}{'...' if len(duplicates) > 5 else ''}")
         if missing:
-            print(f"  WARNING: {len(missing)} assets have no suggestion and will be skipped")
-        if out_of_range or duplicates:
+            print(f"  ERROR: {len(missing)} replacement assets have no suggestion")
+        if out_of_range or missing:
             print("  Suggestion set looks corrupted (ID drift). "
                   "Re-run suggest-creative-copy and regenerate all batches.")
             return
+    else:
+        expected = {int(g["group_id"]) for g in groups}
+        unexpected = sorted(set(sug_map) - expected)
+        missing = sorted(expected - set(sug_map))
+        if unexpected or missing:
+            if unexpected:
+                print(f"  ERROR: unknown group suggestion IDs: {unexpected[:5]}")
+            if missing:
+                print(f"  ERROR: missing group suggestion IDs: {missing[:5]}")
+            return
 
-    # Validate character limits and null out violators
+    # Character-limit failures invalidate the complete batch.
+    invalid_suggestions = []
     if groups:
         for g in groups:
             text = sug_map.get(g["group_id"], "")
-            if text:
-                limit = LIMITS.get(g["field_type"], 90)
-                if len(text) > limit:
-                    print(f"  WARNING: group {g['group_id']} [{g['field_type']}/{g['language']}] "
-                          f"'{text}' is {len(text)} chars (limit {limit}) — will be skipped")
-                    sug_map[g["group_id"]] = None
+            limit = LIMITS.get(g["field_type"], 90)
+            if not text or len(text) > limit:
+                invalid_suggestions.append(
+                    f"group {g['group_id']} [{g['field_type']}/{g.get('language', '')}] "
+                    f"has {len(text)} chars (required 1–{limit})"
+                )
         _broadcast_groups()
     else:
         for i, c in enumerate(changes, 1):
             st = c.get("suggested_text")
-            if st:
-                limit = LIMITS.get(c.get("field_type", ""), 90)
-                if len(st) > limit:
-                    print(f"  WARNING: #{i} '{st}' is {len(st)} chars (limit {limit}) — will be skipped")
-                    c["suggested_text"] = None
+            if c.get("action") != "replace":
+                continue
+            limit = LIMITS.get(c.get("field_type", ""), 90)
+            if not st or len(st) > limit:
+                invalid_suggestions.append(f"#{i} has {len(st or '')} chars (required 1–{limit})")
+    if invalid_suggestions:
+        for error in invalid_suggestions:
+            print(f"  ERROR: {error}")
+        print("No changes applied — fix the suggestions and review the complete plan again.")
+        return
 
     # Approval table
     if groups:
@@ -5854,132 +5914,205 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
 
     ga_svc = client.get_service("GoogleAdsService")
     ad_svc = client.get_service("AdService")
+    actionable = [
+        (i, c) for i, c in enumerate(changes, 1)
+        if c.get("action") in ("replace", "pause")
+    ]
+    if not actionable:
+        die("creative copy plan has no actionable changes")
 
-    results = []
-    today = _dt.date.today().isoformat()
-
-    from collections import defaultdict as _defaultdict
-    ag_to_changes: dict = _defaultdict(list)
-    for i, c in enumerate(changes, 1):
-        if c.get("action") in ("replace", "pause") and (
-            c.get("action") == "pause" or c.get("suggested_text")
-        ):
-            ag_to_changes[str(c.get("ad_group_id", ""))].append((i, c))
-
-    for ag_id, ag_changes in ag_to_changes.items():
-        gaql = (
-            "SELECT ad_group_ad.resource_name,"
-            " ad_group_ad.ad.id,"
-            " ad_group_ad.ad.app_ad.headlines,"
-            " ad_group_ad.ad.app_ad.descriptions"
-            f" FROM ad_group_ad"
-            f" WHERE ad_group.id = {ag_id}"
-            f" AND ad_group_ad.status != 'REMOVED'"
-            f" LIMIT 1"
+    select_fields = (
+        "SELECT ad_group.id, ad_group_ad.resource_name, ad_group_ad.ad.id,"
+        " ad_group_ad.ad.app_ad.headlines, ad_group_ad.ad.app_ad.descriptions"
+        " FROM ad_group_ad"
+    )
+    validation_errors: list[str] = []
+    rows_by_ad: dict[str, dict[str, Any]] = {}
+    exact_ids = sorted({str(c.get("ad_id", "")) for _, c in actionable if str(c.get("ad_id", "")).isdigit()})
+    if exact_ids:
+        query = (
+            select_fields
+            + f" WHERE ad_group_ad.ad.id IN ({', '.join(exact_ids)})"
+            + " AND ad_group_ad.status != 'REMOVED'"
         )
         try:
-            rows = list(ga_svc.search(customer_id=customer_id, query=gaql))
+            for row in ga_svc.search(customer_id=customer_id, query=query):
+                rows_by_ad[str(row.ad_group_ad.ad.id)] = {
+                    "ad": row.ad_group_ad,
+                    "ad_group_id": str(row.ad_group.id),
+                }
         except Exception as exc:
-            for _, c in ag_changes:
-                results.append({"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
-                                 "field_type": c.get("field_type", ""), "status": "error",
-                                 "error": f"fetch app ad: {exc}"})
-                print(f"  ✗ {c.get('campaign_name','')} / {c.get('field_type','')} — fetch failed: {exc}")
+            die(f"creative copy validation failed while resolving target ads: {exc}")
+
+    # Older plans did not persist ad_id. Resolve them only when the current text
+    # identifies exactly one live ad in the stated ad group.
+    legacy_by_group: dict[str, list[Any]] = {}
+    for _, change in actionable:
+        if str(change.get("ad_id", "")).isdigit():
             continue
-
-        if not rows:
-            for _, c in ag_changes:
-                results.append({"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
-                                 "field_type": c.get("field_type", ""), "status": "error",
-                                 "error": "no app ad found for ad group"})
-                print(f"  ✗ {c.get('campaign_name','')} / {c.get('field_type','')} — no app ad in ad group {ag_id}")
+        ad_group_id = str(change.get("ad_group_id", ""))
+        if not ad_group_id.isdigit():
+            validation_errors.append(f"asset {change.get('asset_id', '')}: invalid ad group ID")
             continue
+        if ad_group_id not in legacy_by_group:
+            query = (
+                select_fields
+                + f" WHERE ad_group.id = {ad_group_id}"
+                + " AND ad_group_ad.status != 'REMOVED'"
+            )
+            try:
+                legacy_by_group[ad_group_id] = [row.ad_group_ad for row in ga_svc.search(customer_id=customer_id, query=query)]
+            except Exception as exc:
+                die(f"creative copy validation failed while resolving ad group {ad_group_id}: {exc}")
+        field = str(change.get("field_type", ""))
+        current = str(change.get("current_text", ""))
+        candidates = []
+        for row_ad in legacy_by_group[ad_group_id]:
+            assets = row_ad.ad.app_ad.headlines if field == "HEADLINE" else row_ad.ad.app_ad.descriptions
+            if any(asset.text == current for asset in assets):
+                candidates.append(row_ad)
+        if len(candidates) != 1:
+            validation_errors.append(
+                f"asset {change.get('asset_id', '')}: expected one live target ad, found {len(candidates)}"
+            )
+            continue
+        change["ad_id"] = str(candidates[0].ad.id)
+        rows_by_ad[change["ad_id"]] = {"ad": candidates[0], "ad_group_id": ad_group_id}
 
-        row_ad = rows[0].ad_group_ad
-        ad_id = row_ad.ad.id
-        ad_rn = ad_svc.ad_path(customer_id, str(ad_id))
-        headlines = [h.text for h in row_ad.ad.app_ad.headlines]
-        descriptions = [d.text for d in row_ad.ad.app_ad.descriptions]
-        updated_fields: set = set()
-        pending_indices: list = []
+    from collections import defaultdict as _defaultdict
+    changes_by_ad: dict[str, list[tuple[int, dict]]] = _defaultdict(list)
+    for index, change in actionable:
+        ad_id = str(change.get("ad_id", ""))
+        ad_group_id = str(change.get("ad_group_id", ""))
+        field = str(change.get("field_type", ""))
+        action = str(change.get("action", ""))
+        current = str(change.get("current_text", ""))
+        proposed = str(change.get("suggested_text") or "")
+        if not ad_id.isdigit() or ad_id not in rows_by_ad:
+            validation_errors.append(f"asset {change.get('asset_id', '')}: target ad {ad_id or 'missing'} was not found")
+        elif rows_by_ad[ad_id]["ad_group_id"] != ad_group_id:
+            validation_errors.append(f"asset {change.get('asset_id', '')}: target ad is not in ad group {ad_group_id}")
+        if field not in LIMITS:
+            validation_errors.append(f"asset {change.get('asset_id', '')}: unsupported field type {field or 'missing'}")
+        if action not in ("replace", "pause"):
+            validation_errors.append(f"asset {change.get('asset_id', '')}: unsupported action {action or 'missing'}")
+        if not current:
+            validation_errors.append(f"asset {change.get('asset_id', '')}: current text is missing")
+        if action == "replace" and (not proposed or len(proposed) > LIMITS.get(field, 90)):
+            validation_errors.append(f"asset {change.get('asset_id', '')}: proposed text is missing or over the limit")
+        if action == "replace" and proposed == current:
+            validation_errors.append(f"asset {change.get('asset_id', '')}: proposed text is unchanged")
+        changes_by_ad[ad_id].append((index, change))
 
-        for _, c in ag_changes:
-            ft = c.get("field_type", "HEADLINE")
-            action = c.get("action", "replace")
-            current_list = headlines if ft == "HEADLINE" else descriptions
-            field_path = "app_ad.headlines" if ft == "HEADLINE" else "app_ad.descriptions"
-            target_text = c.get("current_text", "")
-
-            matched_i = next((li for li, t in enumerate(current_list) if t == target_text), None)
-            if matched_i is None:
-                results.append({"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
-                                 "field_type": ft, "status": "error",
-                                 "error": "asset not found in app ad"})
-                print(f"  ✗ {c.get('campaign_name','')} / {ft} — asset text not found in app ad")
+    operations = []
+    results = []
+    for ad_id, ad_changes in changes_by_ad.items():
+        target = rows_by_ad.get(ad_id)
+        if not target:
+            continue
+        row_ad = target["ad"]
+        headlines = [asset.text for asset in row_ad.ad.app_ad.headlines]
+        descriptions = [asset.text for asset in row_ad.ad.app_ad.descriptions]
+        updated_fields: set[str] = set()
+        ad_results = []
+        for _, change in ad_changes:
+            field = change.get("field_type")
+            values = headlines if field == "HEADLINE" else descriptions
+            current = str(change.get("current_text", ""))
+            matches = [position for position, text in enumerate(values) if text == current]
+            if not matches:
+                validation_errors.append(
+                    f"asset {change.get('asset_id', '')}: current text is not present in target ad {ad_id}"
+                )
                 continue
-
-            if action == "replace":
-                current_list[matched_i] = c.get("suggested_text")
-                entry = {"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
-                         "field_type": ft, "suggested_text": c.get("suggested_text"),
-                         "status": "pending_commit"}
+            position = matches[0]
+            if change.get("action") == "replace":
+                values[position] = str(change.get("suggested_text"))
+                status = "replaced"
             else:
-                current_list.pop(matched_i)
-                entry = {"campaign": c.get("campaign_name", ""), "asset_id": c.get("asset_id", ""),
-                         "field_type": ft, "status": "pending_commit"}
-
-            results.append(entry)
-            pending_indices.append(len(results) - 1)
-            updated_fields.add(field_path)
-
-        if not pending_indices:
+                values.pop(position)
+                status = "paused"
+            updated_fields.add("app_ad.headlines" if field == "HEADLINE" else "app_ad.descriptions")
+            ad_results.append({
+                "campaign": change.get("campaign_name", ""),
+                "asset_id": change.get("asset_id", ""),
+                "field_type": field,
+                "ad_id": ad_id,
+                "status": status,
+                **({"suggested_text": change.get("suggested_text")} if status == "replaced" else {}),
+            })
+        if not 1 <= len(headlines) <= 5:
+            validation_errors.append(f"ad {ad_id}: resulting headline count {len(headlines)} is outside 1–5")
+        if not 1 <= len(descriptions) <= 5:
+            validation_errors.append(f"ad {ad_id}: resulting description count {len(descriptions)} is outside 1–5")
+        if not updated_fields:
             continue
 
-        op = client.get_type("AdOperation")
-        ad_upd = op.update
-        ad_upd.resource_name = ad_rn
+        operation = client.get_type("AdOperation")
+        ad_update = operation.update
+        ad_update.resource_name = row_ad.resource_name
         for text in headlines:
-            ad_upd.app_ad.headlines.add().text = text
+            text_asset = client.get_type("AdTextAsset")
+            text_asset.text = text
+            ad_update.app_ad.headlines.append(text_asset)
         for text in descriptions:
-            ad_upd.app_ad.descriptions.add().text = text
+            text_asset = client.get_type("AdTextAsset")
+            text_asset.text = text
+            ad_update.app_ad.descriptions.append(text_asset)
         mask = FieldMask()
         mask.paths.extend(sorted(updated_fields))
-        op.update_mask.CopyFrom(mask)
+        operation.update_mask.CopyFrom(mask)
+        operations.append(operation)
+        results.extend(ad_results)
 
-        try:
-            ad_svc.mutate_ads(customer_id=customer_id, operations=[op])
-            for ri in pending_indices:
-                r = results[ri]
-                r["status"] = "replaced" if "suggested_text" in r else "paused"
-                if r["status"] == "replaced":
-                    print(f"  ✓ {r['campaign']} / {r['field_type']} — replaced: \"{r['suggested_text']}\"")
-                else:
-                    print(f"  ✓ {r['campaign']} / {r['field_type']} — removed from app ad")
-        except GoogleAdsException as exc:
-            err_msg = "; ".join(e.message for e in exc.failure.errors)
-            for ri in pending_indices:
-                results[ri]["status"] = "error"
-                results[ri]["error"] = err_msg
-                print(f"  ✗ {results[ri]['campaign']} / {results[ri]['field_type']} — failed: {err_msg}")
-        except Exception as exc:
-            for ri in pending_indices:
-                results[ri]["status"] = "error"
-                results[ri]["error"] = str(exc)
-                print(f"  ✗ {results[ri].get('campaign','')} / {results[ri].get('field_type','')} — failed: {exc}")
+    if validation_errors:
+        for error in validation_errors:
+            print(f"  ERROR: {error}")
+        die("creative copy validation failed — no changes were applied")
+    if not operations:
+        die("creative copy validation produced no operations — no changes were applied")
 
-    errors = [r for r in results if r.get("status") == "error"]
-    plan["applied"] = not errors
+    def mutation_error(exc: Exception) -> str:
+        if isinstance(exc, GoogleAdsException):
+            return "; ".join(error.message for error in exc.failure.errors)
+        return str(exc)
+
+    try:
+        ad_svc.mutate_ads(
+            customer_id=customer_id,
+            operations=operations,
+            partial_failure=False,
+            validate_only=True,
+        )
+    except Exception as exc:
+        die(f"creative copy validation failed — no changes were applied: {mutation_error(exc)}")
+
+    try:
+        ad_svc.mutate_ads(
+            customer_id=customer_id,
+            operations=operations,
+            partial_failure=False,
+        )
+    except Exception as exc:
+        die(f"creative copy mutation failed atomically — plan unchanged: {mutation_error(exc)}")
+
+    for result in results:
+        if result["status"] == "replaced":
+            print(f"  ✓ {result['campaign']} / {result['field_type']} — replaced: \"{result['suggested_text']}\"")
+        else:
+            print(f"  ✓ {result['campaign']} / {result['field_type']} — removed from app ad")
+
+    plan["applied"] = True
     plan["applied_at"] = _dt.datetime.now().isoformat(timespec="seconds")
     plan["apply_results"] = results
     plan["changes"] = changes
-    with open(plan_path, "w") as f:
-        _yaml.dump(plan, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    plan_temp = plan_path.with_suffix(plan_path.suffix + ".tmp")
+    plan_temp.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
+    os.replace(plan_temp, plan_path)
 
-    n_replaced = sum(1 for r in results if r["status"] == "replaced")
-    n_paused = sum(1 for r in results if r["status"] == "paused")
-    print(f"\n{n_replaced} new assets live, {n_paused} paused, {len(errors)} errors — plan saved: {plan_path}")
-    if errors:
-        raise SystemExit(2)
+    n_replaced = sum(1 for result in results if result["status"] == "replaced")
+    n_paused = sum(1 for result in results if result["status"] == "paused")
+    print(f"\n{n_replaced} new assets live, {n_paused} paused, 0 errors — plan saved: {plan_path}")
 
 
 def setup_write_credentials(args: argparse.Namespace) -> None:
@@ -6219,10 +6352,10 @@ def _runtime_write_config_path() -> Path:
     """Hosted writes use the connected user's runtime OAuth config only."""
     configured = os.getenv("BOB_GOOGLE_ADS_RUNTIME_CONFIG", "").strip()
     if not configured:
-        die("Google Ads is not connected for this user. Connect Google Ads in Bob before applying changes.")
+        die("Google Ads is not connected for this user. Connect Google Ads in Bob before applying changes.", error_code="GOOGLE_AUTH_REQUIRED")
     path = Path(configured).expanduser()
     if not path.exists():
-        die("Google Ads runtime authorization is unavailable. Reconnect Google Ads before applying changes.")
+        die("Google Ads runtime authorization is unavailable. Reconnect Google Ads before applying changes.", error_code="GOOGLE_AUTH_REQUIRED")
     return path
 
 def _require_write_permission() -> None:
@@ -7810,7 +7943,7 @@ def build_parser() -> argparse.ArgumentParser:
     rd_parser = sub.add_parser("resolve-dates", help="resolve a period expression to concrete date ranges")
     rd_parser.add_argument(
         "--period", required=True,
-        help="period name: yesterday-vs-sdlw, wow, mom, mtd, 3week-rolling, partial-wow",
+        help="period name: yesterday, yesterday-vs-sdlw, last-week, last-complete-week, wow, mom, mtd, 3week-rolling, bid-budget-weeks, partial-wow",
     )
     rd_parser.add_argument(
         "--n", type=int, default=3,

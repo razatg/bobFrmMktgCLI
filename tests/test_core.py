@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -169,6 +170,35 @@ class TestPeriodDates(unittest.TestCase):
              (self.d("2026-06-07"), self.d("2026-06-07"))],
         )
 
+    def test_date_aliases_are_normalized(self):
+        yesterday = [(self.d("2026-06-14"), self.d("2026-06-14"))]
+        last_week = [(self.d("2026-06-08"), self.d("2026-06-14"))]
+        self.assertEqual(dp.resolve_period_dates("yesterday"), yesterday)
+        self.assertEqual(dp.resolve_period_dates("last-week"), last_week)
+        self.assertEqual(dp.resolve_period_dates("last_week"), last_week)
+        self.assertEqual(dp.resolve_period_dates("last complete week"), last_week)
+
+    def test_bid_budget_windows_use_partial_current_iso_week(self):
+        os.environ["BOB_TODAY"] = "2026-06-18"
+        self.assertEqual(
+            dp.resolve_period_dates("bid-budget-weeks"),
+            [
+                (self.d("2026-06-15"), self.d("2026-06-17")),
+                (self.d("2026-06-08"), self.d("2026-06-14")),
+                (self.d("2026-06-01"), self.d("2026-06-07")),
+            ],
+        )
+
+    def test_bid_budget_windows_use_last_full_week_on_monday(self):
+        self.assertEqual(
+            dp.resolve_period_dates("bid_budget_weeks"),
+            [
+                (self.d("2026-06-08"), self.d("2026-06-14")),
+                (self.d("2026-06-01"), self.d("2026-06-07")),
+                (self.d("2026-05-25"), self.d("2026-05-31")),
+            ],
+        )
+
     def test_unknown_period_raises(self):
         with self.assertRaises(SystemExit):
             dp.resolve_period_dates("not_a_period")
@@ -276,6 +306,103 @@ class TestAggregation(unittest.TestCase):
         self.assertTrue(args.quiet)
         args = parser.parse_args(["data-manifest", "--account", "123-456-7890"])
         self.assertEqual(args.account, "123-456-7890")
+
+
+class TestCampaignWeeklyTrendSelection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._raw_dir = dp.RAW_DIR
+        self._processed_dir = dp.PROCESSED_DIR
+        self._today = os.environ.get("BOB_TODAY")
+        root = Path(self.tmp.name)
+        dp.RAW_DIR = root / "raw"
+        dp.PROCESSED_DIR = root / "processed"
+        os.environ["BOB_TODAY"] = "2026-06-18"
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        dp.RAW_DIR = self._raw_dir
+        dp.PROCESSED_DIR = self._processed_dir
+        if self._today is None:
+            os.environ.pop("BOB_TODAY", None)
+        else:
+            os.environ["BOB_TODAY"] = self._today
+
+    def _write_period(self, customer, start, end, run_id, impressions, row_customer=None):
+        path = dp.RAW_DIR / "campaign_network_period" / f"{customer}_{start}_{end}_{run_id}.csv"
+        dp.write_csv(path, [{
+            "customer_id": row_customer or customer,
+            "campaign_id": "campaign-1",
+            "campaign_name": "Campaign One",
+            "campaign_status": "ENABLED",
+            "network": "DISPLAY",
+            "impressions": str(impressions),
+            "clicks": "20",
+            "cost": "100",
+            "installs": "20",
+            "in_app_conversions": "4",
+        }], [
+            "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
+        ] + dp.SUM_METRICS)
+        return path
+
+    def _args(self, customer, output):
+        return argparse.Namespace(source=None, customer=customer, output=str(output))
+
+    def test_uses_exact_customer_windows_and_newest_duplicate(self):
+        customer = "1234567890"
+        self._write_period(customer, "2026-06-15", "2026-06-17", "a-old", 111)
+        self._write_period(customer, "2026-06-15", "2026-06-17", "z-new", 222)
+        self._write_period(customer, "2026-06-08", "2026-06-14", "run", 100)
+        self._write_period(customer, "2026-06-01", "2026-06-07", "run", 90)
+        self._write_period(customer, "2026-06-14", "2026-06-17", "newer-overlap", 999)
+        self._write_period("9998887777", "2026-06-15", "2026-06-17", "foreign", 999)
+
+        output = Path(self.tmp.name) / "trend.csv"
+        dp._agg_campaign_weekly_trend(
+            self._args("123-456-7890", output),
+            {"google_ads_customer_id": customer},
+            "installs",
+        )
+
+        row = dp.read_csv(output)[0]
+        self.assertEqual(row["customer_id"], customer)
+        self.assertEqual(row["current_iso_week"], "25")
+        self.assertEqual(row["w25_start"], "2026-06-15")
+        self.assertEqual(row["w25_end"], "2026-06-17")
+        self.assertEqual(row["w25_impressions"], "222")
+        self.assertEqual(row["w24_impressions"], "100")
+        self.assertEqual(row["w23_impressions"], "90")
+
+    def test_missing_exact_window_is_not_replaced_by_overlap(self):
+        customer = "1234567890"
+        self._write_period(customer, "2026-06-15", "2026-06-17", "run", 100)
+        self._write_period(customer, "2026-06-07", "2026-06-14", "overlap", 100)
+        self._write_period(customer, "2026-06-01", "2026-06-07", "run", 100)
+
+        with self.assertRaises(SystemExit):
+            dp._agg_campaign_weekly_trend(
+                self._args(customer, Path(self.tmp.name) / "trend.csv"),
+                {"google_ads_customer_id": customer},
+                "installs",
+            )
+
+    def test_matching_file_rejects_foreign_account_rows(self):
+        customer = "1234567890"
+        self._write_period(customer, "2026-06-15", "2026-06-17", "run", 100)
+        self._write_period(
+            customer, "2026-06-08", "2026-06-14", "run", 100,
+            row_customer="9998887777",
+        )
+        self._write_period(customer, "2026-06-01", "2026-06-07", "run", 100)
+
+        with self.assertRaises(SystemExit):
+            dp._agg_campaign_weekly_trend(
+                self._args(customer, Path(self.tmp.name) / "trend.csv"),
+                {"google_ads_customer_id": customer},
+                "installs",
+            )
 
 
 class TestProcessedPeriodMaterialization(unittest.TestCase):
@@ -919,14 +1046,234 @@ class TestOnboardAnswers(unittest.TestCase):
 
 
 class TestHostedWritePermissions(unittest.TestCase):
+    def test_missing_runtime_credentials_emit_machine_readable_auth_code(self):
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                dp._runtime_write_config_path()
+        self.assertIn("BOB_ERROR_CODE=GOOGLE_AUTH_REQUIRED", err.getvalue())
+
     def test_read_users_are_blocked_from_mutations(self):
-        with mock.patch.dict(os.environ, {"BOB_ACCOUNT_PERMISSION": "read"}, clear=False):
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"BOB_ACCOUNT_PERMISSION": "read"}, clear=False), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit):
                 dp._require_write_permission()
+        self.assertNotIn("GOOGLE_AUTH_REQUIRED", err.getvalue())
 
     def test_read_write_users_can_reach_mutation_gate(self):
         with mock.patch.dict(os.environ, {"BOB_ACCOUNT_PERMISSION": "read_write"}, clear=False):
             dp._require_write_permission()
+
+
+class TestCreativeCopyApply(unittest.TestCase):
+    class RepeatedAssets(list):
+        """A protobuf-like repeated field that intentionally has no add()."""
+
+    class MaskTarget:
+        def __init__(self):
+            self.paths = []
+
+        def CopyFrom(self, mask):
+            self.paths = list(mask.paths)
+
+    class FakeAdService:
+        def __init__(self, fail_validation=False, fail_actual=False):
+            self.calls = []
+            self.fail_validation = fail_validation
+            self.fail_actual = fail_actual
+
+        def mutate_ads(self, **kwargs):
+            self.calls.append(kwargs)
+            if self.fail_validation and kwargs.get("validate_only"):
+                raise RuntimeError("validation rejected")
+            if self.fail_actual and not kwargs.get("validate_only"):
+                raise RuntimeError("atomic mutation rejected")
+            return types.SimpleNamespace(results=[])
+
+    class FakeGoogleAdsService:
+        def __init__(self, rows):
+            self.rows = rows
+            self.queries = []
+
+        def search(self, customer_id, query):
+            self.queries.append(query)
+            return self.rows
+
+    class FakeClient:
+        def __init__(self, rows, fail_validation=False, fail_actual=False):
+            self.google_ads_service = TestCreativeCopyApply.FakeGoogleAdsService(rows)
+            self.ad_service = TestCreativeCopyApply.FakeAdService(
+                fail_validation=fail_validation, fail_actual=fail_actual
+            )
+
+        def get_service(self, name):
+            return self.google_ads_service if name == "GoogleAdsService" else self.ad_service
+
+        def get_type(self, name):
+            if name == "AdTextAsset":
+                return types.SimpleNamespace(text="")
+            if name == "AdOperation":
+                app_ad = types.SimpleNamespace(
+                    headlines=TestCreativeCopyApply.RepeatedAssets(),
+                    descriptions=TestCreativeCopyApply.RepeatedAssets(),
+                )
+                update = types.SimpleNamespace(resource_name="", app_ad=app_ad)
+                return types.SimpleNamespace(update=update, update_mask=TestCreativeCopyApply.MaskTarget())
+            raise AssertionError(f"unexpected protobuf type {name}")
+
+    @staticmethod
+    def _row(ad_group_id, ad_id, headlines, descriptions):
+        app_ad = types.SimpleNamespace(
+            headlines=[types.SimpleNamespace(text=text) for text in headlines],
+            descriptions=[types.SimpleNamespace(text=text) for text in descriptions],
+        )
+        ad_group_ad = types.SimpleNamespace(
+            resource_name=f"customers/1234567890/adGroupAds/{ad_group_id}~{ad_id}",
+            ad=types.SimpleNamespace(id=ad_id, app_ad=app_ad),
+        )
+        return types.SimpleNamespace(
+            ad_group=types.SimpleNamespace(id=ad_group_id),
+            ad_group_ad=ad_group_ad,
+        )
+
+    @staticmethod
+    def _change(index, ad_group_id, ad_id, asset_id, field, current, proposed):
+        return {
+            "change_index": index,
+            "campaign_name": "Generic App Campaign",
+            "ad_group_id": str(ad_group_id),
+            "ad_id": str(ad_id),
+            "asset_id": str(asset_id),
+            "field_type": field,
+            "current_text": current,
+            "suggested_text": None,
+            "action": "replace",
+        }
+
+    def _modules(self, client):
+        client_module = types.ModuleType("google.ads.googleads.client")
+        client_module.GoogleAdsClient = types.SimpleNamespace(load_from_storage=lambda _: client)
+        errors_module = types.ModuleType("google.ads.googleads.errors")
+        errors_module.GoogleAdsException = type("FakeGoogleAdsException", (Exception,), {})
+        ads_module = types.ModuleType("google.ads")
+        ads_module.__path__ = []
+        googleads_module = types.ModuleType("google.ads.googleads")
+        googleads_module.__path__ = []
+        return {
+            "google.ads": ads_module,
+            "google.ads.googleads": googleads_module,
+            "google.ads.googleads.client": client_module,
+            "google.ads.googleads.errors": errors_module,
+        }
+
+    def _run(self, plan, suggestions, rows, fail_validation=False, fail_actual=False):
+        import yaml
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        plan_path = Path(temp.name) / "creative-plan.yaml"
+        plan_path.write_text(yaml.safe_dump(plan, sort_keys=False))
+        original = plan_path.read_bytes()
+        client = self.FakeClient(rows, fail_validation=fail_validation, fail_actual=fail_actual)
+        args = argparse.Namespace(plan=str(plan_path), suggestions=json.dumps(suggestions))
+        error = None
+        try:
+            with mock.patch.object(dp, "_require_write_permission"), \
+                 mock.patch.object(dp, "_runtime_write_config_path", return_value=Path(temp.name) / "google.yaml"), \
+                 mock.patch.object(dp, "load_profile", return_value={}), \
+                 mock.patch.dict(sys.modules, self._modules(client)), \
+                 mock.patch("builtins.input", return_value="y"), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                dp.creative_copy_apply(args)
+        except SystemExit as exc:
+            error = exc
+        return plan_path, original, client, error
+
+    def test_asset_view_resource_extracts_exact_ad_id(self):
+        resource = "customers/1234567890/adGroupAdAssetViews/10~200~300~HEADLINE"
+        self.assertEqual(dp._creative_ad_id(resource), "200")
+        self.assertEqual(dp._creative_ad_id("malformed"), "")
+
+    def test_creative_dedupe_preserves_same_asset_in_different_ads(self):
+        base = {
+            "campaign_id": "1", "ad_group_id": "10", "asset_id": "300",
+            "asset_type": "TEXT", "field_type": "HEADLINE", "asset_text": "Shared headline",
+        }
+        rows = [
+            {**base, "asset_view_resource_name": "customers/123/adGroupAdAssetViews/10~200~300~HEADLINE"},
+            {**base, "asset_view_resource_name": "customers/123/adGroupAdAssetViews/10~201~300~HEADLINE"},
+        ]
+        self.assertEqual(len(dp._dedupe_creative_rows(rows)), 2)
+
+    def test_multiple_ads_are_updated_once_each_in_one_atomic_batch(self):
+        import yaml
+
+        changes = [
+            self._change(1, 10, 200, 501, "HEADLINE", "Old headline", "New headline"),
+            self._change(2, 10, 200, 502, "DESCRIPTION", "Old description", "New description"),
+            self._change(3, 20, 300, 503, "HEADLINE", "Other headline", "Better headline"),
+        ]
+        plan = {"customer_id": "1234567890", "changes": changes, "applied": False, "applied_at": None}
+        rows = [
+            self._row(10, 100, ["Old headline", "Distractor"], ["Old description"]),
+            self._row(10, 200, ["Old headline", "Keep headline"], ["Old description"]),
+            self._row(20, 300, ["Other headline"], ["Keep description"]),
+        ]
+        suggestions = [
+            {"id": 1, "text": "New headline"},
+            {"id": 2, "text": "New description"},
+            {"id": 3, "text": "Better headline"},
+        ]
+        plan_path, _, client, error = self._run(plan, suggestions, rows)
+
+        self.assertIsNone(error)
+        self.assertIn("ad_group_ad.ad.id IN (200, 300)", client.google_ads_service.queries[0])
+        self.assertEqual(len(client.ad_service.calls), 2)
+        validation, mutation = client.ad_service.calls
+        self.assertTrue(validation["validate_only"])
+        self.assertFalse(validation["partial_failure"])
+        self.assertFalse(mutation["partial_failure"])
+        self.assertEqual(len(mutation["operations"]), 2)
+        by_resource = {op.update.resource_name: op for op in mutation["operations"]}
+        target = by_resource["customers/1234567890/adGroupAds/10~200"]
+        self.assertEqual([asset.text for asset in target.update.app_ad.headlines], ["New headline", "Keep headline"])
+        self.assertEqual([asset.text for asset in target.update.app_ad.descriptions], ["New description"])
+        saved = yaml.safe_load(plan_path.read_text())
+        self.assertTrue(saved["applied"])
+        self.assertEqual(len(saved["apply_results"]), 3)
+
+    def test_local_validation_failure_preserves_plan_and_sends_nothing(self):
+        change = self._change(1, 10, 200, 501, "HEADLINE", "Missing headline", "New headline")
+        plan = {"customer_id": "1234567890", "changes": [change], "applied": False, "applied_at": None}
+        rows = [self._row(10, 200, ["Different headline"], ["Description"])]
+        plan_path, original, client, error = self._run(plan, [{"id": 1, "text": "New headline"}], rows)
+        self.assertIsNotNone(error)
+        self.assertEqual(plan_path.read_bytes(), original)
+        self.assertEqual(client.ad_service.calls, [])
+
+    def test_atomic_mutation_failure_preserves_plan(self):
+        change = self._change(1, 10, 200, 501, "HEADLINE", "Old headline", "New headline")
+        plan = {"customer_id": "1234567890", "changes": [change], "applied": False, "applied_at": None}
+        rows = [self._row(10, 200, ["Old headline"], ["Description"])]
+        plan_path, original, client, error = self._run(
+            plan, [{"id": 1, "text": "New headline"}], rows, fail_actual=True
+        )
+        self.assertIsNotNone(error)
+        self.assertEqual(plan_path.read_bytes(), original)
+        self.assertEqual(len(client.ad_service.calls), 2)
+        self.assertTrue(client.ad_service.calls[0]["validate_only"])
+
+    def test_google_validation_failure_preserves_plan(self):
+        change = self._change(1, 10, 200, 501, "HEADLINE", "Old headline", "New headline")
+        plan = {"customer_id": "1234567890", "changes": [change], "applied": False, "applied_at": None}
+        rows = [self._row(10, 200, ["Old headline"], ["Description"])]
+        plan_path, original, client, error = self._run(
+            plan, [{"id": 1, "text": "New headline"}], rows, fail_validation=True
+        )
+        self.assertIsNotNone(error)
+        self.assertEqual(plan_path.read_bytes(), original)
+        self.assertEqual(len(client.ad_service.calls), 1)
+        self.assertTrue(client.ad_service.calls[0]["validate_only"])
 
 
 class TestUvRuntime(unittest.TestCase):

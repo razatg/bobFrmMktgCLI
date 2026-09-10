@@ -1,10 +1,114 @@
 """Process-boundary Codex adapter with cancellation, timeout, and JSONL events."""
 from __future__ import annotations
-import asyncio, json, logging, os, shutil, signal, time
+import asyncio, json, logging, os, re, shutil, signal, time
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger('bob.agent_runner')
+
+MAX_PERSISTED_EVENT_BYTES = 8 * 1024
+_SECRET_PATTERN = re.compile(
+    r'(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|developer[_-]?token|password|secret)\b(\s*[:=]\s*)([^\s,;]+)'
+)
+
+def bounded_text(value, max_bytes=2048):
+    """Return UTF-8 text bounded by bytes, not characters."""
+    raw = str(value or '').encode('utf-8')
+    if len(raw) <= max_bytes:
+        return raw.decode('utf-8')
+    marker = '…'.encode('utf-8')
+    if max_bytes < len(marker):
+        return raw[:max_bytes].decode('utf-8', errors='ignore')
+    return raw[:max_bytes - len(marker)].decode('utf-8', errors='ignore') + marker.decode()
+
+def redact_event_text(value, max_bytes=2048):
+    text = _SECRET_PATTERN.sub(lambda match: f'{match.group(1)}{match.group(2)}[REDACTED]', str(value or ''))
+    text = re.sub(r'(?:(?:/app|/data|/home|/Users|/tmp|/private/tmp)/[^\s"\']+)', '[path]', text)
+    return bounded_text(text, max_bytes)
+
+def codex_usage(event):
+    """Extract cumulative counters from a Codex turn-completed event."""
+    if not isinstance(event, dict) or event.get('type') != 'turn.completed':
+        return None
+    usage = event.get('usage')
+    if not isinstance(usage, dict):
+        return None
+    result = {}
+    for key in ('input_tokens', 'cached_input_tokens', 'output_tokens'):
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            result[key] = max(0, int(value))
+    return result or None
+
+def estimate_usage(current, previous=None):
+    """Estimate this job from cumulative counters, tolerating counter resets."""
+    if not current:
+        return None
+    previous = previous or {}
+    estimated = {}
+    for key in ('input_tokens', 'cached_input_tokens', 'output_tokens'):
+        value = int(current.get(key, 0))
+        prior = int(previous.get(key, 0))
+        estimated[key] = value - prior if value >= prior else value
+    return estimated
+
+def normalized_bob_error(event):
+    """Translate an exact Bob CLI error marker from failed command output."""
+    if not isinstance(event, dict) or not str(event.get('type', '')).startswith('item.'):
+        return None
+    item = event.get('item') if isinstance(event.get('item'), dict) else {}
+    if item.get('type') != 'command_execution' or str(item.get('status', '')).lower() != 'failed':
+        return None
+    output = '\n'.join(str(item.get(key) or '') for key in ('aggregated_output', 'output', 'stderr', 'text'))
+    if re.search(r'(?m)^BOB_ERROR_CODE=GOOGLE_AUTH_REQUIRED\s*$', output):
+        return {'type': 'bob.error', 'code': 'GOOGLE_AUTH_REQUIRED'}
+    return None
+
+def compact_codex_event(event, max_bytes=MAX_PERSISTED_EVENT_BYTES):
+    """Project raw Codex JSONL into a small, secret-safe diagnostic event."""
+    if not isinstance(event, dict):
+        compact = {'type': 'unknown', 'details_omitted': True}
+    else:
+        event_type = bounded_text(event.get('type') or 'unknown', 128)
+        compact = {'type': event_type}
+        if event_type == 'thread.started':
+            compact['thread_id'] = bounded_text(event.get('thread_id'), 256)
+        elif event_type == 'turn.completed':
+            usage = codex_usage(event)
+            if usage:
+                compact['usage'] = usage
+        elif event_type == 'bob.error':
+            compact['code'] = bounded_text(event.get('code'), 128)
+        elif event_type in {'turn.failed', 'error'}:
+            compact['error'] = redact_event_text(event.get('error') or event.get('message'), 2048)
+        elif event_type.startswith('item.'):
+            item = event.get('item') if isinstance(event.get('item'), dict) else {}
+            item_type = bounded_text(item.get('type') or 'unknown', 128)
+            compact['item'] = {'type': item_type}
+            if item.get('status') is not None:
+                compact['item']['status'] = bounded_text(item.get('status'), 64)
+            if item.get('exit_code') is not None:
+                try: compact['item']['exit_code'] = int(item['exit_code'])
+                except (TypeError, ValueError): pass
+            if item_type == 'agent_message':
+                compact['item']['text'] = redact_event_text(item.get('text'), 2048)
+            elif item_type == 'command_execution':
+                command = str(item.get('command') or '')
+                match = re.search(r'(?:^|\s)(?:\./)?bob\s+([a-z0-9][a-z0-9-]*)', command, re.I)
+                if match:
+                    compact['item']['tool'] = 'bob'
+                    compact['item']['subcommand'] = match.group(1).lower()
+        elif event_type in {'assistant.final', 'result', 'final', 'stdout', 'command'}:
+            preview = event.get('text') or event.get('message') or event.get('result')
+            if preview is not None:
+                compact['message'] = redact_event_text(preview, 2048)
+        else:
+            compact['details_omitted'] = True
+    encoded = json.dumps(compact, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    if len(encoded) > max_bytes:
+        compact = {'type': bounded_text(compact.get('type', 'unknown'), 128), 'details_omitted': True,
+                   'original_bytes': len(encoded)}
+    return compact
 
 @dataclass
 class ExecutionPolicy:
@@ -88,6 +192,9 @@ class AgentRunner:
             elif event.get('type') == 'item.completed' and item.get('type') == 'agent_message':
                 final = item.get('text') or final
             await emit(event)
+            bob_error = normalized_bob_error(event)
+            if bob_error:
+                await emit(bob_error)
 
         while True:
             chunk = await stream.read(64 * 1024)

@@ -20,6 +20,8 @@ for the active workflow step.
 
 Present creative findings and approval decisions, not internal commands, paths, batch mechanics, raw events, or hidden reasoning. Only provide technical commands when the user explicitly asks for deployment, SSH, VM, or debugging help.
 
+YAML, JSON, and batch TXT files are internal working files: never link or paste them into the customer conversation. If the customer explicitly asks to see or download every proposed change, convert the complete existing YAML/JSON plan to CSV under the active account's `wiki/.../action-items/`, add that CSV to the Wiki Index, and link it. If the customer says to apply or make an already-reviewed plan live, use the internal files directly and do not create a presentation CSV.
+
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, read `logs/pull-log.jsonl` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
@@ -96,7 +98,7 @@ Do not proceed to the next batch until the current Agent call has finished and y
 
 Hosted Bob uses the connected Google OAuth runtime authorization for apply. A manually-created `google-ads-api.yaml` is not required. Bob still requires both Google Ads account authorization and Bob account permission `READ & WRITE`.
 
-Show the user the combined JSON from Step 2. Then write it to a file (use the Write tool) and run apply:
+Keep the combined JSON from Step 2 internal. Give the user a concise change summary for approval, then write the JSON to a working file (use the Write tool) and run apply:
 
 ```bash
 # Write combined suggestions to a file first (avoids shell arg-length limits)
@@ -122,9 +124,9 @@ rm wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-batch-*.txt
 rm wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-suggestions.json
 ```
 
-2. **Update `wiki/<customer_id>/Index.md`** under `## Action Items` without asking:
+2. **Update `wiki/<customer_id>/Index.md`** under `## Action Items` without asking. Link a customer-facing CSV only if the customer requested the complete changes; otherwise use plain text and do not link the internal YAML:
 ```
-- [Creative Copy — YYYY-MM-DD](action-items/creative-copy-YYYY-MM-DD.yaml) — N new assets live, M paused — applied YYYY-MM-DD
+- Creative Copy — YYYY-MM-DD — N new assets live, M paused — applied YYYY-MM-DD
 ```
 
 ## Failsafe — Unanswerable Questions

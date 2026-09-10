@@ -18,14 +18,14 @@ reading period files. Use `fetch --quiet`, and keep recommendation CSV/YAML outp
 files rather than printing full rows into the agent context. Load the algorithm and mutation
 references only when the requested recommendation or apply decision requires them.
 
-Show the recommendation and outcome, not the internal command sequence or file paths. Keep operational details private unless the user explicitly asks for deployment, SSH, VM, or debugging instructions.
+Show the recommendation and outcome, not the internal command sequence or file paths. Keep operational details private unless the user explicitly asks for deployment, SSH, VM, or debugging instructions. YAML and JSON plans are internal working files: do not link or expose them. If the customer explicitly asks to see or download every planned change, convert the complete existing plan to CSV under the active account's `wiki/.../action-items/`, add that CSV to the Wiki Index, and link the CSV. Do not create a presentation CSV merely because the customer asks to apply an existing plan.
 
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it and use the failsafe — don't patch code). Canonical wording: `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - Recommendations come only from `bid-budget-recommend` output. Do not invent numbers or signal assessments.
 - **Check before fetching or aggregating.** Use `ls` to verify the required raw and processed files already cover the date window. If they do, use them — do not re-fetch or re-aggregate. Only fetch when the date window is not yet covered or the file is stale per the reference's stated staleness window.
-- Always show the mutation plan (CSV or YAML summary) before applying. Never call `bid-budget-apply` without explicit user approval ("make it live", "apply it", "go ahead").
+- Give the customer a concise mutation summary before applying. Never call `bid-budget-apply` without explicit user approval ("make it live", "apply it", "go ahead").
 - Do not re-apply a plan that has `applied: true` — the tool will error, but surface this clearly to the user first.
 - Use `.bob/profile.json` for `cac_ceiling`, `bid_budget_change_pct`, `primary_goal`, and `currency`.
 - For retrospective questions, require an applied YAML plan path. If not provided, ask the user which plan to evaluate.
@@ -79,20 +79,24 @@ Read `wiki/{customer_id_no_hyphens}/Index.md`. It is small and must always be ch
 - If they want fresh: proceed to Step 1 below. Prepend one line of prior context from the Index entry at the top of your answer (e.g. "Last week: 8 increases, 4 holds — W21 plan."). Read the Index only — never open the full YAML for context.
 - If no matching entry or it is older than 7 days: proceed directly to Step 1.
 
-**Step 1 — Check for 3 weeks of campaign_network_period raw files:**
+**Step 1 — Resolve and check the exact campaign weekly windows:**
 ```bash
-ls garf/outputs/raw/campaign_network_period/
+./bob resolve-dates --period bid-budget-weeks
 ```
-Need at least 3 files with different week start dates. If missing, fetch the missing weeks:
+W0 is Monday through yesterday, so it can contain only part of the current ISO week. W-1 and W-2
+are the two prior complete ISO weeks. For each printed window, check the selected account before
+fetching:
 ```bash
-python3 lib/datapull.py fetch --query campaign_network_period --from DATE --to DATE --reason "bid/budget prereq: campaign_network_period W{N}"
-python3 lib/datapull.py aggregate --grain campaign_network_period
+./bob data-manifest --account CUSTOMER_ID --query campaign_network_period --from DATE --to DATE
+```
+If a required exact window is missing, fetch only that window:
+```bash
+./bob fetch --query campaign_network_period --from DATE --to DATE --reason "bid/budget prereq: campaign_network_period W{N}"
 ```
 
 **Step 2 — Build the campaign_weekly_trend processed file:**
 ```bash
-ls data/processed/campaign-trend/
-python3 lib/datapull.py aggregate --grain campaign_weekly_trend
+./bob aggregate --grain campaign_weekly_trend
 ```
 
 **Step 3 — Check for bid_budget_inputs raw file (must be ≤7 days old):**
@@ -115,10 +119,10 @@ If `bid-budget-recommend` errors with "no processed file found", it means Step 1
 
 After `bid-budget-apply` completes (whether fully applied or partially applied), immediately update `wiki/{customer_id_no_hyphens}/Index.md` **without asking**:
 
-- Find the existing line for this plan under `## Action Items`
+- Find the existing line for this plan under `## Action Items`. Link its customer-facing CSV when one exists; otherwise keep the entry as plain text rather than linking the internal YAML.
 - Append the apply result inline, e.g.:
   ```
-  - [Bid/Budget Plan — 2026-05-20](action-items/bid-budget-2026-05-20.yaml) — W21 recommendations — applied 2026-05-21: 69 CPA + 55 budget changes, 0 errors
+  - Bid/Budget Plan — 2026-05-20 — W21 recommendations — applied 2026-05-21: 69 CPA + 55 budget changes, 0 errors
   ```
 - If there were errors, note the count: `applied 2026-05-21: partial (3 errors)`
 

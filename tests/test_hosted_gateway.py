@@ -25,6 +25,16 @@ class FakeRunner:
         await emit({'type':'command','message':'fake bob command'})
         return (session_id or 'thread-one', f'Bob received: {user_prompt}')
 
+class FetchRunner(FakeRunner):
+    async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
+        await emit({'type':'bob.error','code':'GOOGLE_AUTH_REQUIRED'})
+        raise RuntimeError('Google Ads authorization is required')
+
+class UnrelatedFetchFailureRunner(FakeRunner):
+    async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
+        await emit({'type':'item.completed','item':{'type':'command_execution','command':'./bob fetch --query account_daily && git push && printf write apply','status':'failed'}})
+        raise RuntimeError('query file is invalid')
+
 class OffScopeRunner(FakeRunner):
     async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
         user_prompt = prompt.split('User message:\n', 1)[1] if 'User message:\n' in prompt else prompt
@@ -49,6 +59,16 @@ class SlowRunner(FakeRunner):
         await asyncio.sleep(.25)
         return await super().run(*args, **kwargs)
 
+class UsageRunner(FakeRunner):
+    async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
+        self.calls.append({'backend':backend,'session_id':session_id,'prompt':prompt,
+                           'workspace':str(workspace),'environment':dict(policy.environment or {})})
+        cumulative = 1100 if session_id else 600
+        await emit({'type':'turn.completed','usage':{
+            'input_tokens':cumulative,'cached_input_tokens':cumulative // 2,'output_tokens':100,
+        },'large_ignored_field':'x' * 100_000})
+        return (session_id or 'usage-thread', 'Usage response')
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -66,11 +86,16 @@ class GatewayTests(unittest.TestCase):
 
     def test_user_response_hides_internal_steps_but_allows_explicit_technical_help(self):
         from server.app import sanitize_user_response
-        internal='''I will retrieve the spend.\n```sh\n./bob fetch --query campaign_daily\n```\nSee /data/client/logs/pull-log.jsonl.'''
-        shown=sanitize_user_response(internal)
+        internal='''I will retrieve the spend.\n```sh\n./bob fetch --query campaign_daily\n```\n[Ownly W35 Analysis](/data/client/runtime/conversations/demo/workspace/wiki/1112223333/analyses/ownly-w35.md)\nCSV: wiki/1112223333/action-items/plan.csv\nInternal: wiki/1112223333/action-items/plan.yaml\nSee /data/client/logs/pull-log.jsonl.'''
+        shown=sanitize_user_response(internal,customer_id='111-222-3333')
         self.assertNotIn('./bob',shown)
         self.assertNotIn('/data/client',shown)
         self.assertIn('I will retrieve the spend.',shown)
+        self.assertIn('[[artifact:wiki/1112223333/analyses/ownly-w35.md|Ownly W35 Analysis]]',shown)
+        self.assertIn('[[artifact:wiki/1112223333/action-items/plan.csv|Plan]]',shown)
+        self.assertNotIn('plan.yaml',shown)
+        blocked=sanitize_user_response('wiki/9998887777/secret.md',customer_id='1112223333')
+        self.assertEqual(blocked,'[artifact unavailable]')
         technical=sanitize_user_response(internal,technical=True)
         self.assertNotIn('/data/client',technical)
         self.assertIn('./bob fetch',technical)
@@ -119,6 +144,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('account KT is at wiki/1234567890/KT.md',prompt)
         self.assertNotIn('client KT',prompt)
         self.assertIn('AUTHORITATIVE CURRENT ACCOUNT:',prompt)
+        self.assertNotIn('MANAGEMENT',prompt)
         self.assertIn('Ask one focused clarification',prompt)
 
     def test_admin_observability_is_lightweight_and_reads_history(self):
@@ -160,10 +186,51 @@ class GatewayTests(unittest.TestCase):
         job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'hello'}).json()['job_id']
         import time; time.sleep(.05)
         events=self.client.get(f'/api/jobs/{job}/events').text
-        self.assertIn('COMPLETED',events); self.assertIn('Bob received: hello',events)
+        self.assertIn('COMPLETED',events); self.assertNotIn('Bob received: hello',events)
         data=self.client.get(f'/api/conversations/{conversation}').json()
         self.assertEqual(data['conversation']['agent_session_id'],'thread-one')
+        self.assertIn('Bob received: hello',data['messages'][-1]['content'])
         self.assertIn('You are Bob for this workspace only.', self.app.state.runner.calls[0]['prompt'])
+        self.assertIn('Google Ads connection: connected',self.app.state.runner.calls[0]['prompt'])
+
+    def test_token_threshold_retires_thread_and_next_job_gets_bounded_handoff(self):
+        csrf=self.bootstrap(); self.app.state.runner=UsageRunner()
+        with patch.dict(os.environ, {'BOB_THREAD_HANDOFF_INPUT_TOKENS':'1000'}):
+            conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+            first=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'first report'}).json()['job_id']
+            import time; time.sleep(.05)
+            first_job=self.client.get(f'/api/jobs/{first}').json()
+            first_conversation=self.client.get(f'/api/conversations/{conversation}').json()['conversation']
+            self.assertEqual(first_job['input_tokens_estimate'],600)
+            self.assertEqual(first_conversation['agent_session_id'],'usage-thread')
+            self.assertEqual(first_conversation['thread_input_tokens_estimate'],600)
+
+            second=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'second report'}).json()['job_id']
+            time.sleep(.05)
+            second_job=self.client.get(f'/api/jobs/{second}').json()
+            retired=self.client.get(f'/api/conversations/{conversation}').json()['conversation']
+            self.assertEqual(second_job['input_tokens_estimate'],500)
+            self.assertIsNone(retired['agent_session_id'])
+            self.assertEqual(retired['thread_input_tokens_estimate'],0)
+
+            third=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'third report'}).json()['job_id']
+            time.sleep(.05)
+            third_job=self.client.get(f'/api/jobs/{third}').json()
+            self.assertEqual(third_job['input_tokens_estimate'],600)
+            call=self.app.state.runner.calls[-1]
+            self.assertIsNone(call['session_id'])
+            self.assertIn('CONTINUITY FROM THE PREVIOUS CODEX THREAD',call['prompt'])
+            self.assertIn('User: first report',call['prompt'])
+            self.assertIn('Assistant: Usage response',call['prompt'])
+            self.assertLessEqual(len(call['prompt'].split('User message:\n',1)[0].encode()),15 * 1024)
+
+            stored_events=self.client.get(f'/api/admin/codex-sessions/{third}/events',headers={'X-CSRF-Token':csrf}).json()
+            usage_event=next(event for event in stored_events if event['payload'].get('type')=='turn.completed')
+            self.assertEqual(usage_event['payload']['usage']['input_tokens'],600)
+            self.assertNotIn('large_ignored_field',usage_event['payload'])
+            terminal=stored_events[-1]['payload']
+            self.assertNotIn('response',terminal)
+            self.assertIn('message_id',terminal)
 
     def test_invite_redeem_grants_all_active_client_accounts_as_read(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
@@ -212,10 +279,10 @@ class GatewayTests(unittest.TestCase):
     def test_codex_prompt_uses_conversation_account_not_typed_account(self):
         from server.app import prompt_for_selected_account
         s=self.app.state.store; admin_csrf=self.bootstrap(); client_id=s.one('SELECT id FROM client_instances')['id']
-        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('captain',client_id,'1112223333','Rapido Captain',1,'2026-08-24T00:00:00+00:00'))
-        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('demand',client_id,'4445556666','Rapido Demand',1,'2026-08-24T00:00:00+00:00'))
-        row={'account_id':'captain','client_instance_id':client_id}
-        internal=prompt_for_selected_account(s,row,'What happened in Rapido Demand?')
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('primary',client_id,'1112223333','Primary Account',1,'2026-08-24T00:00:00+00:00'))
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('secondary',client_id,'4445556666','Secondary Account',1,'2026-08-24T00:00:00+00:00'))
+        row={'account_id':'primary','client_instance_id':client_id}
+        internal=prompt_for_selected_account(s,row,'What happened in Secondary Account?')
         self.assertEqual(internal,'What happened in another account?')
 
     def test_admin_google_config_and_user_oauth_connection(self):
@@ -299,7 +366,7 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue((prepared / '.bob').is_symlink())
         self.assertEqual((prepared / '.bob').resolve(), (state_root / '.bob').resolve())
 
-    def test_artifacts_include_yaml_and_enforce_client_access(self):
+    def test_customer_artifacts_only_expose_markdown_and_csv(self):
         admin_csrf = self.bootstrap()
         store = self.app.state.store
         client_id = store.one('SELECT id FROM client_instances')['id']
@@ -322,9 +389,12 @@ class GatewayTests(unittest.TestCase):
         (demand_root / 'action-items').mkdir(parents=True)
         supply_root.mkdir(parents=True)
         (demand_root / 'Index.md').write_text(
-            '# Demo Demand Wiki\n\n[Bid/Budget Plan](action-items/bid-budget.yaml)\n'
+            '# Demo Demand Wiki\n\n[Bid/Budget Plan](action-items/bid-budget.csv)\n'
         )
+        (demand_root / 'action-items' / 'bid-budget.csv').write_text('campaign_id,action\n1,increase_bid\n')
         (demand_root / 'action-items' / 'bid-budget.yaml').write_text('status: proposed\n')
+        (demand_root / 'action-items' / 'suggestions.json').write_text('[{"id":1}]\n')
+        (demand_root / 'action-items' / 'batch.txt').write_text('internal prompt\n')
         (supply_root / 'secret.md').write_text('# Supply only\n')
 
         with patch.object(app_module, 'STATE_ROOT', runtime_root):
@@ -334,15 +404,18 @@ class GatewayTests(unittest.TestCase):
             paths = [artifact['path'] for artifact in index.json()]
             self.assertEqual(paths, [
                 '1112223333/Index.md',
-                '1112223333/action-items/bid-budget.yaml',
+                '1112223333/action-items/bid-budget.csv',
             ])
-            yaml_page = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.yaml')
-            self.assertEqual(yaml_page.status_code, 200, yaml_page.text)
-            self.assertEqual(yaml_page.json()['type'], 'yaml')
-            self.assertIn('status: proposed', yaml_page.json()['content'])
-            download = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.yaml?download=1')
+            csv_page = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.csv')
+            self.assertEqual(csv_page.status_code, 200, csv_page.text)
+            self.assertEqual(csv_page.json()['type'], 'csv')
+            self.assertIn('increase_bid', csv_page.json()['content'])
+            download = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.csv?download=1')
             self.assertEqual(download.status_code, 200, download.text)
             self.assertIn('attachment', download.headers['content-disposition'])
+            for internal_name in ('bid-budget.yaml', 'suggestions.json', 'batch.txt'):
+                hidden = self.client.get(f'/api/artifacts/1112223333/action-items/{internal_name}')
+                self.assertEqual(hidden.status_code, 404, hidden.text)
             supply = self.client.get('/api/artifacts/9998887777/secret.md')
             self.assertEqual(supply.status_code, 200, supply.text)
             self.assertIn('# Supply only', supply.json()['content'])
@@ -362,17 +435,17 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('https://accounts.google.com/o/oauth2/v2/auth',response.json()['immediate_response'])
         self.assertEqual(self.app.state.store.one('SELECT COUNT(*) n FROM oauth_transactions')['n'],1)
 
-    def test_queries_require_google_auth_and_are_saved_without_creating_job(self):
+    def test_queries_without_google_auth_can_use_saved_context(self):
         admin_csrf=self.bootstrap(); invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
         member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'no-auth-user','password':'another-secure-password'})
         member_csrf=member.json()['csrf']; conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
         response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'What happened last week?'})
         self.assertEqual(response.status_code,200,response.text)
-        self.assertIsNone(response.json()['job_id'])
-        self.assertIn('Google Ads isn’t connected yet',response.json()['immediate_response'])
+        self.assertIsNotNone(response.json()['job_id'])
+        import time; time.sleep(.05)
         messages=self.client.get(f'/api/conversations/{conversation}').json()['messages']
-        self.assertEqual([m['content'] for m in messages],['What happened last week?',response.json()['immediate_response']])
-        self.assertIsNone(self.app.state.store.one('SELECT id FROM jobs WHERE conversation_id=?',(conversation,)))
+        self.assertEqual(messages[-1]['role'],'assistant')
+        self.assertEqual(self.app.state.runner.calls[-1]['environment'].get('BOB_ACCOUNT_PERMISSION'),'read')
 
     def test_environment_provisions_super_admin_without_browser_setup(self):
         from server.app import provision_environment_admin
@@ -461,10 +534,18 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=26', html)
-        self.assertIn('originalAddWithRelativeWiki', js)
-        self.assertIn("client_role==='management'", js)
-        self.assertIn('connected||management', js)
+        self.assertIn('/static/app.js?v=29', html)
+        self.assertIn('artifact:wiki\\/', js)
+        self.assertNotIn('originalAddWithRelativeWiki', js)
+        self.assertNotIn('originalAddWithArtifactPaths', js)
+        self.assertNotIn('renderClientSectionWithoutManagement', js)
+        self.assertNotIn('renderClientSectionWithInvite', js)
+        self.assertNotIn('client_role', js)
+        self.assertNotIn('refreshQuestionBank', js)
+        self.assertNotIn('HEY BOB, SET ME UP', js)
+        self.assertEqual(js.count('function renderQuestionBank('),1)
+        self.assertEqual(js.count('function renderClientSection('),1)
+        self.assertIn('/api/admin/users/${userId}/password',js)
         self.assertIn('artifact-chat-link', js)
         self.assertNotIn('loadWiki()', js)
         self.assertIn('watchJob', js)
@@ -618,16 +699,19 @@ class GatewayTests(unittest.TestCase):
         selected=self.client.get('/api/conversations/'+owner_conversation['id']).json()['conversation']['account_id']
         self.assertEqual(selected,demand_id)
 
-    def test_management_user_can_use_saved_context_without_google_auth(self):
+    def test_read_user_can_use_saved_context_without_google_auth(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
         client_id=s.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
-        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('management-account',client_id,'1234567890','Management account',1,stamp))
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('saved-account',client_id,'1234567890','Saved account',1,stamp))
         added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={
-            'identifier':'management@example.com','password':'management-password','client_role':'management'})
+            'identifier':'reader@example.com','password':'reader-password'})
         self.assertEqual(added.status_code,200,added.text)
-        login=self.client.post('/auth/login',json={'identifier':'management@example.com','password':'management-password'})
+        user_id=s.one('SELECT id FROM users WHERE email_or_identifier=?',('reader@example.com',))['id']
+        grant=self.client.post(f'/api/admin/users/{user_id}/accounts/saved-account/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read'})
+        self.assertEqual(grant.status_code,200,grant.text)
+        login=self.client.post('/auth/login',json={'identifier':'reader@example.com','password':'reader-password'})
         self.assertEqual(login.status_code,200,login.text); csrf=login.json()['csrf']
-        self.assertEqual([a['account_name'] for a in self.client.get('/api/accounts').json()],['Management account'])
+        self.assertEqual([a['account_name'] for a in self.client.get('/api/accounts').json()],['Saved account'])
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
         job=self.client.post(f"/api/conversations/{conversation['id']}/messages",headers={'X-CSRF-Token':csrf},json={'content':'What is in the saved wiki?'})
         self.assertEqual(job.status_code,200,job.text); self.assertIsNotNone(job.json()['job_id'])
@@ -635,9 +719,62 @@ class GatewayTests(unittest.TestCase):
         events=self.client.get(f"/api/jobs/{job.json()['job_id']}/events").text
         self.assertIn('COMPLETED',events)
         call=self.app.state.runner.calls[-1]
-        self.assertEqual(call['environment'].get('BOB_ACCOUNT_PERMISSION'),'management')
+        self.assertEqual(call['environment'].get('BOB_ACCOUNT_PERMISSION'),'read')
         self.assertNotIn('BOB_GOOGLE_ADS_RUNTIME_CONFIG',call['environment'])
-        self.assertIn('MANAGEMENT user',call['prompt'])
+        self.assertIn('Account permission: read',call['prompt'])
+        self.assertIn('Google Ads connection: not connected',call['prompt'])
+
+    def test_live_fetch_without_google_auth_gets_setup_handoff(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('fetch-account',client_id,'1234567890','Fetch account',1,stamp))
+        added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={'identifier':'fetch-reader@example.com','password':'reader-password'})
+        self.assertEqual(added.status_code,200,added.text)
+        user_id=s.one('SELECT id FROM users WHERE email_or_identifier=?',('fetch-reader@example.com',))['id']
+        grant=self.client.post(f'/api/admin/users/{user_id}/accounts/fetch-account/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read'})
+        self.assertEqual(grant.status_code,200,grant.text)
+        login=self.client.post('/auth/login',json={'identifier':'fetch-reader@example.com','password':'reader-password'})
+        csrf=login.json()['csrf']; self.app.state.runner=FetchRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
+        response=self.client.post(f"/api/conversations/{conversation['id']}/messages",headers={'X-CSRF-Token':csrf},json={'content':'What happened last week?'})
+        self.assertIsNotNone(response.json()['job_id'])
+        import time; time.sleep(.1)
+        messages=self.client.get(f"/api/conversations/{conversation['id']}").json()['messages']
+        self.assertIn('Say ‘Hey Bob, set me up’',messages[-1]['content'])
+        job=self.client.get(f"/api/jobs/{response.json()['job_id']}").json()
+        self.assertEqual(job['status'],'completed')
+        events=s.all('SELECT payload FROM job_events WHERE job_id=?',(response.json()['job_id'],))
+        self.assertTrue(any(json.loads(event['payload'])=={'type':'bob.error','code':'GOOGLE_AUTH_REQUIRED'} for event in events))
+
+    def test_command_name_does_not_turn_unrelated_failure_into_google_setup(self):
+        csrf=self.bootstrap(); self.app.state.runner=UnrelatedFetchFailureRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'check saved performance'})
+        import time; time.sleep(.05)
+        job=self.client.get(f"/api/jobs/{response.json()['job_id']}").json()
+        self.assertEqual(job['status'],'failed')
+        self.assertEqual(job['error'],'query file is invalid')
+
+    def test_membership_status_password_and_removed_role_have_separate_apis(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']
+        rejected=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={
+            'identifier':'reader@example.com','password':'reader-password','client_role':'management'})
+        self.assertEqual(rejected.status_code,422,rejected.text)
+        added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={
+            'identifier':'reader@example.com','password':'reader-password'})
+        self.assertEqual(added.status_code,200,added.text); uid=added.json()['user']['id']
+        mixed=self.client.patch(f'/api/admin/clients/{client_id}/users/{uid}',headers={'X-CSRF-Token':admin_csrf},json={
+            'status':'approved','password':'changed-reader-password'})
+        self.assertEqual(mixed.status_code,422,mixed.text)
+        suspended=self.client.patch(f'/api/admin/clients/{client_id}/users/{uid}',headers={'X-CSRF-Token':admin_csrf},json={'status':'suspended'})
+        self.assertEqual(suspended.status_code,200,suspended.text)
+        self.assertEqual(s.one('SELECT status FROM client_memberships WHERE user_id=? AND client_instance_id=?',(uid,client_id))['status'],'suspended')
+        self.assertEqual(s.one('SELECT status FROM users WHERE id=?',(uid,))['status'],'approved')
+        reset=self.client.post(f'/api/admin/users/{uid}/password',headers={'X-CSRF-Token':admin_csrf},json={'password':'changed-reader-password'})
+        self.assertEqual(reset.status_code,200,reset.text)
+        login=self.client.post('/auth/login',json={'identifier':'reader@example.com','password':'changed-reader-password'})
+        self.assertEqual(login.status_code,200,login.text)
 
     def test_obvious_generic_prompt_is_blocked_before_codex(self):
         csrf=self.bootstrap()
