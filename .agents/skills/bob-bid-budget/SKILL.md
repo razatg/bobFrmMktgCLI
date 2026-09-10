@@ -24,7 +24,7 @@ Show the recommendation and outcome, not the internal command sequence or file p
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it and use the failsafe — don't patch code). Canonical wording: `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - Recommendations come only from `bid-budget-recommend` output. Do not invent numbers or signal assessments.
-- **Check before fetching or aggregating.** Use `ls` to verify the required raw and processed files already cover the date window. If they do, use them — do not re-fetch or re-aggregate. Only fetch when the date window is not yet covered or the file is stale per the reference's stated staleness window.
+- **Check before fetching.** Use `./bob data-manifest` for the selected account and each exact date window. Do not inspect raw directories to infer coverage. If the raw windows are complete but the processed trend is wrong or stale, rebuild it without refetching.
 - Give the customer a concise mutation summary before applying. Never call `bid-budget-apply` without explicit user approval ("make it live", "apply it", "go ahead").
 - Do not re-apply a plan that has `applied: true` — the tool will error, but surface this clearly to the user first.
 - Use `.bob/profile.json` for `cac_ceiling`, `bid_budget_change_pct`, `primary_goal`, and `currency`.
@@ -49,17 +49,17 @@ Show the recommendation and outcome, not the internal command sequence or file p
 
 ## Required Checks — Ordered Prerequisite Chain
 
-Run these steps in order before calling `bid-budget-recommend`. Use `ls` to check for files — do not read source files.
+Run these steps in order before calling `bid-budget-recommend`. Use `data-manifest` to check coverage — do not inspect raw directories or read source files.
 
 **Pre-flight — run `check-config` before anything else:**
 ```bash
-python3 lib/datapull.py check-config
+./bob check-config
 ```
 If the output contains `STATUS: FILE NOT FOUND` under the write config block:
 1. **Do NOT copy `~/google-ads.yaml` to the write config path.** It does not contain valid OAuth2 credentials for the `google-ads` Python package.
 2. Run the credential setup in the background:
    ```bash
-   PYTHONUNBUFFERED=1 python3 lib/datapull.py setup-write-credentials
+   PYTHONUNBUFFERED=1 ./bob setup-write-credentials
    ```
    Use `run_in_background=True` on this Bash call.
 3. Use the **Monitor** tool to stream its output. When a line beginning with `OAUTH_URL: ` appears, extract the URL (everything after `OAUTH_URL: `) and show it to the user as a clickable markdown link:
@@ -69,7 +69,7 @@ If the output contains `STATUS: FILE NOT FOUND` under the write config block:
 
 **Do NOT ask the user to run anything manually.** The agent handles the full flow.
 
-**Step 0 — Check `wiki/{customer_id_no_hyphens}/Index.md` for a recent bid/budget plan (do this first, before any `ls` or CLI command):**
+**Step 0 — Check `wiki/{customer_id_no_hyphens}/Index.md` for a recent bid/budget plan before any CLI command:**
 
 Read `wiki/{customer_id_no_hyphens}/Index.md`. It is small and must always be checked first.
 
@@ -98,22 +98,24 @@ If a required exact window is missing, fetch only that window:
 ```bash
 ./bob aggregate --grain campaign_weekly_trend
 ```
+Keep the exact output path printed by this command. Rebuilding a processed trend does not require
+refetching when the manifest already confirms all three raw windows.
 
-**Step 3 — Check for bid_budget_inputs raw file (must be ≤7 days old):**
+**Step 3 — Check bid_budget_inputs for the selected account (must be ≤7 days old):**
 ```bash
-ls garf/outputs/raw/bid_budget_inputs/
+./bob data-manifest --account CUSTOMER_ID --query bid_budget_inputs --from DATE --to DATE
 ```
 If missing or stale:
 ```bash
-python3 lib/datapull.py fetch --query bid_budget_inputs --from DATE --to DATE --reason "bid/budget prereq: current bids and budgets"
+./bob fetch --query bid_budget_inputs --from DATE --to DATE --reason "bid/budget prereq: current bids and budgets"
 ```
 
 **Step 4 — Run the recommendation:**
 ```bash
-python3 lib/datapull.py bid-budget-recommend [--dry-run]
+./bob bid-budget-recommend --trend <path printed by Step 2>
 ```
 
-If `bid-budget-recommend` errors with "no processed file found", it means Step 1 or Step 2 is incomplete — re-run them. Do not read source files to diagnose; just check `ls` outputs and re-run the missing step.
+If `bid-budget-recommend` reports that the exact campaign trend is missing, Step 1 or Step 2 is incomplete. Recheck the manifests and rerun only the missing aggregation or fetch.
 
 ## Post-Apply Wiki Update
 

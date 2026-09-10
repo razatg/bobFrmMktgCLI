@@ -814,6 +814,28 @@ def newest_raw(query_name: str) -> Path:
     return files[0]
 
 
+def find_newest_raw_for_customer(query_name: str, customer_id: str) -> Path | None:
+    """Return the newest raw CSV whose filename belongs to one account, if present."""
+    normalized_customer = str(customer_id).replace("-", "")
+    query_dir = RAW_DIR / query_name
+    files = [
+        path for path in query_dir.glob("*.csv")
+        if path.stem.split("_", 1)[0].replace("-", "") == normalized_customer
+    ]
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
+def newest_raw_for_customer(query_name: str, customer_id: str) -> Path:
+    """Return the newest raw CSV whose filename belongs to one account."""
+    path = find_newest_raw_for_customer(query_name, customer_id)
+    if path is None:
+        normalized_customer = str(customer_id).replace("-", "")
+        query_dir = RAW_DIR / query_name
+        die(f"no raw CSV found for {query_name} and account {normalized_customer} in {query_dir}")
+    return path
+
+
 def find_raw_file_for_period(
     query_name: str,
     start: dt.date,
@@ -3155,6 +3177,62 @@ def newest_processed(subdir: str, customer_id: str | None = None) -> Path:
     return files[0]
 
 
+def bid_budget_trend_path(customer_id: str, explicit: str | None = None) -> tuple[Path, list[tuple[dt.date, dt.date]]]:
+    """Resolve the exact current bid/budget trend rather than a merely newer-looking file."""
+    normalized_customer = str(customer_id).replace("-", "")
+    if not normalized_customer:
+        die("bid-budget-recommend requires an active account")
+    windows = bid_budget_week_windows()
+    expected_start, expected_end = windows[0]
+    path = Path(explicit).expanduser() if explicit else find_processed_files_for_period(
+        "campaign-trend", [(expected_start, expected_end)], normalized_customer
+    )[0]
+    if path is None or not path.exists():
+        die(
+            f"missing exact campaign-trend for account {normalized_customer}: "
+            f"{expected_start}..{expected_end}. Run: ./bob aggregate --grain campaign_weekly_trend"
+        )
+    parts = path.stem.split("_")
+    if len(parts) < 3 or parts[0].replace("-", "") != normalized_customer:
+        die(f"campaign-trend file does not belong to account {normalized_customer}: {path.name}")
+    if (parts[1], parts[2]) != (expected_start.isoformat(), expected_end.isoformat()):
+        die(
+            f"campaign-trend file covers {parts[1]}..{parts[2]}, expected "
+            f"{expected_start}..{expected_end}: {path.name}"
+        )
+    return path, windows
+
+
+def validate_bid_budget_trend_rows(
+    rows: list[dict[str, str]], customer_id: str, windows: list[tuple[dt.date, dt.date]]
+) -> None:
+    """Fail closed when a trend does not encode the exact account and three weekly windows."""
+    if not rows:
+        die("campaign-trend file contains no campaign rows")
+    normalized_customer = str(customer_id).replace("-", "")
+    foreign_accounts = sorted({
+        str(row.get("customer_id", "")).replace("-", "")
+        for row in rows
+        if str(row.get("customer_id", "")).replace("-", "") != normalized_customer
+    })
+    if foreign_accounts:
+        die(
+            "campaign-trend contains missing or foreign customer IDs: "
+            + ", ".join(account or "<missing>" for account in foreign_accounts[:10])
+        )
+    first = rows[0]
+    week_fields = ("current_iso_week", "prior1_iso_week", "prior2_iso_week")
+    for field, (start, end) in zip(week_fields, windows):
+        iso_week = start.isocalendar().week
+        if str(first.get(field, "")) != str(iso_week):
+            die(f"campaign-trend {field} is {first.get(field, '<missing>')}, expected {iso_week}")
+        if first.get(f"w{iso_week}_start") != start.isoformat() or first.get(f"w{iso_week}_end") != end.isoformat():
+            die(
+                f"campaign-trend W{iso_week} dates do not match the required window "
+                f"{start}..{end}"
+            )
+
+
 def _creative_processed_paths(customer_id: str) -> list[Path]:
     """Choose the newest processed file for each creative asset query."""
     creative_dir = account_processed_dir(customer_id, "creative")
@@ -3207,20 +3285,27 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
     cpm_tolerance = 1.05
     cooldown_days = int(profile.get("bid_budget_cooldown_days", 14))
 
-    customer_id = profile.get("google_ads_customer_id")
-    # Load trend file (most recent campaign-trend processed CSV)
-    if args.trend:
-        trend_path = Path(args.trend).expanduser()
-    else:
-        trend_path = newest_processed("campaign-trend", customer_id)
+    customer_id = str(profile.get("google_ads_customer_id") or "").replace("-", "")
+    trend_path, expected_windows = bid_budget_trend_path(customer_id, args.trend)
     trend_rows = read_csv(trend_path)
+    validate_bid_budget_trend_rows(trend_rows, customer_id, expected_windows)
 
-    # Load bid_budget_inputs (most recent raw)
+    # Load bid_budget_inputs for the same account as the validated trend.
     if args.bid_budget:
         bb_path = Path(args.bid_budget).expanduser()
     else:
-        bb_path = newest_raw("bid_budget_inputs")
+        bb_path = newest_raw_for_customer("bid_budget_inputs", customer_id)
     bb_rows = read_csv(bb_path)
+    foreign_bb_accounts = sorted({
+        str(row.get("customer_id", "")).replace("-", "")
+        for row in bb_rows
+        if str(row.get("customer_id", "")).replace("-", "") != customer_id
+    })
+    if foreign_bb_accounts:
+        die(
+            "bid_budget_inputs contains missing or foreign customer IDs: "
+            + ", ".join(account or "<missing>" for account in foreign_bb_accounts[:10])
+        )
 
     # Index bid_budget_inputs by campaign_id (sum cost over 7 days per campaign)
     bb_index: dict[str, dict] = {}
@@ -3233,8 +3318,8 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
 
     # Build cooldown index from change_history: last CAMPAIGN/CAMPAIGN_BUDGET update per campaign
     ch_index: dict[str, str] = {}  # campaign_id → most recent change date (ISO)
-    ch_path = newest_raw("change_history") if True else None
     try:
+        ch_path = find_newest_raw_for_customer("change_history", customer_id)
         if ch_path and ch_path.exists():
             for row in read_csv(ch_path):
                 cid = str(row.get("campaign_id", "")).replace("-", "")
@@ -3244,7 +3329,7 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
                 if cid and op == "UPDATE" and rtype in ("CAMPAIGN", "CAMPAIGN_BUDGET") and changed_at:
                     if cid not in ch_index or changed_at > ch_index[cid]:
                         ch_index[cid] = changed_at
-    except Exception:
+    except (OSError, SystemExit):
         pass  # change_history is informational; don't block recommend if unavailable
 
     today_str = today().isoformat()
@@ -5913,7 +5998,6 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         die(f"failed to load Google Ads client: {exc}")
 
     ga_svc = client.get_service("GoogleAdsService")
-    ad_svc = client.get_service("AdService")
     actionable = [
         (i, c) for i, c in enumerate(changes, 1)
         if c.get("action") in ("replace", "pause")
@@ -6004,7 +6088,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
             validation_errors.append(f"asset {change.get('asset_id', '')}: proposed text is unchanged")
         changes_by_ad[ad_id].append((index, change))
 
-    operations = []
+    ad_operations = []
     results = []
     for ad_id, ad_changes in changes_by_ad.items():
         target = rows_by_ad.get(ad_id)
@@ -6062,37 +6146,55 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         mask = FieldMask()
         mask.paths.extend(sorted(updated_fields))
         operation.update_mask.CopyFrom(mask)
-        operations.append(operation)
+        ad_operations.append(operation)
         results.extend(ad_results)
 
     if validation_errors:
         for error in validation_errors:
             print(f"  ERROR: {error}")
         die("creative copy validation failed — no changes were applied")
-    if not operations:
+    if not ad_operations:
         die("creative copy validation produced no operations — no changes were applied")
 
     def mutation_error(exc: Exception) -> str:
         if isinstance(exc, GoogleAdsException):
-            return "; ".join(error.message for error in exc.failure.errors)
+            messages = []
+            for error in exc.failure.errors:
+                detail = str(error.message)
+                error_code = str(getattr(error, "error_code", "") or "").strip()
+                location = str(getattr(error, "location", "") or "").strip()
+                if error_code:
+                    detail += f" [code={error_code}]"
+                if location:
+                    detail += f" [location={location}]"
+                messages.append(detail)
+            request_id = str(getattr(exc, "request_id", "") or "").strip()
+            if request_id:
+                messages.append(f"request_id={request_id}")
+            return "; ".join(messages)
         return str(exc)
 
+    mutate_operations = []
+    for ad_operation in ad_operations:
+        mutate_operation = client.get_type("MutateOperation")
+        mutate_operation.ad_operation = ad_operation
+        mutate_operations.append(mutate_operation)
+
+    def mutate_request(*, validate_only: bool):
+        request = client.get_type("MutateGoogleAdsRequest")
+        request.customer_id = customer_id
+        request.mutate_operations.extend(mutate_operations)
+        request.partial_failure = False
+        request.validate_only = validate_only
+        return request
+
     try:
-        ad_svc.mutate_ads(
-            customer_id=customer_id,
-            operations=operations,
-            partial_failure=False,
-            validate_only=True,
-        )
+        ga_svc.mutate(request=mutate_request(validate_only=True))
     except Exception as exc:
         die(f"creative copy validation failed — no changes were applied: {mutation_error(exc)}")
 
     try:
-        ad_svc.mutate_ads(
-            customer_id=customer_id,
-            operations=operations,
-            partial_failure=False,
-        )
+        ga_svc.mutate(request=mutate_request(validate_only=False))
     except Exception as exc:
         die(f"creative copy mutation failed atomically — plan unchanged: {mutation_error(exc)}")
 
@@ -7922,8 +8024,8 @@ def build_parser() -> argparse.ArgumentParser:
     cca_parser.set_defaults(func=creative_copy_apply)
 
     bb_rec_parser = sub.add_parser("bid-budget-recommend", help="generate bid/budget recommendations from weekly trend")
-    bb_rec_parser.add_argument("--trend", help="explicit campaign-trend processed CSV (default: newest in data/processed/campaign-trend/)")
-    bb_rec_parser.add_argument("--bid-budget", help="explicit bid_budget_inputs raw CSV (default: newest in garf/outputs/raw/bid_budget_inputs/)")
+    bb_rec_parser.add_argument("--trend", help="explicit campaign-trend CSV (must match the selected account's exact current W0 window)")
+    bb_rec_parser.add_argument("--bid-budget", help="explicit bid_budget_inputs raw CSV (default: newest for the selected account)")
     bb_rec_parser.add_argument("--output", help="write recommendation CSV to this path")
     bb_rec_parser.add_argument("--yaml-output", help="write mutation plan YAML to this path")
     bb_rec_parser.add_argument("--goal", choices=["installs", "in_app_conversions"], help="override primary goal from profile")

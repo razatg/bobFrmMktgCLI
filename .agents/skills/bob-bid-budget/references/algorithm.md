@@ -58,16 +58,17 @@ new_daily_budget = current_daily_budget × (1 ± pct / 100)
 ## CLI Command
 
 ```bash
-# Generate recommendations (reads newest campaign-trend and bid_budget_inputs files)
-python3 lib/datapull.py bid-budget-recommend [--dry-run]
+# Generate recommendations from the exact current W0 campaign trend and
+# the selected account's newest bid_budget_inputs file.
+./bob bid-budget-recommend
 
 # Override inputs explicitly
-python3 lib/datapull.py bid-budget-recommend \
+./bob bid-budget-recommend \
   --trend data/processed/campaign-trend/<file>.csv \
   --bid-budget garf/outputs/raw/bid_budget_inputs/<file>.csv
 
 # Override profile defaults at runtime
-python3 lib/datapull.py bid-budget-recommend --cac-ceiling 150 --change-pct 15
+./bob bid-budget-recommend --cac-ceiling 150 --change-pct 15
 ```
 
 ## Output

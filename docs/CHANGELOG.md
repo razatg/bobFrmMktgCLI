@@ -37,3 +37,10 @@
 - Merged all replacements for the same ad into one update and sent all ad updates in one atomic batch.
 - Added complete local and Google validation before mutation, with partial failure disabled.
 - Marked plans applied only after confirmed success and preserved the original plan on validation or mutation failure.
+
+### Live follow-up corrections
+
+- Made bid/budget recommendation consume the exact account-scoped W0 trend file instead of selecting an overlapping stale file by start date.
+- Scoped default bid/budget input selection to the active account and added fail-closed trend date/schema validation.
+- Moved creative validation and atomic application to explicit `GoogleAdsService` mutate requests, which support `validate_only` and `partial_failure` on the request object.
+- Tightened the bid and creative workflows to use manifest-based coverage checks and complete customer review CSV fields.

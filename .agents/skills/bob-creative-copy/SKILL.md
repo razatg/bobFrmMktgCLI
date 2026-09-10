@@ -24,7 +24,7 @@ YAML, JSON, and batch TXT files are internal working files: never link or paste 
 
 ## Operating Rules
 
-- **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, read `logs/pull-log.jsonl` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
+- **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, use `data-manifest` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - **Never call `creative-copy-apply` without explicit user approval** at the approval table. The command is also hard-blocked for Bob users with `READ` access.
 - Never generate copy suggestions yourself inline. The subagent in Step 2 does this — always.
 - All creative-copy artefacts are account-scoped. First identify the active account's customer ID with `./bob list-accounts`, remove dashes, and use `wiki/<customer_id>/action-items/` for every plan, batch, suggestion, and final artefact path. Never use the flat `wiki/action-items/` directory.
@@ -32,8 +32,9 @@ YAML, JSON, and batch TXT files are internal working files: never link or paste 
 ## Step 1 — Generate the candidate list
 
 ```bash
-# Check processed creative data exists
-ls data/processed/creative/
+# Check the selected account's creative coverage first
+./bob data-manifest --account CUSTOMER_ID --query creative_headline_period --from DATE --to DATE
+./bob data-manifest --account CUSTOMER_ID --query creative_description_period --from DATE --to DATE
 
 # If missing or stale, pull only text assets in two separate, server-filtered
 # requests. The account profile supplies the lookback (default 15 days) and
@@ -54,6 +55,10 @@ ls data/processed/creative/
 ```
 
 If `suggest-creative-copy` outputs "0 assets" there are no LOW-action TEXT assets — tell the user and stop.
+
+When the customer requests the complete review as CSV, every row must include campaign and ad-group
+identity, field type, current copy, proposed copy, reason for change, and the supporting performance
+metric. Do not produce a proposal-only CSV that omits the current copy or evidence.
 
 For a request for all creative/assets, run the four asset types sequentially in this order:
 `creative_headline_period`, `creative_description_period`, `creative_image_period`,
