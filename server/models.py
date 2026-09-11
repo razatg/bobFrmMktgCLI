@@ -51,6 +51,14 @@ class Store:
     def all(self, sql, args=()): return self.db.execute(sql, args).fetchall()
     def run(self, sql, args=()):
         cur = self.db.execute(sql, args); self.db.commit(); return cur
+    def thread_handoff_override(self):
+        row = self.one('SELECT thread_handoff_input_tokens FROM runtime_settings WHERE singleton=1')
+        return int(row['thread_handoff_input_tokens']) if row else None
+    def set_thread_handoff_override(self, value):
+        self.run('''INSERT INTO runtime_settings (singleton,thread_handoff_input_tokens,updated_at)
+          VALUES (1,?,?) ON CONFLICT(singleton) DO UPDATE SET
+          thread_handoff_input_tokens=excluded.thread_handoff_input_tokens,updated_at=excluded.updated_at''',
+          (int(value), now()))
     def create_session(self, user_id, hours=24):
         sid, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         self.run('INSERT INTO sessions VALUES (?,?,?,?,?,NULL)', (sid,user_id,csrf,(datetime.now(timezone.utc)+timedelta(hours=hours)).isoformat(),now()))

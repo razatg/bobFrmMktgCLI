@@ -1146,13 +1146,24 @@ class TestCreativeCopyApply(unittest.TestCase):
         def CopyFrom(self, mask):
             self.paths = list(mask.paths)
 
+    class FakeGoogleAdsFailure:
+        def __init__(self, errors=None):
+            self.errors = errors or []
+
+        @classmethod
+        def deserialize(cls, value):
+            return value
+
     class FakeGoogleAdsService:
-        def __init__(self, rows, fail_validation=False, fail_actual=False):
+        def __init__(self, rows, fail_validation=False, fail_actual=False,
+                     validation_error_indexes=None, actual_error_indexes=None):
             self.rows = rows
             self.queries = []
             self.mutate_calls = []
             self.fail_validation = fail_validation
             self.fail_actual = fail_actual
+            self.validation_error_indexes = set(validation_error_indexes or [])
+            self.actual_error_indexes = set(actual_error_indexes or [])
 
         def search(self, customer_id, query):
             self.queries.append(query)
@@ -1163,13 +1174,29 @@ class TestCreativeCopyApply(unittest.TestCase):
             if self.fail_validation and request.validate_only:
                 raise RuntimeError("validation rejected")
             if self.fail_actual and not request.validate_only:
-                raise RuntimeError("atomic mutation rejected")
-            return types.SimpleNamespace(mutate_operation_responses=[])
+                raise RuntimeError("mutation response unavailable")
+            indexes = self.validation_error_indexes if request.validate_only else self.actual_error_indexes
+            errors = [types.SimpleNamespace(
+                message=f"operation {index} rejected",
+                error_code="test_error: REJECTED",
+                location=types.SimpleNamespace(field_path_elements=[
+                    types.SimpleNamespace(field_name="mutate_operations", index=index)
+                ]),
+            ) for index in sorted(indexes)]
+            failure = TestCreativeCopyApply.FakeGoogleAdsFailure(errors)
+            status = types.SimpleNamespace(
+                code=3 if errors else 0,
+                details=[types.SimpleNamespace(value=failure)] if errors else [],
+            )
+            return types.SimpleNamespace(mutate_operation_responses=[], partial_failure_error=status)
 
     class FakeClient:
-        def __init__(self, rows, fail_validation=False, fail_actual=False):
+        def __init__(self, rows, fail_validation=False, fail_actual=False,
+                     validation_error_indexes=None, actual_error_indexes=None):
             self.google_ads_service = TestCreativeCopyApply.FakeGoogleAdsService(
-                rows, fail_validation=fail_validation, fail_actual=fail_actual
+                rows, fail_validation=fail_validation, fail_actual=fail_actual,
+                validation_error_indexes=validation_error_indexes,
+                actual_error_indexes=actual_error_indexes,
             )
 
         def get_service(self, name):
@@ -1198,6 +1225,8 @@ class TestCreativeCopyApply(unittest.TestCase):
                     customer_id="", mutate_operations=TestCreativeCopyApply.RepeatedAssets(),
                     partial_failure=None, validate_only=None,
                 )
+            if name == "GoogleAdsFailure":
+                return TestCreativeCopyApply.FakeGoogleAdsFailure()
             raise AssertionError(f"unexpected protobuf type {name}")
 
     @staticmethod
@@ -1245,7 +1274,8 @@ class TestCreativeCopyApply(unittest.TestCase):
             "google.ads.googleads.errors": errors_module,
         }
 
-    def _run(self, plan, suggestions, rows, fail_validation=False, fail_actual=False):
+    def _run(self, plan, suggestions, rows, fail_validation=False, fail_actual=False,
+             validation_error_indexes=None, actual_error_indexes=None):
         import yaml
 
         temp = tempfile.TemporaryDirectory()
@@ -1253,7 +1283,11 @@ class TestCreativeCopyApply(unittest.TestCase):
         plan_path = Path(temp.name) / "creative-plan.yaml"
         plan_path.write_text(yaml.safe_dump(plan, sort_keys=False))
         original = plan_path.read_bytes()
-        client = self.FakeClient(rows, fail_validation=fail_validation, fail_actual=fail_actual)
+        client = self.FakeClient(
+            rows, fail_validation=fail_validation, fail_actual=fail_actual,
+            validation_error_indexes=validation_error_indexes,
+            actual_error_indexes=actual_error_indexes,
+        )
         args = argparse.Namespace(plan=str(plan_path), suggestions=json.dumps(suggestions))
         error = None
         try:
@@ -1302,19 +1336,19 @@ class TestCreativeCopyApply(unittest.TestCase):
         request = client.get_type("MutateGoogleAdsRequest")
         request.customer_id = "1234567890"
         request.mutate_operations.append(mutate_operation)
-        request.partial_failure = False
+        request.partial_failure = True
         request.validate_only = True
 
         self.assertEqual(request.customer_id, "1234567890")
         self.assertTrue(request.validate_only)
-        self.assertFalse(request.partial_failure)
+        self.assertTrue(request.partial_failure)
         self.assertEqual(len(request.mutate_operations), 1)
         self.assertEqual(
             request.mutate_operations[0].ad_operation.update.resource_name,
             "customers/1234567890/ads/200",
         )
 
-    def test_multiple_ads_are_updated_once_each_in_one_atomic_batch(self):
+    def test_multiple_ads_are_updated_once_each_in_one_partial_failure_batch(self):
         import yaml
 
         changes = [
@@ -1340,9 +1374,9 @@ class TestCreativeCopyApply(unittest.TestCase):
         self.assertEqual(len(client.google_ads_service.mutate_calls), 2)
         validation, mutation = client.google_ads_service.mutate_calls
         self.assertTrue(validation.validate_only)
-        self.assertFalse(validation.partial_failure)
+        self.assertTrue(validation.partial_failure)
         self.assertFalse(mutation.validate_only)
-        self.assertFalse(mutation.partial_failure)
+        self.assertTrue(mutation.partial_failure)
         self.assertEqual(len(mutation.mutate_operations), 2)
         by_resource = {
             operation.ad_operation.update.resource_name: operation.ad_operation
@@ -1353,7 +1387,109 @@ class TestCreativeCopyApply(unittest.TestCase):
         self.assertEqual([asset.text for asset in target.update.app_ad.descriptions], ["New description"])
         saved = yaml.safe_load(plan_path.read_text())
         self.assertTrue(saved["applied"])
+        self.assertEqual(saved["apply_status"], "applied")
         self.assertEqual(len(saved["apply_results"]), 3)
+
+    def test_google_validation_failure_holds_back_only_affected_ad(self):
+        import yaml
+
+        changes = [
+            self._change(1, 10, 200, 501, "HEADLINE", "Old one", "New one"),
+            self._change(2, 20, 300, 502, "HEADLINE", "Old two", "New two"),
+            self._change(3, 30, 400, 503, "HEADLINE", "Old three", "New three"),
+        ]
+        rows = [
+            self._row(10, 200, ["Old one"], ["Description one"]),
+            self._row(20, 300, ["Old two"], ["Description two"]),
+            self._row(30, 400, ["Old three"], ["Description three"]),
+        ]
+        suggestions = [{"id": index, "text": change["suggested_text"]}
+                       for index, change in enumerate(changes, 1)]
+        plan = {"customer_id":"1234567890","changes":changes,"applied":False,"applied_at":None}
+        plan_path, _, client, error = self._run(
+            plan, suggestions, rows, validation_error_indexes={1}
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(client.google_ads_service.mutate_calls[1].mutate_operations), 2)
+        saved = yaml.safe_load(plan_path.read_text())
+        self.assertFalse(saved["applied"])
+        self.assertEqual(saved["apply_status"], "partial")
+        self.assertEqual([change["apply_status"] for change in saved["changes"]],
+                         ["applied", "failed", "applied"])
+        self.assertIn("operation 1 rejected", saved["changes"][1]["apply_error"])
+
+    def test_google_apply_failure_marks_only_failed_operation(self):
+        import yaml
+
+        changes = [
+            self._change(1,10,200,501,"HEADLINE","Old one","New one"),
+            self._change(2,20,300,502,"HEADLINE","Old two","New two"),
+        ]
+        rows = [
+            self._row(10,200,["Old one"],["Description one"]),
+            self._row(20,300,["Old two"],["Description two"]),
+        ]
+        plan = {"customer_id":"1234567890","changes":changes,"applied":False}
+        plan_path, _, _, error = self._run(
+            plan, [{"id":1,"text":"New one"},{"id":2,"text":"New two"}], rows,
+            actual_error_indexes={0},
+        )
+
+        self.assertIsNone(error)
+        saved = yaml.safe_load(plan_path.read_text())
+        self.assertEqual([change["apply_status"] for change in saved["changes"]],
+                         ["failed", "applied"])
+        self.assertIn("operation 0 rejected", saved["changes"][0]["apply_error"])
+
+    def test_retry_accepts_only_failed_change_and_keeps_prior_successes(self):
+        import yaml
+
+        changes = [
+            {**self._change(1,10,200,501,"HEADLINE","Old one","New one"),
+             "apply_status":"applied","applied_at":"2026-09-10T00:00:00"},
+            {**self._change(2,20,300,502,"HEADLINE","Old two","New two"),
+             "apply_status":"failed","apply_error":"policy"},
+        ]
+        prior = {"change_index":1,"campaign":"Generic App Campaign","asset_id":"501",
+                 "field_type":"HEADLINE","ad_id":"200","status":"replaced","suggested_text":"New one"}
+        plan = {"customer_id":"1234567890","changes":changes,"applied":False,
+                "apply_status":"partial","apply_results":[prior]}
+        rows = [self._row(20,300,["Old two"],["Description two"])]
+        plan_path, _, client, error = self._run(
+            plan, [{"id":2,"text":"Revised two"}], rows
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(client.google_ads_service.mutate_calls[1].mutate_operations), 1)
+        saved = yaml.safe_load(plan_path.read_text())
+        self.assertTrue(saved["applied"])
+        self.assertEqual([change["apply_status"] for change in saved["changes"]],
+                         ["applied", "applied"])
+        self.assertEqual([result["change_index"] for result in saved["apply_results"]], [1, 2])
+
+    def test_duplicate_text_holds_back_one_ad_while_another_applies(self):
+        import yaml
+
+        changes = [
+            self._change(1,10,200,501,"HEADLINE","Old one","Keep"),
+            self._change(2,20,300,502,"HEADLINE","Old two","New two"),
+        ]
+        rows = [
+            self._row(10,200,["Old one","Keep"],["Description one"]),
+            self._row(20,300,["Old two"],["Description two"]),
+        ]
+        plan = {"customer_id":"1234567890","changes":changes,"applied":False}
+        plan_path, _, client, error = self._run(
+            plan, [{"id":1,"text":"Keep"},{"id":2,"text":"New two"}], rows
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(len(client.google_ads_service.mutate_calls[0].mutate_operations), 1)
+        saved = yaml.safe_load(plan_path.read_text())
+        self.assertEqual([change["apply_status"] for change in saved["changes"]],
+                         ["failed", "applied"])
+        self.assertIn("duplicate text", saved["changes"][0]["apply_error"])
 
     def test_local_validation_failure_preserves_plan_and_sends_nothing(self):
         change = self._change(1, 10, 200, 501, "HEADLINE", "Missing headline", "New headline")
@@ -1364,7 +1500,7 @@ class TestCreativeCopyApply(unittest.TestCase):
         self.assertEqual(plan_path.read_bytes(), original)
         self.assertEqual(client.google_ads_service.mutate_calls, [])
 
-    def test_atomic_mutation_failure_preserves_plan(self):
+    def test_missing_mutation_response_preserves_plan(self):
         change = self._change(1, 10, 200, 501, "HEADLINE", "Old headline", "New headline")
         plan = {"customer_id": "1234567890", "changes": [change], "applied": False, "applied_at": None}
         rows = [self._row(10, 200, ["Old headline"], ["Description"])]

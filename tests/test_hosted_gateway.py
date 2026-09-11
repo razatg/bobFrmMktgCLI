@@ -22,6 +22,7 @@ class FakeRunner:
             'workspace': str(workspace),
             'environment': dict(policy.environment or {}),
         })
+        await emit({'type':'thread.started','thread_id':session_id or 'thread-one'})
         await emit({'type':'command','message':'fake bob command'})
         return (session_id or 'thread-one', f'Bob received: {user_prompt}')
 
@@ -64,6 +65,7 @@ class UsageRunner(FakeRunner):
         self.calls.append({'backend':backend,'session_id':session_id,'prompt':prompt,
                            'workspace':str(workspace),'environment':dict(policy.environment or {})})
         cumulative = 1100 if session_id else 600
+        await emit({'type':'thread.started','thread_id':session_id or 'usage-thread'})
         await emit({'type':'turn.completed','usage':{
             'input_tokens':cumulative,'cached_input_tokens':cumulative // 2,'output_tokens':100,
         },'large_ignored_field':'x' * 100_000})
@@ -149,9 +151,17 @@ class GatewayTests(unittest.TestCase):
 
     def test_admin_observability_is_lightweight_and_reads_history(self):
         csrf=self.bootstrap()
-        live=self.client.get('/api/admin/observability',headers={'X-CSRF-Token':csrf})
+        with patch.dict(os.environ, {'BOB_THREAD_HANDOFF_INPUT_TOKENS':'5000000'}):
+            live=self.client.get('/api/admin/observability',headers={'X-CSRF-Token':csrf})
         self.assertEqual(live.status_code,200,live.text)
         self.assertEqual(live.json()['active_job'],None)
+        self.assertEqual(live.json()['thread_handoff'],{'input_tokens':5000000,'source':'environment'})
+        updated=self.client.patch('/api/admin/runtime-settings',headers={'X-CSRF-Token':csrf},json={'thread_handoff_input_tokens':7500000})
+        self.assertEqual(updated.status_code,200,updated.text)
+        self.assertEqual(updated.json(),{'input_tokens':7500000,'source':'admin'})
+        self.assertEqual(self.app.state.store.thread_handoff_override(),7500000)
+        rejected=self.client.patch('/api/admin/runtime-settings',headers={'X-CSRF-Token':csrf},json={'thread_handoff_input_tokens':-1})
+        self.assertEqual(rejected.status_code,400,rejected.text)
         from server import app as app_module
         with patch.object(app_module,'runtime_log_path',return_value=Path(self.workspace)/'logs'/'bob-runtime.jsonl'):
             log=Path(self.workspace)/'logs'/'bob-runtime.jsonl'; log.parent.mkdir(parents=True,exist_ok=True)
@@ -195,7 +205,8 @@ class GatewayTests(unittest.TestCase):
 
     def test_token_threshold_retires_thread_and_next_job_gets_bounded_handoff(self):
         csrf=self.bootstrap(); self.app.state.runner=UsageRunner()
-        with patch.dict(os.environ, {'BOB_THREAD_HANDOFF_INPUT_TOKENS':'1000'}):
+        self.app.state.store.set_thread_handoff_override(1000)
+        with patch.dict(os.environ, {'BOB_THREAD_HANDOFF_INPUT_TOKENS':'999999999'}):
             conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
             first=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'first report'}).json()['job_id']
             import time; time.sleep(.05)
@@ -212,6 +223,9 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(second_job['input_tokens_estimate'],500)
             self.assertIsNone(retired['agent_session_id'])
             self.assertEqual(retired['thread_input_tokens_estimate'],0)
+            sessions=self.client.get('/api/admin/codex-sessions',headers={'X-CSRF-Token':csrf}).json()
+            second_session=next(item for item in sessions if item['job_id']==second)
+            self.assertEqual(second_session['agent_session_id'],'usage-thread')
 
             third=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'third report'}).json()['job_id']
             time.sleep(.05)
@@ -534,7 +548,11 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=29', html)
+        self.assertIn('/static/app.js?v=30', html)
+        self.assertIn('/api/admin/runtime-settings', js)
+        self.assertIn('Aggregate processed input tokens', js)
+        self.assertIn('cached_input_tokens_estimate', js)
+        self.assertIn('runtime_settings',Path('server/schema.sql').read_text())
         self.assertIn('artifact:wiki\\/', js)
         self.assertNotIn('originalAddWithRelativeWiki', js)
         self.assertNotIn('originalAddWithArtifactPaths', js)
@@ -581,7 +599,7 @@ class GatewayTests(unittest.TestCase):
         # the SQLite connection during teardown.
         time.sleep(.4)
 
-    def test_admin_can_inspect_codex_session_events_without_schema_changes(self):
+    def test_admin_can_inspect_each_jobs_native_session(self):
         csrf=self.bootstrap()
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
         job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'hello'}).json()['job_id']
@@ -595,7 +613,8 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(events.status_code,200,events.text)
         self.assertEqual(events.json()[0]['event_type'],'status')
         self.assertEqual(events.json()[1]['event_type'],'agent')
-        self.assertEqual(events.json()[1]['payload']['message'],'fake bob command')
+        self.assertEqual(events.json()[1]['payload']['type'],'thread.started')
+        self.assertEqual(events.json()[1]['payload']['thread_id'],'thread-one')
 
     def test_active_job_blocks_duplicate_prompt_and_is_discoverable(self):
         csrf=self.bootstrap(); self.app.state.runner=SlowRunner()

@@ -141,11 +141,21 @@ def max_concurrent_jobs():
         return max(1, int(os.getenv('BOB_MAX_CONCURRENT_JOBS', '1')))
     except ValueError:
         return 1
-def thread_handoff_input_tokens():
+DEFAULT_THREAD_HANDOFF_INPUT_TOKENS = 5_000_000
+
+def deployment_thread_handoff_input_tokens():
     try:
-        return max(0, int(os.getenv('BOB_THREAD_HANDOFF_INPUT_TOKENS', '1000000')))
+        return max(0, int(os.getenv('BOB_THREAD_HANDOFF_INPUT_TOKENS', str(DEFAULT_THREAD_HANDOFF_INPUT_TOKENS))))
     except ValueError:
-        return 1000000
+        return DEFAULT_THREAD_HANDOFF_INPUT_TOKENS
+
+def thread_handoff_settings(store):
+    override=store.thread_handoff_override(); fallback=deployment_thread_handoff_input_tokens()
+    return {'input_tokens':override if override is not None else fallback,
+            'source':'admin' if override is not None else 'environment'}
+
+def thread_handoff_input_tokens(store):
+    return thread_handoff_settings(store)['input_tokens']
 
 def previous_thread_usage(store, conversation_id, job_id):
     """Return the latest raw cumulative counters stored for this native thread."""
@@ -223,6 +233,7 @@ class GoogleConfigIn(BaseModel):
     base_url: str | None = None
     redirect_uri: str | None = None
 class AccountPermissionIn(BaseModel): permission: str
+class RuntimeSettingsIn(BaseModel): thread_handoff_input_tokens: int
 
 def account_settings(body):
     goal = body.primary_goal if body.primary_goal in {'installs', 'in_app_conversions'} else None
@@ -627,7 +638,10 @@ async def admin_codex_sessions(request: Request):
     if user['role']!='admin': raise HTTPException(403,'admin required')
     rows=s.all('''SELECT j.id AS job_id,j.conversation_id,j.status,j.started_at,j.completed_at,j.error,
       j.created_at,j.input_tokens_estimate,j.cached_input_tokens_estimate,j.output_tokens_estimate,
-      c.agent_session_id,c.thread_input_tokens_estimate,c.user_id,c.client_instance_id,c.account_id,m.content AS user_prompt,
+      (SELECT json_extract(je.payload,'$.thread_id') FROM job_events je
+       WHERE je.job_id=j.id AND je.event_type='agent' AND json_extract(je.payload,'$.type')='thread.started'
+       ORDER BY je.event_id LIMIT 1) AS agent_session_id,
+      c.thread_input_tokens_estimate,c.user_id,c.client_instance_id,c.account_id,m.content AS user_prompt,
       u.email_or_identifier AS user_identifier,ci.display_name AS client_name,
       COALESCE(NULLIF(ci.codex_model,''),?) AS model,
       a.account_name,a.customer_id,
@@ -674,7 +688,18 @@ async def admin_observability(request: Request):
         state='HIGH CPU'; diagnosis=f"{largest['name']} is averaging {largest['cpu_percent']}% CPU."
     else:
         state='HEALTHY'; diagnosis='No active resource pressure detected.'
-    return {'state':state,'diagnosis':diagnosis,'memory':memory|{'percent':percent},'active_job':dict(active) if active else None,'largest_process':largest,'processes':processes[:8]}
+    return {'state':state,'diagnosis':diagnosis,'memory':memory|{'percent':percent},'active_job':dict(active) if active else None,'largest_process':largest,'processes':processes[:8],
+            'thread_handoff':thread_handoff_settings(s)}
+
+@app.patch('/api/admin/runtime-settings')
+async def update_runtime_settings(body: RuntimeSettingsIn, request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    if body.thread_handoff_input_tokens < 0: raise HTTPException(400,'thread handoff input tokens must be zero or greater')
+    s.set_thread_handoff_override(body.thread_handoff_input_tokens)
+    settings=thread_handoff_settings(s)
+    runtime_log('thread_handoff_threshold_updated',user_id=user['id'],threshold=settings['input_tokens'])
+    return settings
 
 @app.get('/api/admin/observability/history')
 async def admin_observability_history(request: Request):
@@ -1202,7 +1227,7 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 )
                 estimates = estimate_usage(reported_usage, prior_usage)
                 lifetime = int(row.get('thread_input_tokens_estimate') or 0) + (estimates['input_tokens'] if estimates else 0)
-                threshold = thread_handoff_input_tokens()
+                threshold = thread_handoff_input_tokens(s)
                 handoff = bool(threshold and estimates and lifetime >= threshold)
                 next_sid = None if handoff else sid
                 next_lifetime = 0 if handoff else lifetime

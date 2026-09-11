@@ -117,7 +117,15 @@ Keep the combined JSON from Step 2 internal. Give the user a concise change summ
 
 The CLI prints a per-asset approval table. Wait for explicit user confirmation ("yes", "apply", "go ahead") before proceeding. The user may type `edit N` to revise individual suggestions at the prompt.
 
-Never re-run `creative-copy-apply` on a plan that has `applied: true`.
+Creative apply is operation-level partial-safe: valid ads go live while ads rejected by local or
+Google validation remain pending. Report the exact applied and failed counts and the reason for each
+failed proposal. Multiple changes merged into one ad succeed or fail together. The plan records
+`apply_status` on every change; never resend a change already marked `applied`.
+
+If a plan is `partial`, generate revised suggestions only for its failed changes, preserving their
+original numeric IDs, then call `creative-copy-apply` with only those revised IDs. The approval table
+will contain only unapplied changes. Never re-run `creative-copy-apply` on a plan that has
+`applied: true`.
 
 ## Wiki / Artefact
 
@@ -129,7 +137,9 @@ rm wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-batch-*.txt
 rm wiki/<customer_id>/action-items/creative-copy-YYYY-MM-DD-suggestions.json
 ```
 
-2. **Update `wiki/<customer_id>/Index.md`** under `## Action Items` without asking. Link a customer-facing CSV only if the customer requested the complete changes; otherwise use plain text and do not link the internal YAML:
+2. **Update `wiki/<customer_id>/Index.md`** under `## Action Items` without asking. For a partial
+apply, state the live and pending counts and do not claim completion. Link a customer-facing CSV only
+if the customer requested the complete changes; otherwise use plain text and do not link the internal YAML:
 ```
 - Creative Copy — YYYY-MM-DD — N new assets live, M paused — applied YYYY-MM-DD
 ```

@@ -95,3 +95,8 @@ CREATE TABLE IF NOT EXISTS job_events (
   created_at TEXT NOT NULL, PRIMARY KEY(job_id, event_id), FOREIGN KEY(job_id) REFERENCES jobs(id)
 );
 CREATE INDEX IF NOT EXISTS idx_job_events ON job_events(job_id, event_id);
+CREATE TABLE IF NOT EXISTS runtime_settings (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  thread_handoff_input_tokens INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
