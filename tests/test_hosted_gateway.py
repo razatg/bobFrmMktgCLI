@@ -1,6 +1,8 @@
 """Phase 1 gateway tests; the agent process is replaced with a deterministic fake."""
 import os
 import json
+import subprocess
+import sys
 import tempfile
 from urllib.parse import parse_qs, urlparse
 import unittest
@@ -8,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parents[1]
 
 class FakeRunner:
     def __init__(self):
@@ -284,11 +288,22 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(Exception): safe_wiki_path('../outside')
 
     def test_bob_state_paths_follow_persistent_client_root(self):
-        import lib.datapull as datapull
-        self.assertEqual(datapull.STATE_ROOT, Path(self.workspace).resolve())
-        self.assertEqual(datapull.ACCOUNTS_DIR, Path(self.workspace).resolve() / '.bob' / 'accounts')
-        self.assertEqual(datapull.PROCESSED_DIR, Path(self.workspace).resolve() / 'data' / 'processed')
-        self.assertEqual(datapull.account_wiki_dir('123-456-7890'), Path(self.workspace).resolve() / 'wiki' / '1234567890')
+        script = (
+            "from lib.bob.platform.core import STATE_ROOT, ACCOUNTS_DIR, PROCESSED_DIR, account_wiki_dir; "
+            "print(STATE_ROOT); print(ACCOUNTS_DIR); print(PROCESSED_DIR); "
+            "print(account_wiki_dir('123-456-7890'))"
+        )
+        env = dict(os.environ, BOB_STATE_ROOT=self.workspace)
+        paths = subprocess.check_output(
+            [sys.executable, "-c", script], cwd=ROOT, env=env, text=True
+        ).splitlines()
+        workspace = Path(self.workspace).resolve()
+        self.assertEqual(paths, [
+            str(workspace),
+            str(workspace / '.bob' / 'accounts'),
+            str(workspace / 'data' / 'processed'),
+            str(workspace / 'wiki' / '1234567890'),
+        ])
 
     def test_codex_prompt_uses_conversation_account_not_typed_account(self):
         from server.app import prompt_for_selected_account

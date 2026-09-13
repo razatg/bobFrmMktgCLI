@@ -32,6 +32,7 @@ from pathlib import Path
 # Import the module under test without packaging: lib/datapull.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import datapull as dp  # noqa: E402
+from lib.bob.performance import fetch as performance_fetch  # noqa: E402
 
 
 class TestMetricFormulas(unittest.TestCase):
@@ -1645,7 +1646,7 @@ class TestFetchDedupe(unittest.TestCase):
         args.from_date = "2026-08-01"
         args.to = "2026-08-30"
         calls = []
-        with mock.patch.object(dp, "_fetch_one", side_effect=lambda child: calls.append(child)):
+        with mock.patch.object(performance_fetch, "_fetch_one", side_effect=lambda child: calls.append(child)):
             dp.fetch(args)
         self.assertEqual(len(calls), 5)
         self.assertEqual(
@@ -1665,7 +1666,7 @@ class TestFetchDedupe(unittest.TestCase):
         args.from_date = "2026-08-01"
         args.to = "2026-08-30"
         calls = []
-        with mock.patch.object(dp, "_fetch_one", side_effect=lambda child: calls.append(child)):
+        with mock.patch.object(performance_fetch, "_fetch_one", side_effect=lambda child: calls.append(child)):
             dp.fetch(args)
         self.assertEqual(len(calls), 1)
         self.assertIs(calls[0], args)

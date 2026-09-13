@@ -4,9 +4,9 @@
 # Wired in per-clone with:
 #     git config core.hooksPath scripts/hooks
 #
-# Keeps lib/datapull.py's deterministic core (metric formulas, zero-denominator
-# rule, period-date math, aggregation) from regressing silently. Sub-second, so
-# it always runs. Bypass in an emergency with: git commit --no-verify
+# Keeps the extracted deterministic core and stable CLI contract (metric formulas,
+# zero-denominator rule, period-date math, aggregation, and command routing) from
+# regressing silently. Bypass in an emergency with: git commit --no-verify
 set -e
 
 # Repo root = two levels up from scripts/hooks/.
@@ -25,10 +25,10 @@ else
     PY=python3
 fi
 
-echo "pre-commit: running core smoke test..."
-if ! "$PY" "$TEST"; then
-    echo "pre-commit: core smoke test FAILED — commit aborted." >&2
-    echo "  Fix the regression, or if the change is intentional update the expected" >&2
-    echo "  values in tests/test_core.py. Bypass with: git commit --no-verify" >&2
+echo "pre-commit: running core and CLI contract tests..."
+if ! (cd "$ROOT" && "$PY" -m unittest tests.test_core tests.test_cli_contract tests.test_platform); then
+    echo "pre-commit: fast code gate FAILED — commit aborted." >&2
+    echo "  Fix the regression, or deliberately update the corresponding contract test." >&2
+    echo "  Bypass in an emergency with: git commit --no-verify" >&2
     exit 1
 fi

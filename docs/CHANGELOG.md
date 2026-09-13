@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-09-12
+
+### CLI architecture refactor
+
+- Reduced `lib/datapull.py` from the multi-domain implementation to an 80-line executable
+  compatibility facade.
+- Moved the unchanged parser, command map, and dispatcher into `lib/bob/cli.py` while preserving
+  every existing `./bob` command, flag, default, help route, and launcher.
+- Extracted shared runtime, configuration, dates, metrics, CSV presentation, data discovery, and
+  Google Ads connection behavior into `lib/bob/platform/`.
+- Extracted performance fetching, aggregation, validation, comparisons, creative slicing, and the
+  authoritative data manifest into `lib/bob/performance/`.
+- Isolated bid/budget, creative-copy, static-banner, account-management, self-improvement, sync,
+  and snapshot workflows into their owning packages or modules.
+- Preserved existing processed-data layouts, YAML plan formats, approval behavior, partial-failure
+  handling, and failed-only retry behavior; no database or user-data migration was introduced.
+
+### Refactor safety gates
+
+- Added a frozen CLI contract test covering command registration, representative arguments,
+  direct script execution, and launcher compatibility.
+- Added direct platform tests for date, metric, and error primitives.
+- Updated repository and hosted-path tests to inspect the extracted owning modules.
+- Expanded the fast pre-commit gate to cover deterministic core, platform, and CLI contracts.
+- Verified all extracted modules compile, the fast 83-test gate passes, and the complete 135-test
+  regression suite passes.
+- Recorded the incremental, anti-bloat object-model guidance in `docs/OOP.md`; an OOP conversion is
+  not required before deployment.
+
 ## 2026-09-10
 
 ### Campaign decisions and dates

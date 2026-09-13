@@ -10,10 +10,10 @@ class RepositoryHygieneTests(unittest.TestCase):
     def test_container_build_generates_bob_launcher(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text()
-        datapull = (ROOT / "lib" / "datapull.py").read_text()
+        platform_core = (ROOT / "lib" / "bob" / "platform" / "core.py").read_text()
         self.assertIn("_write_bob_launcher", dockerfile)
         self.assertIn('if [ ! -x "$APP_ROOT/bob" ]', entrypoint)
-        self.assertIn('while [ -h "$SOURCE" ]', datapull)
+        self.assertIn('while [ -h "$SOURCE" ]', platform_core)
 
     def test_runner_passes_only_bob_runtime_environment_to_codex_shell(self):
         runner = (ROOT / "server" / "agent_runner.py").read_text()
