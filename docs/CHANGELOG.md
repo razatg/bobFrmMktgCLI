@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-13
+
+### Account-bound hosted conversations
+
+- Fixed the hosted account selector so it loads the account attached to the active conversation,
+  rather than showing a default account while Bob works in a different conversation.
+- Switching accounts now resumes that account’s latest conversation or creates its first one; it
+  never rewrites another account’s conversation, native Codex session, workspace, messages, or
+  artifacts.
+- Prevented an account switch while the loaded conversation has a queued or running job.
+- Added hosted regression coverage for durable account switching, account-specific runtime
+  isolation, and the active-job guard; included those checks in the practical pre-commit gate.
+
 ## 2026-09-12
 
 ### CLI architecture refactor

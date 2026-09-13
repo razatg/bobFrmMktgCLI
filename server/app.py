@@ -1111,15 +1111,22 @@ async def conversation(request, cid):
 @app.get('/api/conversations')
 async def conversations(request: Request):
     user=await current_user(request); rows=request.app.state.store.all('SELECT * FROM conversations WHERE user_id=? ORDER BY last_activity_at DESC',(user['id'],)); return [dict(x) for x in rows]
+
+def create_account_conversation(store, user, client_instance_id, account_id):
+    """Create the durable, account-bound shell for one user's Bob conversation."""
+    cid=new_id(); t=now()
+    store.run('''INSERT INTO conversations
+      (id,user_id,client_instance_id,account_id,agent_backend,agent_session_id,workspace_id,title,created_at,last_activity_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)''',(cid,user['id'],client_instance_id,account_id,'codex',None,cid,'New conversation',t,t))
+    return {'id':cid,'account_id':account_id}
+
 @app.post('/api/conversations')
 async def create_conversation(request: Request):
     user=await csrf(request); s=request.app.state.store; m=membership(s,user)
     if not m: raise HTTPException(403,'no client access')
     accounts = permitted_accounts(s, user, m['client_instance_id'])
     account_id = accounts[0]['id'] if accounts else None
-    cid=new_id(); t=now(); s.run('''INSERT INTO conversations
-      (id,user_id,client_instance_id,account_id,agent_backend,agent_session_id,workspace_id,title,created_at,last_activity_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)''',(cid,user['id'],m['client_instance_id'],account_id,'codex',None,cid,'New conversation',t,t)); return {'id':cid,'account_id':account_id}
+    return create_account_conversation(s, user, m['client_instance_id'], account_id)
 
 @app.get('/api/accounts')
 async def user_accounts(request: Request):
@@ -1132,8 +1139,16 @@ async def select_conversation_account(cid: str, body: AccountSelectIn, request: 
     user,row=await conversation(request,cid); s=request.app.state.store
     account=next((account for account in permitted_accounts(s, user, row['client_instance_id']) if account['id']==body.account_id), None)
     if not account: raise HTTPException(404,'account not found')
-    s.run('UPDATE conversations SET account_id=?,last_activity_at=? WHERE id=?',(body.account_id,now(),cid))
-    return {'ok':True,'account_id':body.account_id}
+    active=s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
+    if active:
+        raise HTTPException(409,'Bob is still working on this conversation. Stop or wait for the current job before changing accounts.')
+    target=s.one('''SELECT id FROM conversations
+      WHERE user_id=? AND client_instance_id=? AND account_id=?
+      ORDER BY last_activity_at DESC LIMIT 1''',(user['id'],row['client_instance_id'],body.account_id))
+    created=target is None
+    if created:
+        target=create_account_conversation(s,user,row['client_instance_id'],body.account_id)
+    return {'ok':True,'account_id':body.account_id,'conversation_id':target['id'],'created':created}
 @app.get('/api/conversations/{cid}')
 async def get_conversation(cid: str, request: Request):
     _,row=await conversation(request,cid); msgs=request.app.state.store.all('SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at',(cid,)); return {'conversation':dict(row),'messages':[dict(x) for x in msgs]}

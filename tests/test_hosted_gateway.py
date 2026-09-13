@@ -595,6 +595,11 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('state.retries<=5', js)
         self.assertIn('appendActivity', js)
         self.assertIn('pagehide', js)
+        self.assertIn("'conversation_id':target['id']",Path('server/app.py').read_text())
+        self.assertIn('create_account_conversation',Path('server/app.py').read_text())
+        self.assertIn('await load(result.conversation_id)',js)
+        self.assertIn('await setupAgentPanel();await loadArtifacts()',js)
+        self.assertEqual(js.count('function setupAgentPanel('),1)
 
     def test_user_cancel_terminates_job_and_records_terminal_state(self):
         csrf=self.bootstrap(); self.app.state.runner=SlowRunner()
@@ -654,6 +659,57 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.json()['mcc_id'],'123456789')
 
+    def test_account_switch_opens_a_durable_account_conversation_without_mutating_the_source(self):
+        admin_csrf=self.bootstrap()
+        created=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':admin_csrf},json={
+            'name':'Alpha','slug':'alpha','identifier':'owner@alpha.com','password':'alpha-owner-password',
+            'accounts':[{'account_name':'Demand','customer_id':'111-111-1111'},
+                        {'account_name':'Supply','customer_id':'222-222-2222'}]})
+        self.assertEqual(created.status_code,200,created.text)
+        login=self.client.post('/auth/login',json={'identifier':'owner@alpha.com','password':'alpha-owner-password'})
+        csrf=login.json()['csrf']
+        accounts={row['account_name']:row['id'] for row in self.client.get('/api/accounts').json()}
+        source=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        self.app.state.store.run('''UPDATE conversations SET agent_session_id=?,workspace_id=?,title=? WHERE id=?''',
+                                 ('demand-thread','demand-workspace','Demand history',source))
+        self.app.state.store.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',
+                                 ('demand-message',source,'user','Keep this demand context','completed','2026-09-13T00:00:00+00:00'))
+
+        switched=self.client.post(f'/api/conversations/{source}/account',headers={'X-CSRF-Token':csrf},
+                                  json={'account_id':accounts['Supply']})
+        self.assertEqual(switched.status_code,200,switched.text)
+        target=switched.json()
+        self.assertTrue(target['created'])
+        self.assertNotEqual(target['conversation_id'],source)
+        self.assertEqual(target['account_id'],accounts['Supply'])
+        source_row=self.app.state.store.one('SELECT account_id,agent_session_id,workspace_id,title FROM conversations WHERE id=?',(source,))
+        self.assertEqual(tuple(source_row),(accounts['Demand'],'demand-thread','demand-workspace','Demand history'))
+        self.assertEqual(self.client.get(f'/api/conversations/{source}').json()['messages'][0]['content'],'Keep this demand context')
+        info=self.client.get('/api/agent-info',params={'conversation_id':target['conversation_id']})
+        self.assertEqual(info.status_code,200,info.text)
+        self.assertEqual(info.json()['account_name'],'Supply')
+        resumed=self.client.post(f"/api/conversations/{target['conversation_id']}/account",headers={'X-CSRF-Token':csrf},
+                                 json={'account_id':accounts['Demand']})
+        self.assertEqual(resumed.status_code,200,resumed.text)
+        self.assertEqual(resumed.json()['conversation_id'],source)
+        self.assertFalse(resumed.json()['created'])
+
+    def test_account_switch_is_rejected_while_the_loaded_conversation_has_a_running_job(self):
+        admin_csrf=self.bootstrap(); self.app.state.runner=SlowRunner()
+        created=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':admin_csrf},json={
+            'name':'Alpha','slug':'alpha','identifier':'owner@alpha.com','password':'alpha-owner-password',
+            'accounts':[{'account_name':'Demand','customer_id':'111-111-1111'},
+                        {'account_name':'Supply','customer_id':'222-222-2222'}]})
+        login=self.client.post('/auth/login',json={'identifier':'owner@alpha.com','password':'alpha-owner-password'})
+        csrf=login.json()['csrf']
+        accounts={row['account_name']:row['id'] for row in self.client.get('/api/accounts').json()}
+        source=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{source}/messages',headers={'X-CSRF-Token':csrf},json={'content':'slow report'})
+        self.assertEqual(job.status_code,200,job.text)
+        blocked=self.client.post(f'/api/conversations/{source}/account',headers={'X-CSRF-Token':csrf},json={'account_id':accounts['Supply']})
+        self.assertEqual(blocked.status_code,409,blocked.text)
+        import time; time.sleep(.4)
+
     def test_different_conversations_get_isolated_account_runtime(self):
         admin_csrf=self.bootstrap()
         configured=self.client.post('/api/admin/google-ads/config',headers={'X-CSRF-Token':admin_csrf},json={
@@ -673,14 +729,14 @@ class GatewayTests(unittest.TestCase):
             callback=self.client.get('/api/google-ads/oauth/callback',params={'code':'auth-code','state':state})
         self.assertEqual(callback.status_code,200,callback.text)
         one=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
-        two=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
         client_id=created.json()['client']['id']
         demand=self.app.state.store.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND account_name=?',(client_id,'Demand'))['id']
         supply=self.app.state.store.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND account_name=?',(client_id,'Supply'))['id']
-        self.client.post(f"/api/conversations/{one['id']}/account",headers={'X-CSRF-Token':csrf},json={'account_id':demand})
-        self.client.post(f"/api/conversations/{two['id']}/account",headers={'X-CSRF-Token':csrf},json={'account_id':supply})
-        job1=self.client.post(f"/api/conversations/{one['id']}/messages",headers={'X-CSRF-Token':csrf},json={'content':'hello demand'}).json()['job_id']
-        job2=self.client.post(f"/api/conversations/{two['id']}/messages",headers={'X-CSRF-Token':csrf},json={'content':'hello supply'}).json()['job_id']
+        demand_conversation=self.client.post(f"/api/conversations/{one['id']}/account",headers={'X-CSRF-Token':csrf},json={'account_id':demand}).json()['conversation_id']
+        two=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
+        supply_conversation=self.client.post(f"/api/conversations/{two['id']}/account",headers={'X-CSRF-Token':csrf},json={'account_id':supply}).json()['conversation_id']
+        job1=self.client.post(f"/api/conversations/{demand_conversation}/messages",headers={'X-CSRF-Token':csrf},json={'content':'hello demand'}).json()['job_id']
+        job2=self.client.post(f"/api/conversations/{supply_conversation}/messages",headers={'X-CSRF-Token':csrf},json={'content':'hello supply'}).json()['job_id']
         import time; time.sleep(.05)
         self.client.get(f'/api/jobs/{job1}/events')
         self.client.get(f'/api/jobs/{job2}/events')
