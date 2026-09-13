@@ -563,7 +563,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=30', html)
+        self.assertIn('/static/app.js?v=31', html)
         self.assertIn('/api/admin/runtime-settings', js)
         self.assertIn('Aggregate processed input tokens', js)
         self.assertIn('cached_input_tokens_estimate', js)
@@ -600,6 +600,15 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('await load(result.conversation_id)',js)
         self.assertIn('await setupAgentPanel();await loadArtifacts()',js)
         self.assertEqual(js.count('function setupAgentPanel('),1)
+
+    def test_browser_shell_and_app_bundle_always_revalidate(self):
+        shell=self.client.get('/')
+        bundle=self.client.get('/static/app.js?v=31')
+        self.assertEqual(shell.status_code,200,shell.text)
+        self.assertEqual(bundle.status_code,200,bundle.text)
+        self.assertIn('/static/app.js?v=31',shell.text)
+        self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
+        self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 
     def test_user_cancel_terminates_job_and_records_terminal_state(self):
         csrf=self.bootstrap(); self.app.state.runner=SlowRunner()

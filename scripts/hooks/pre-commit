@@ -29,7 +29,8 @@ echo "pre-commit: running core, CLI, platform, and account-context contract test
 if ! (cd "$ROOT" && "$PY" -m unittest tests.test_core tests.test_cli_contract tests.test_platform \
     tests.test_hosted_gateway.GatewayTests.test_account_switch_opens_a_durable_account_conversation_without_mutating_the_source \
     tests.test_hosted_gateway.GatewayTests.test_account_switch_is_rejected_while_the_loaded_conversation_has_a_running_job \
-    tests.test_hosted_gateway.GatewayTests.test_different_conversations_get_isolated_account_runtime); then
+    tests.test_hosted_gateway.GatewayTests.test_different_conversations_get_isolated_account_runtime \
+    tests.test_hosted_gateway.GatewayTests.test_browser_shell_and_app_bundle_always_revalidate); then
     echo "pre-commit: fast code gate FAILED — commit aborted." >&2
     echo "  Fix the regression, or deliberately update the corresponding contract test." >&2
     echo "  Bypass in an emergency with: git commit --no-verify" >&2

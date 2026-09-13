@@ -10,8 +10,12 @@
   never rewrites another account’s conversation, native Codex session, workspace, messages, or
   artifacts.
 - Prevented an account switch while the loaded conversation has a queued or running job.
+- Bumped the hosted JavaScript cache key and made the browser shell and application bundle
+  revalidate on every load, preventing an older UI from ignoring the account conversation returned
+  by a newer server deployment.
 - Added hosted regression coverage for durable account switching, account-specific runtime
-  isolation, and the active-job guard; included those checks in the practical pre-commit gate.
+  isolation, browser cache revalidation, and the active-job guard; included those checks in the
+  practical pre-commit gate.
 
 ## 2026-09-12
 

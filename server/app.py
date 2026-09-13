@@ -275,6 +275,13 @@ async def lifespan(app):
 app = FastAPI(title='Bob Hosted Gateway', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=str(Path(__file__).with_name('static'))), name='static')
 
+@app.middleware('http')
+async def browser_shell_cache_policy(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path in {'/', '/static/app.js'}:
+        response.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    return response
+
 def membership(store, user, client=None):
     q='SELECT * FROM client_memberships WHERE user_id=? AND status="approved"'; args=[user['id']]
     if client: q+=' AND client_instance_id=?'; args.append(client)
