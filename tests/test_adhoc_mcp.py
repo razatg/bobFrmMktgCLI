@@ -20,7 +20,8 @@ from lib.bob.performance.adhoc import (
 )
 from lib.bob.performance.adhoc_data import _fetch_failure_detail, prepare_dataset, publish_result
 from lib.bob.performance.aggregate import _agg_network_period
-from lib.bob.mcp.server import PREPARED, RESULTS, bob_analyze, bob_prepare_data, bob_publish_result
+from lib.bob.performance.exploration import materialize_sources, verify_exploration
+from lib.bob.mcp.server import PREPARED, RESULTS, bob_analyze, bob_materialize_exploration, bob_prepare_data, bob_publish_result, bob_verify_exploration
 
 
 def prepared(rows, dataset="adgroup_network_period"):
@@ -157,6 +158,28 @@ class AdhocAnalysisTests(unittest.TestCase):
             bob_publish_result(response["result_handle"], "Result", "csv", False)
         with self.assertRaisesRegex(AnalysisError, "unknown or expired"):
             bob_publish_result("not-a-result", "Result", "csv", True)
+
+    def test_wings_it_materializes_and_verifies_sandbox_result(self):
+        source = prepared(self.rows)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".wings-it"
+            with patch.dict("os.environ", {"BOB_EXPLORATION_DIR": str(root)}):
+                materialized = materialize_sources({"campaigns": source})
+                self.assertEqual(materialized["inputs"]["campaigns"], ".wings-it/inputs/campaigns.json")
+                (root / "analysis.py").write_text("# Codex sandboxed analysis\n")
+                (root / "result.json").write_text('[{"customer_id":"123","cost":50,"impressions":4000,"cpm":12.5}]')
+                outcome, sanity = verify_exploration(
+                    "Custom CPM", {"campaigns": source}, "analysis.py", "result.json", "Custom CPM check", "result",
+                )
+        self.assertEqual(sanity["status"], "passed")
+        self.assertEqual(outcome.rows[0]["cpm"], 12.5)
+
+    def test_mcp_returns_typed_analysis_and_exploration_errors(self):
+        response = bob_analyze("Bad", {"source": "missing"}, [], "source")
+        self.assertEqual(response["error"]["code"], "ANALYSIS_VALIDATION_FAILED")
+        with patch("lib.bob.mcp.server.verify_exploration", side_effect=AnalysisError("unsafe method")):
+            response = bob_verify_exploration("Custom", {}, "analysis.py", "result.json", "Custom method")
+        self.assertEqual(response["error"]["code"], "EXPLORATION_VALIDATION_FAILED")
 
 
 class AdhocDataTests(unittest.TestCase):
@@ -302,7 +325,7 @@ class MCPHandshakeTests(unittest.TestCase):
                     tools = await session.list_tools()
                     self.assertEqual({tool.name for tool in tools.tools}, {
                         "bob_resolve_dates", "bob_data_catalog", "bob_prepare_data",
-                        "bob_analyze", "bob_publish_result",
+                        "bob_analyze", "bob_materialize_exploration", "bob_verify_exploration", "bob_publish_result",
                     })
         anyio.run(exercise)
 

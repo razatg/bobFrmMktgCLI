@@ -17,6 +17,7 @@ from lib.bob.performance.adhoc import (
     run_analysis,
 )
 from lib.bob.performance.adhoc_data import prepare_dataset, publish_result
+from lib.bob.performance.exploration import materialize_sources, verify_exploration
 from lib.bob.platform.dates import resolve_period_dates
 
 
@@ -36,6 +37,15 @@ def preparation_error(code: str, message: object) -> dict[str, object]:
     """Return a bounded, path-safe preparation failure as normal MCP content."""
     clean = re.sub(r"(?:/[^\s:]+)+", "[internal path]", str(message)).strip()
     return {"ok": False, "error": {"code": code, "message": clean[:600]}}
+
+
+def _resolve_sources(sources: dict[str, str]) -> dict[str, PreparedDataset]:
+    resolved: dict[str, PreparedDataset] = {}
+    for alias, handle in sources.items():
+        if not alias.strip() or handle not in PREPARED:
+            raise AnalysisError("analysis references an unknown dataset handle")
+        resolved[alias] = PREPARED[handle]
+    return resolved
 
 
 @server.tool(name="bob_resolve_dates", structured_output=True)
@@ -95,13 +105,11 @@ def bob_analyze(
     final_table: str,
 ) -> dict[str, object]:
     """Run a validated operation graph over prepared selected-account datasets."""
-    resolved: dict[str, PreparedDataset] = {}
-    for alias, handle in sources.items():
-        if not alias.strip() or handle not in PREPARED:
-            raise AnalysisError("analysis references an unknown dataset handle")
-        resolved[alias] = PREPARED[handle]
     result_handle = f"result-{uuid.uuid4().hex}"
-    result = run_analysis(analysis_name, resolved, operations, final_table, result_handle)
+    try:
+        result = run_analysis(analysis_name, _resolve_sources(sources), operations, final_table, result_handle)
+    except AnalysisError as exc:
+        return preparation_error("ANALYSIS_VALIDATION_FAILED", exc)
     RESULTS[result_handle] = result
     return {
         "analysis_marker": {"type": "custom_analysis", "analysis_name": result.analysis_name},
@@ -111,6 +119,40 @@ def bob_analyze(
         "row_count": len(result.rows),
         "preview": list(result.rows[:MAX_PREVIEW_ROWS]),
         "preview_truncated": len(result.rows) > MAX_PREVIEW_ROWS,
+    }
+
+
+@server.tool(name="bob_materialize_exploration", structured_output=True)
+def bob_materialize_exploration(sources: dict[str, str]) -> dict[str, object]:
+    """Materialize prepared selected-account tables for a Codex-sandboxed Pandas exploration."""
+    try:
+        return materialize_sources(_resolve_sources(sources))
+    except AnalysisError as exc:
+        return preparation_error("EXPLORATION_MATERIALIZATION_FAILED", exc)
+
+
+@server.tool(name="bob_verify_exploration", structured_output=True)
+def bob_verify_exploration(analysis_name: str, sources: dict[str, str], code_file: str,
+                           result_file: str, method_summary: str) -> dict[str, object]:
+    """Verify the saved result of a confirmed Codex-sandboxed Pandas exploration."""
+    result_handle = f"result-{uuid.uuid4().hex}"
+    try:
+        result, sanity = verify_exploration(
+            analysis_name, _resolve_sources(sources), code_file, result_file, method_summary, result_handle,
+        )
+    except AnalysisError as exc:
+        return preparation_error("EXPLORATION_VALIDATION_FAILED", exc)
+    RESULTS[result_handle] = result
+    return {
+        "analysis_marker": {"type": "custom_analysis", "analysis_name": result.analysis_name},
+        "result_handle": result_handle,
+        "method_summary": result.method_summary,
+        "columns": list(result.columns),
+        "row_count": len(result.rows),
+        "preview": list(result.rows[:MAX_PREVIEW_ROWS]),
+        "preview_truncated": len(result.rows) > MAX_PREVIEW_ROWS,
+        "sanity": sanity,
+        "disclaimer": "Custom exploratory analysis over verified selected-account data; review its assumptions before acting.",
     }
 
 

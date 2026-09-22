@@ -37,11 +37,12 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(values['mcp_servers.bob.default_tools_approval_mode'], 'approve')
         self.assertEqual(values['mcp_servers.bob.enabled_tools'], [
             'bob_resolve_dates', 'bob_data_catalog', 'bob_prepare_data',
-            'bob_analyze', 'bob_publish_result',
+            'bob_analyze', 'bob_materialize_exploration', 'bob_verify_exploration', 'bob_publish_result',
         ])
         self.assertEqual(args[0], '-i')
         self.assertIn('BOB_STATE_ROOT=/safe/state', args)
         self.assertIn('BOB_SELECTED_CUSTOMER_ID=123', args)
+        self.assertNotIn('BOB_EXPLORATION_DIR=', args)
         self.assertFalse(any('ADMIN_PASSWORD' in value for value in args))
 
     def test_exact_failed_bob_auth_marker_becomes_typed_event(self):

@@ -350,7 +350,7 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
     return ("You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
             "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
-            "For a novel read-only analysis not covered by a standard Bob workflow, use the registered Bob MCP data tools first; do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
+            "For a confirmed novel read-only analysis not covered by a standard Bob workflow, use the registered Bob MCP data tools first. Materialize only the prepared tables, use the Codex sandbox only for a temporary Pandas analysis in .wings-it, then call the registered verifier before presenting a result. Do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
             "When the user says a previous blocker or code has been fixed, or asks to retry or recheck, verify the affected capability now with its safe registered tool or data check. Do not repeat a prior failure solely from native-thread context.\n\n"
             + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
@@ -1251,7 +1251,7 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
                 runtime_config=runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
                 google_connected = bool(s.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(row['user_id'],row['client_instance_id'])))
-                environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id']}
+                environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id'], 'BOB_EXPLORATION_DIR': str(workspace / '.wings-it')}
                 if runtime_config:
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
                 environment['BOB_ACCOUNT_PERMISSION'] = account_permission(s, row['user_id'], row['client_instance_id'], row.get('account_id'))

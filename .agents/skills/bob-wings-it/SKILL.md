@@ -1,6 +1,6 @@
 ---
 name: bob-wings-it
-description: Use for a novel, read-only Google Ads analysis that no existing Bob skill or CLI workflow can answer, but that can be composed from Bob's registered datasets and typed MCP analysis operations. Not for account setup, standard performance comparisons, bid/budget work, creative replacement, static banners, sync, or any Google Ads mutation.
+description: Use for a novel, read-only Google Ads analysis that no existing Bob skill or CLI workflow can answer. It uses registered datasets, a disposable Codex-sandboxed Pandas analysis, and a deterministic result check. Not for account setup, standard performance comparisons, bid/budget work, creative replacement, static banners, sync, or any Google Ads mutation.
 ---
 
 # Bob Wings It
@@ -26,10 +26,20 @@ scripts, inspect arbitrary files, query arbitrary SQL, or change Google Ads.
   short reason. The tool checks existing coverage before any fetch.
 - Once this skill is selected, use the Bob MCP tools for preparation and analysis even when the
   native Codex thread has earlier CLI context. Do not fall back to a legacy `./bob fetch` command.
+- After the user approves the method, call `bob_materialize_exploration` for the prepared tables.
+  Use Codex's own sandbox to write and run a temporary Pandas script in `.wings-it/`; it may read
+  only the returned inputs and must write `.wings-it/result.json` plus its `.py` source file.
+  Then call `bob_verify_exploration` before presenting any result. Do not use shell, network,
+  Google Ads access, or paths outside `.wings-it/`.
+- Before presenting an exploratory result, state that it is custom analysis rather than a standard
+  Bob workflow. Report its returned sanity status and warnings, and ask the user to review the
+  agreed assumptions before acting on it.
 - For ad-group CPA work, use the paired `*_primary_conversion_period` datasets. Their
   `primary_conversions` metric is Google Ads' supported primary-conversion total, and is not an
   alias for installs or post-install conversions.
-- Compose the agreed method with `bob_analyze`. Aggregate additive metrics before deriving ratios.
+- Use `bob_analyze` only when its registered operation graph is the clearer fit; the default for
+  genuinely novel analysis is the materialize/sandbox/verify path. Aggregate additive metrics
+  before deriving ratios.
 - Keep networks or other dimensions separate when the agreed comparison requires them.
 - Treat reach and frequency only at the source grain allowed by the catalog.
 - Explain the executed method, the result, and material caveats without exposing tools, prompts,

@@ -73,7 +73,7 @@ def custom_analysis_marker(event):
         return None
     server_name = item.get('server') or item.get('server_name')
     tool_name = item.get('tool') or item.get('tool_name') or item.get('name')
-    if server_name != 'bob' or tool_name not in {'bob_data_catalog', 'bob_prepare_data', 'bob_analyze'}:
+    if server_name != 'bob' or tool_name not in {'bob_data_catalog', 'bob_prepare_data', 'bob_analyze', 'bob_verify_exploration'}:
         return None
     status = str(item.get('status') or '').lower()
     if status and status not in {'completed', 'success', 'succeeded'}:
@@ -82,7 +82,7 @@ def custom_analysis_marker(event):
     if isinstance(arguments, str):
         try: arguments = json.loads(arguments)
         except json.JSONDecodeError: arguments = {}
-    if tool_name == 'bob_analyze':
+    if tool_name in {'bob_analyze', 'bob_verify_exploration'}:
         name = arguments.get('analysis_name') if isinstance(arguments, dict) else None
         return {'analysis_name': bounded_text(name or 'Ad-hoc analysis', 120), 'phase': 'analyzed'}
     return {
@@ -98,6 +98,7 @@ def bob_mcp_config(environment):
         'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
         'BOB_ACCOUNT_PERMISSION',
         'BOB_SELECTED_CUSTOMER_ID',
+        'BOB_EXPLORATION_DIR',
     )
     python = str(Path(sys.executable))
     child_args = ['-i', f'PATH={Path(python).parent}:/usr/local/bin:/usr/bin:/bin', 'PYTHONUNBUFFERED=1']
@@ -108,6 +109,8 @@ def bob_mcp_config(environment):
         'bob_data_catalog',
         'bob_prepare_data',
         'bob_analyze',
+        'bob_materialize_exploration',
+        'bob_verify_exploration',
         'bob_publish_result',
     ]
     return [
