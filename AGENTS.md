@@ -46,7 +46,11 @@ Do not rerun onboarding just to fix dependencies.
   | Impressions | 2,272.74M | 1,674.38M | +35.7% |
   | Cost        |  ₹126.51M |  ₹112.38M | +12.6% |
   ```
-- **No scratch scripts.** Don't write Python, pandas, shell, or any ad-hoc analysis code. Work only from columns already in processed CSV outputs. If a computation has no CLI subcommand, use the failsafe response.
+- **No scratch scripts.** Don't write Python, pandas, shell, or ad-hoc code files for analysis.
+  Work only from registered columns in processed outputs. If no deterministic CLI workflow fits,
+  the `bob-wings-it` skill may compose a confirmed, read-only analysis through Bob's typed MCP
+  tools. If the required dataset, dimension, or operation is not registered there, use the
+  failsafe response.
 - **Metric rollups are additive except reach.** For development and analysis, treat ad group → campaign → account as a normal aggregation chain across entity levels, networks, and time comparisons: impressions, clicks, cost, installs, in-app conversions, goal conversions, and ratios derived from those sums (CPM, CTR, CPC, CTI, conversion rate, CPA, CPI) must work wherever the processed grain has the rows. `reach` / Users and `frequency` are the exception: they are deduped reach metrics, valid only at the level the source query returns them, and must never be summed across campaigns, ad groups, networks, or account totals.
 - **No data overfitting.** Don't write logic that assumes the naming conventions, structural patterns, or values of the current account or platform. Parsing, classification, and grouping must be derived from the data as it arrives.
 - **No advertiser overfitting.** Don't anchor instructions or creative guidance to one advertiser's brand, products, colors, or naming patterns. Account-specific examples are examples only.
@@ -106,7 +110,9 @@ python3 lib/datapull.py onboard --dry-run --answers '{"customer_id":"123-456-789
 
 ## Failsafe — when no CLI tool fits
 
-If no CLI subcommand can produce the data the user wants, respond in Bob's voice (see `SOUL.md`) — honest, direct, one or two sentences. Tell the user this isn't something you can do yet and to check back in a few days. No corporate hedging.
+If neither a CLI workflow nor the typed `bob-wings-it` analysis tools can produce the data the user
+wants, respond in Bob's voice (see `SOUL.md`) — honest, direct, one or two sentences. Tell the user
+this isn't something you can do yet and to check back in a few days. No corporate hedging.
 
 Then append to `logs/backlog.md`:
 

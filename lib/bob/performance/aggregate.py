@@ -20,10 +20,11 @@ def ensure_processed_file_for_period(
     end: dt.date,
     customer_id: str | None,
     primary_goal: str,
+    force: bool = False,
 ) -> Path | None:
     """Return a processed period file, aggregating the exact raw window when available."""
     found = find_processed_files_for_period(subdir, [(start, end)], customer_id)[0]
-    if found:
+    if found and not force:
         return found
     raw_paths = find_raw_files_for_range(grain, start, end, customer_id)
     if not raw_paths:
@@ -138,7 +139,12 @@ def _agg_network_period(
     for row in rows:
         if "network" in row:
             row["network"] = _canonical_network(row.get("network", ""))
-    out_rows = _aggregate_period_rows(rows, _NETWORK_PERIOD_KEY_COLS[grain], primary_goal)
+    extra_metrics = ["primary_conversions"] if grain in {
+        "campaign_primary_conversion_period", "adgroup_primary_conversion_period",
+    } else []
+    out_rows = _aggregate_period_rows(
+        rows, _NETWORK_PERIOD_KEY_COLS[grain], primary_goal, extra_metrics,
+    )
 
     if range_start and range_end:
         file_start, file_end = range_start.isoformat(), range_end.isoformat()
@@ -151,7 +157,11 @@ def _agg_network_period(
     else:
         subdir = _NETWORK_PERIOD_SUBDIR[grain]
         output_path = account_processed_dir(customer, subdir) / f"{customer}_{file_start}_{file_end}.csv"
-    write_csv(output_path, out_rows, _NETWORK_PERIOD_COLUMNS[grain])
+    fields = _NETWORK_PERIOD_COLUMNS[grain]
+    # Aggregation calculates the normal internal metric set before writing. A
+    # registered grain may intentionally expose a smaller schema (for example,
+    # the generic primary-conversion datasets); write only that contract.
+    write_csv(output_path, [{field: row.get(field, "") for field in fields} for row in out_rows], fields)
     print(f"processed aggregate written: {output_path}")
     if not out_rows:
         print(

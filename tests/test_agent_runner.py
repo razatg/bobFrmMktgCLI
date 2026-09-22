@@ -6,10 +6,44 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from server.agent_runner import AgentRunner, compact_codex_event, estimate_usage, normalized_bob_error, redact_event_text
+from server.agent_runner import AgentRunner, bob_mcp_config, compact_codex_event, custom_analysis_marker, estimate_usage, normalized_bob_error, redact_event_text
 
 
 class AgentRunnerTests(unittest.TestCase):
+    def test_first_bob_wings_it_call_becomes_safe_marker(self):
+        catalog = {'type':'item.completed','item':{'type':'mcp_tool_call','server':'bob',
+                   'tool':'bob_data_catalog','status':'completed','arguments':{}}}
+        self.assertEqual(custom_analysis_marker(catalog), {
+            'analysis_name':'Ad-hoc analysis','phase':'identified',
+        })
+        event = {'type':'item.completed','item':{'type':'mcp_tool_call','server':'bob',
+                 'tool':'bob_analyze','status':'completed','arguments':{
+                     'analysis_name':'Ad-group CPM anomalies','sources':{'private':'secret'}}}}
+        self.assertEqual(custom_analysis_marker(event), {
+            'analysis_name':'Ad-group CPM anomalies','phase':'analyzed',
+        })
+        self.assertEqual(compact_codex_event(event), {'type':'item.completed','item':{
+            'type':'mcp_tool_call','status':'completed','server':'bob','tool':'bob_analyze'}})
+        event['item']['status'] = 'failed'
+        self.assertIsNone(custom_analysis_marker(event))
+
+    def test_mcp_child_environment_is_explicit_and_secret_minimal(self):
+        values = dict(bob_mcp_config({
+            'BOB_STATE_ROOT':'/safe/state','BOB_SELECTED_CUSTOMER_ID':'123',
+            'ADMIN_PASSWORD':'never-pass-this',
+        }))
+        args = values['mcp_servers.bob.args']
+        self.assertEqual(values['mcp_servers.bob.command'], '/usr/bin/env')
+        self.assertEqual(values['mcp_servers.bob.default_tools_approval_mode'], 'approve')
+        self.assertEqual(values['mcp_servers.bob.enabled_tools'], [
+            'bob_resolve_dates', 'bob_data_catalog', 'bob_prepare_data',
+            'bob_analyze', 'bob_publish_result',
+        ])
+        self.assertEqual(args[0], '-i')
+        self.assertIn('BOB_STATE_ROOT=/safe/state', args)
+        self.assertIn('BOB_SELECTED_CUSTOMER_ID=123', args)
+        self.assertFalse(any('ADMIN_PASSWORD' in value for value in args))
+
     def test_exact_failed_bob_auth_marker_becomes_typed_event(self):
         event = {'type':'item.completed','item':{'type':'command_execution','status':'failed',
                  'command':'./bob fetch --query account_daily',

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 from .auth import check_password, csrf, current_user, hash_code, hash_password, same_code
-from .agent_runner import AgentRunner, ExecutionPolicy, codex_usage, compact_codex_event, estimate_usage, redact_event_text
+from .agent_runner import AgentRunner, ExecutionPolicy, codex_usage, compact_codex_event, custom_analysis_marker, estimate_usage, redact_event_text
 from .models import SecretStore, Store, new_id, now
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -350,6 +350,8 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
     return ("You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
             "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
+            "For a novel read-only analysis not covered by a standard Bob workflow, use the registered Bob MCP data tools first; do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
+            "When the user says a previous blocker or code has been fixed, or asks to retry or recheck, verify the affected capability now with its safe registered tool or data check. Do not repeat a prior failure solely from native-thread context.\n\n"
             + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
             + continuity
@@ -652,6 +654,9 @@ async def admin_codex_sessions(request: Request):
       u.email_or_identifier AS user_identifier,ci.display_name AS client_name,
       COALESCE(NULLIF(ci.codex_model,''),?) AS model,
       a.account_name,a.customer_id,
+      (SELECT json_extract(je.payload,'$.analysis_name') FROM job_events je
+       WHERE je.job_id=j.id AND je.event_type='custom_analysis'
+       ORDER BY je.event_id LIMIT 1) AS analysis_name,
       (SELECT je.event_type FROM job_events je WHERE je.job_id=j.id ORDER BY je.event_id DESC LIMIT 1) AS last_event_type,
       (SELECT je.payload FROM job_events je WHERE je.job_id=j.id ORDER BY je.event_id DESC LIMIT 1) AS last_event_payload
       FROM jobs j JOIN conversations c ON c.id=j.conversation_id JOIN messages m ON m.id=j.message_id
@@ -1076,6 +1081,25 @@ async def admin_accounts(request: Request):
         item=dict(account); item['grants']=[dict(g) for g in grants]; result.append(item)
     return result
 
+@app.get('/api/admin/codex-sessions/{jid}/conversation')
+async def admin_codex_session_conversation(jid: str, request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    row=s.one('''SELECT j.id AS job_id,c.id AS conversation_id,c.title,u.email_or_identifier AS user_identifier,
+      ci.display_name AS client_name,a.account_name,a.customer_id
+      FROM jobs j JOIN conversations c ON c.id=j.conversation_id JOIN users u ON u.id=c.user_id
+      LEFT JOIN client_instances ci ON ci.id=c.client_instance_id LEFT JOIN client_accounts a ON a.id=c.account_id
+      WHERE j.id=?''',(jid,))
+    if not row: raise HTTPException(404,'job not found')
+    messages=s.all('''SELECT m.role,m.content,m.status,m.created_at FROM messages m
+      WHERE m.id=(SELECT message_id FROM jobs WHERE id=?)
+         OR m.id=(SELECT json_extract(payload,'$.message_id') FROM job_events
+                  WHERE job_id=? AND event_type='terminal'
+                    AND json_extract(payload,'$.message_id') IS NOT NULL
+                  ORDER BY event_id DESC LIMIT 1)
+      ORDER BY m.created_at,m.id''',(jid,jid))
+    return {'job':dict(row),'messages':[dict(message) for message in messages]}
+
 @app.post('/api/google-ads/oauth/start')
 async def google_oauth_start(request: Request):
     user=await csrf(request); s=request.app.state.store
@@ -1211,14 +1235,19 @@ async def run_job(request,jid,cid,prompt,row,lock):
             started=time.monotonic(); s.run('UPDATE jobs SET status="running",started_at=? WHERE id=?',(now(),jid)); s.event(jid,'status',{'status':'THINKING'}); runtime_log('job_started',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id'),timeout_seconds=job_timeout_seconds())
             auth_required = False
             reported_usage = None
+            analysis_marked = False
             try:
                 async def emit(event):
-                    nonlocal auth_required, reported_usage
+                    nonlocal auth_required, reported_usage, analysis_marked
                     auth_required = auth_required or (event.get('type') == 'bob.error' and event.get('code') == 'GOOGLE_AUTH_REQUIRED')
                     usage = codex_usage(event)
                     if usage:
                         reported_usage = usage
                     s.event(jid,'agent',compact_codex_event(event))
+                    marker = custom_analysis_marker(event)
+                    if marker and not analysis_marked:
+                        s.event(jid,'custom_analysis',marker)
+                        analysis_marked = True
                 workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
                 runtime_config=runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
                 google_connected = bool(s.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(row['user_id'],row['client_instance_id'])))
@@ -1226,8 +1255,10 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 if runtime_config:
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
                 environment['BOB_ACCOUNT_PERMISSION'] = account_permission(s, row['user_id'], row['client_instance_id'], row.get('account_id'))
-                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
                 selected_account=s.one('SELECT account_name,customer_id FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
+                if selected_account:
+                    environment['BOB_SELECTED_CUSTOMER_ID'] = selected_account['customer_id']
+                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
                 internal_prompt=prompt_for_selected_account(s,row,prompt)
                 continuity = conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION']) if not row['agent_session_id'] else ''
                 prior_usage = previous_thread_usage(s,cid,jid) if row['agent_session_id'] else None

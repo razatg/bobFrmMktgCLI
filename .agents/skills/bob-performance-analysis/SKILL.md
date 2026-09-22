@@ -22,7 +22,7 @@ Return findings and decisions, not the internal retrieval procedure. Never expos
 
 ## Operating Rules
 
-- **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it to the user and use the failsafe — don't patch code). Canonical wording is in `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`; the bullets below are only what's specific to this skill.
+- **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc code files, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it to the user and use the failsafe — don't patch code). Canonical wording is in `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`; the bullets below are only what's specific to this skill.
 - Answer only from processed slices or freshly generated slices.
 - Do not invent numbers, dates, campaign names, network names, or recommendations.
 - **Check before fetching or aggregating.** Use `ls garf/outputs/raw/{query_name}/` to verify the required raw files. Check the filename — it encodes `{account}_{start}_{end}`. If a file for the exact (account, start, end) already exists, the CLI dedup will skip it automatically, but do not issue the fetch at all when you can confirm coverage upfront. Staleness rules by query type:
@@ -64,7 +64,10 @@ Load the matching reference file for performance questions:
 
 If a question matches more than one intent, answer in this order: account summary, driver diagnosis, recommendation, action item.
 
-**If no reference file matches the user's question**, run `./bob` for the grouped command map and `./bob <subcommand> --help` for the flags before guessing. Never invent a subcommand name; if no subcommand fits, use the Failsafe.
+**If no reference file matches the user's question**, run `./bob` for the grouped command map and
+`./bob <subcommand> --help` for the flags before guessing. Never invent a subcommand name. If no
+subcommand fits and the request is a novel read-only analysis, route to the `bob-wings-it` skill;
+otherwise use the Failsafe.
 
 ## Standard Answer Shape
 
@@ -138,4 +141,8 @@ Follow the wiki save rules in `CLAUDE.md` → "Wiki save rules" every time the u
 
 When the user's question can't be answered from a routing intent above or any `./bob` subcommand, use the repo failsafe in `CLAUDE.md` / `AGENTS.md`: answer in Bob's voice (`SOUL.md`) that this isn't something you can do yet, append a `[BUG]`/`[FEATURE]` entry to `logs/backlog.md` (with the user's exact words), log a `failsafe` signal, and confirm to the user.
 
-For this skill specifically, a question is unanswerable when: no intent in the routing table matches it, no CLI subcommand in `CLAUDE.md` produces the data, the data isn't fetched by any `garf/queries/` query, or it needs an ad-hoc computation (medians, cross-file joins) that no subcommand pre-computes. Don't use the failsafe for merely-missing data files — those are handled by each reference's fetch/aggregate steps.
+For this skill specifically, a question is unanswerable when: no intent in the routing table
+matches it, no CLI subcommand produces the data, and `bob-wings-it` lacks the required registered
+dataset, dimension, or typed operation. Don't use the failsafe for merely-missing registered data
+files — the normal reference flow or `bob-wings-it` prepares those through the existing fetch and
+aggregate path.

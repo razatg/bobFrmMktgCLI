@@ -89,6 +89,8 @@ DATE_QUERIES = {
     "account_network_period",
     "campaign_network_period",
     "adgroup_network_period",
+    "campaign_primary_conversion_period",
+    "adgroup_primary_conversion_period",
     "creative_period",
     "creative_headline_period", "creative_description_period",
     "creative_image_period", "creative_video_period",
@@ -108,6 +110,8 @@ GRANULAR_DATE_QUERIES = {
     "campaign_network_period",
     "campaign_reach_period",
     "adgroup_network_period",
+    "campaign_primary_conversion_period",
+    "adgroup_primary_conversion_period",
     "creative_period",
 }
 
@@ -182,6 +186,17 @@ ADGROUP_NETWORK_PERIOD_COLUMNS = [
     "customer_id", "campaign_id", "campaign_name",
     "ad_group_id", "ad_group_name", "ad_group_status", "network",
 ] + _METRIC_COLS
+
+_PRIMARY_CONVERSION_METRIC_COLS = [
+    "impressions", "clicks", "cost", "primary_conversions", "cpm", "cpc", "primary_cpa",
+]
+CAMPAIGN_PRIMARY_CONVERSION_PERIOD_COLUMNS = [
+    "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
+] + _PRIMARY_CONVERSION_METRIC_COLS
+ADGROUP_PRIMARY_CONVERSION_PERIOD_COLUMNS = [
+    "customer_id", "campaign_id", "campaign_name", "ad_group_id", "ad_group_name",
+    "ad_group_status", "network",
+] + _PRIMARY_CONVERSION_METRIC_COLS
 
 CREATIVE_PERIOD_COLUMNS = [
     "customer_id", "campaign_id", "campaign_name",
@@ -294,6 +309,13 @@ _NETWORK_PERIOD_KEY_COLS: dict[str, list[str]] = {
         "customer_id", "campaign_id", "campaign_name",
         "ad_group_id", "ad_group_name", "ad_group_status", "network",
     ],
+    "campaign_primary_conversion_period": [
+        "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
+    ],
+    "adgroup_primary_conversion_period": [
+        "customer_id", "campaign_id", "campaign_name", "ad_group_id", "ad_group_name",
+        "ad_group_status", "network",
+    ],
 }
 
 _NETWORK_PERIOD_COLUMNS: dict[str, list[str]] = {
@@ -301,6 +323,8 @@ _NETWORK_PERIOD_COLUMNS: dict[str, list[str]] = {
     "campaign_network_period": CAMPAIGN_NETWORK_PERIOD_COLUMNS,
     "campaign_reach_period": CAMPAIGN_REACH_PERIOD_COLUMNS,
     "adgroup_network_period": ADGROUP_NETWORK_PERIOD_COLUMNS,
+    "campaign_primary_conversion_period": CAMPAIGN_PRIMARY_CONVERSION_PERIOD_COLUMNS,
+    "adgroup_primary_conversion_period": ADGROUP_PRIMARY_CONVERSION_PERIOD_COLUMNS,
 }
 
 _NETWORK_PERIOD_SUBDIR: dict[str, str] = {
@@ -308,6 +332,8 @@ _NETWORK_PERIOD_SUBDIR: dict[str, str] = {
     "campaign_network_period": "campaign-network",
     "campaign_reach_period": "campaign-reach",
     "adgroup_network_period": "adgroup-network",
+    "campaign_primary_conversion_period": "campaign-primary-conversion",
+    "adgroup_primary_conversion_period": "adgroup-primary-conversion",
 }
 
 

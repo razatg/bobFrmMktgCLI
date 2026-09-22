@@ -278,6 +278,7 @@ def _aggregate_period_rows(
     rows: list[dict],
     key_cols: list[str],
     primary_goal: str,
+    extra_sum_metrics: list[str] | None = None,
 ) -> list[dict]:
     """Group by key_cols, sum SUM_METRICS, recalculate derived metrics."""
     # reach (unique_users) is summed only when the source actually provides it
@@ -287,7 +288,7 @@ def _aggregate_period_rows(
     reach_present = any(
         str(r.get("reach", "")).upper() not in ("", "NA", "NONE") for r in rows
     )
-    sum_metrics = SUM_METRICS + (["reach"] if reach_present else [])
+    sum_metrics = SUM_METRICS + (["reach"] if reach_present else []) + list(extra_sum_metrics or [])
     grouped: dict[tuple, dict[str, Any]] = {}
     for row in rows:
         key = tuple(row.get(col, "") for col in key_cols)
@@ -302,6 +303,10 @@ def _aggregate_period_rows(
         g = grouped[key]
         row_out = {col: g[col] for col in key_cols}
         row_out.update(_derive_metrics(g, primary_goal))
+        for metric in extra_sum_metrics or []:
+            row_out[metric] = format_float(g[metric])
+        if "primary_conversions" in (extra_sum_metrics or []):
+            row_out["primary_cpa"] = ratio(g["cost"], g["primary_conversions"])
         out.append(row_out)
     return out
 

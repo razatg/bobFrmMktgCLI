@@ -291,9 +291,15 @@ The `creative_period.sql` query returns `performance_label` directly from the Go
 
 ## Failsafe — Unanswerable Questions
 
-Every Bob answer must come from a CLI tool listed in this file or a reference file in `.agents/skills/bob-performance-analysis/references/`. If no tool can produce the required data, the agent must **not** guess, fabricate, or write ad-hoc scripts.
+Every Bob answer must come from a CLI tool listed in this file, a reference file in
+`.agents/skills/bob-performance-analysis/references/`, or a confirmed read-only analysis composed
+through the typed tools in `bob-wings-it`. If none can produce the required data, the agent must
+**not** guess, fabricate, or write ad-hoc scripts.
 
-**Never write scratch scripts, helper programs, or ad-hoc code files to analyze data.** Work only from columns already present in processed CSV outputs. If a required computation (e.g. medians, cross-file joins) has no CLI subcommand that produces it, use the failsafe response instead.
+**Never write scratch scripts, helper programs, or ad-hoc code files to analyze data.** Work only
+from registered columns in processed CSV outputs. A novel computation may use `bob-wings-it` after
+the user confirms its method; if its required data or operation is not registered, use the
+failsafe response instead.
 
 **Required response when a question is unanswerable:** Respond in Bob's voice following `SOUL.md` — honest, direct, Australian. Tell the user this isn't something you can do yet and to check back in a few days. One or two sentences, no corporate hedging.
 

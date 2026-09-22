@@ -75,6 +75,19 @@ class UsageRunner(FakeRunner):
         },'large_ignored_field':'x' * 100_000})
         return (session_id or 'usage-thread', 'Usage response')
 
+class CustomAnalysisRunner(FakeRunner):
+    async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
+        await emit({'type':'thread.started','thread_id':session_id or 'analysis-thread'})
+        await emit({'type':'item.completed','item':{
+            'type':'mcp_tool_call','server':'bob','tool':'bob_data_catalog','status':'completed',
+            'arguments':{},
+        }})
+        await emit({'type':'item.completed','item':{
+            'type':'mcp_tool_call','server':'bob','tool':'bob_analyze','status':'completed',
+            'arguments':{'analysis_name':'Ad-group CPM anomalies','operations':['private']},
+        }})
+        return (session_id or 'analysis-thread', 'Two ad groups need review.')
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -152,6 +165,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('AUTHORITATIVE CURRENT ACCOUNT:',prompt)
         self.assertNotIn('MANAGEMENT',prompt)
         self.assertIn('Ask one focused clarification',prompt)
+        self.assertIn('Do not repeat a prior failure solely from native-thread context',prompt)
 
     def test_admin_observability_is_lightweight_and_reads_history(self):
         csrf=self.bootstrap()
@@ -644,6 +658,31 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(events.json()[1]['event_type'],'agent')
         self.assertEqual(events.json()[1]['payload']['type'],'thread.started')
         self.assertEqual(events.json()[1]['payload']['thread_id'],'thread-one')
+
+    def test_admin_can_filter_custom_analysis_and_view_user_facing_conversation(self):
+        csrf=self.bootstrap(); self.app.state.runner=CustomAnalysisRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},
+                             json={'content':'Find unusual ad groups'}).json()['job_id']
+        import time; time.sleep(.05)
+        sessions=self.client.get('/api/admin/codex-sessions',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(sessions.status_code,200,sessions.text)
+        item=next(row for row in sessions.json() if row['job_id']==job)
+        self.assertEqual(item['analysis_name'],'Ad-hoc analysis')
+        events=self.client.get(f'/api/admin/codex-sessions/{job}/events',headers={'X-CSRF-Token':csrf}).json()
+        marker=next(event for event in events if event['event_type']=='custom_analysis')
+        self.assertEqual(marker['payload'],{'analysis_name':'Ad-hoc analysis','phase':'identified'})
+        self.app.state.store.run(
+            'INSERT INTO messages VALUES (?,?,?,?,?,?)',
+            ('earlier-message',conversation,'user','Earlier unrelated chat','completed','2000-01-01T00:00:00+00:00'),
+        )
+        shown=self.client.get(f'/api/admin/codex-sessions/{job}/conversation',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(shown.status_code,200,shown.text)
+        self.assertEqual([message['role'] for message in shown.json()['messages']],['user','assistant'])
+        self.assertNotIn('Earlier unrelated chat',shown.text)
+        self.assertNotIn('operations',shown.text)
+        self.client.post('/auth/logout',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(self.client.get(f'/api/admin/codex-sessions/{job}/conversation').status_code,401)
 
     def test_active_job_blocks_duplicate_prompt_and_is_discoverable(self):
         csrf=self.bootstrap(); self.app.state.runner=SlowRunner()

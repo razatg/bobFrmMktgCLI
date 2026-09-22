@@ -68,6 +68,8 @@ def data_manifest(args: argparse.Namespace) -> None:
                 "campaign-trend": "campaign_weekly_trend",
                 "campaign-reach": "campaign_reach_period",
                 "adgroup-network": "adgroup_network_period",
+                "campaign-primary-conversion": "campaign_primary_conversion_period",
+                "adgroup-primary-conversion": "adgroup_primary_conversion_period",
                 "creative": "creative_period",
             }.get(query, query)
             normalized_query = query_name.lower().replace("_", "-")

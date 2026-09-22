@@ -10,6 +10,7 @@ dependencies = [
     "fastapi==0.116.1",
     "uvicorn[standard]==0.35.0",
     "bcrypt==4.3.0",
+    "mcp==2.2.0",
 ]
 
 [project.optional-dependencies]

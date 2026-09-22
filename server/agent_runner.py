@@ -1,6 +1,6 @@
 """Process-boundary Codex adapter with cancellation, timeout, and JSONL events."""
 from __future__ import annotations
-import asyncio, json, logging, os, re, shutil, signal, time
+import asyncio, json, logging, os, re, shutil, signal, sys, time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +64,66 @@ def normalized_bob_error(event):
         return {'type': 'bob.error', 'code': 'GOOGLE_AUTH_REQUIRED'}
     return None
 
+def custom_analysis_marker(event):
+    """Extract safe ad-hoc intent when Bob first enters the Wings It toolchain."""
+    if not isinstance(event, dict) or event.get('type') != 'item.completed':
+        return None
+    item = event.get('item') if isinstance(event.get('item'), dict) else {}
+    if item.get('type') not in {'mcp_tool_call', 'mcp_call'}:
+        return None
+    server_name = item.get('server') or item.get('server_name')
+    tool_name = item.get('tool') or item.get('tool_name') or item.get('name')
+    if server_name != 'bob' or tool_name not in {'bob_data_catalog', 'bob_prepare_data', 'bob_analyze'}:
+        return None
+    status = str(item.get('status') or '').lower()
+    if status and status not in {'completed', 'success', 'succeeded'}:
+        return None
+    arguments = item.get('arguments') or item.get('input') or {}
+    if isinstance(arguments, str):
+        try: arguments = json.loads(arguments)
+        except json.JSONDecodeError: arguments = {}
+    if tool_name == 'bob_analyze':
+        name = arguments.get('analysis_name') if isinstance(arguments, dict) else None
+        return {'analysis_name': bounded_text(name or 'Ad-hoc analysis', 120), 'phase': 'analyzed'}
+    return {
+        'analysis_name': 'Ad-hoc analysis',
+        'phase': 'identified' if tool_name == 'bob_data_catalog' else 'preparing',
+    }
+
+def bob_mcp_config(environment):
+    """Return Codex overrides for a secret-minimal local STDIO MCP child."""
+    safe_keys = (
+        'BOB_STATE_ROOT',
+        'BOB_CLIENT_INSTANCE_ID',
+        'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
+        'BOB_ACCOUNT_PERMISSION',
+        'BOB_SELECTED_CUSTOMER_ID',
+    )
+    python = str(Path(sys.executable))
+    child_args = ['-i', f'PATH={Path(python).parent}:/usr/local/bin:/usr/bin:/bin', 'PYTHONUNBUFFERED=1']
+    child_args.extend(f'{key}={environment[key]}' for key in safe_keys if environment.get(key))
+    child_args.extend([python, '-m', 'lib.bob.mcp.server'])
+    tools = [
+        'bob_resolve_dates',
+        'bob_data_catalog',
+        'bob_prepare_data',
+        'bob_analyze',
+        'bob_publish_result',
+    ]
+    return [
+        ('mcp_servers.bob.command', '/usr/bin/env'),
+        ('mcp_servers.bob.args', child_args),
+        ('mcp_servers.bob.cwd', str(Path(__file__).resolve().parents[1])),
+        ('mcp_servers.bob.required', True),
+        ('mcp_servers.bob.enabled_tools', tools),
+        # Hosted jobs cannot pause for an interactive MCP approval. These five
+        # tools enforce account scope, read-only analysis, and publish consent
+        # at their own boundary, so Codex may invoke them non-interactively.
+        ('mcp_servers.bob.default_tools_approval_mode', 'approve'),
+        ('mcp_servers.bob.startup_timeout_sec', 10),
+        ('mcp_servers.bob.tool_timeout_sec', 70),
+    ]
+
 def compact_codex_event(event, max_bytes=MAX_PERSISTED_EVENT_BYTES):
     """Project raw Codex JSONL into a small, secret-safe diagnostic event."""
     if not isinstance(event, dict):
@@ -98,6 +158,9 @@ def compact_codex_event(event, max_bytes=MAX_PERSISTED_EVENT_BYTES):
                 if match:
                     compact['item']['tool'] = 'bob'
                     compact['item']['subcommand'] = match.group(1).lower()
+            elif item_type in {'mcp_tool_call', 'mcp_call'}:
+                compact['item']['server'] = bounded_text(item.get('server') or item.get('server_name'), 64)
+                compact['item']['tool'] = bounded_text(item.get('tool') or item.get('tool_name') or item.get('name'), 128)
         elif event_type in {'assistant.final', 'result', 'final', 'stdout', 'command'}:
             preview = event.get('text') or event.get('message') or event.get('result')
             if preview is not None:
@@ -125,6 +188,7 @@ class AgentRunner:
         'BOB_CLIENT_INSTANCE_ID',
         'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
         'BOB_ACCOUNT_PERMISSION',
+        'BOB_SELECTED_CUSTOMER_ID',
     )
 
     def __init__(self, executable=None):
@@ -245,6 +309,8 @@ class AgentRunner:
             value = environment.get(key)
             if value:
                 args += ['-c', f'shell_environment_policy.set.{key}={json.dumps(str(value))}']
+        for key, value in bob_mcp_config(environment):
+            args += ['-c', f'{key}={json.dumps(value)}']
         if not session_id: args += ['--cd', str(workspace)]
         args += ['--json', '--skip-git-repo-check']
         # Conversation workspaces contain symlinks to image-owned skills and
