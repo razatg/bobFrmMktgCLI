@@ -769,6 +769,19 @@ async def admin_cancel_codex_session(jid: str, request: Request):
         try: os.killpg(process['process_group_id'],signal.SIGTERM)
         except (ProcessLookupError,PermissionError): pass
     return {'ok':True,'status':'cancelled'}
+
+@app.post('/api/admin/codex-sessions/{jid}/reset')
+async def admin_reset_codex_session(jid: str, request: Request):
+    """Retire one completed conversation's native session without deleting chat."""
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    row=s.one('SELECT conversation_id FROM jobs WHERE id=?',(jid,))
+    if not row: raise HTTPException(404,'job not found')
+    active=s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") LIMIT 1',(row['conversation_id'],))
+    if active: raise HTTPException(409,'cannot reset a conversation with an active job')
+    s.run('UPDATE conversations SET agent_session_id=NULL,thread_input_tokens_estimate=0,last_activity_at=? WHERE id=?',(now(),row['conversation_id']))
+    runtime_log('native_session_reset',job_id=jid,conversation_id=row['conversation_id'],user_id=user['id'])
+    return {'ok':True,'conversation_id':row['conversation_id']}
 def explorer_state_root():
     return Path(os.getenv('BOB_STATE_ROOT', str(STATE_ROOT))).expanduser().resolve()
 

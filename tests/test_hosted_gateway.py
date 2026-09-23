@@ -662,6 +662,19 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(events.json()[1]['payload']['type'],'thread.started')
         self.assertEqual(events.json()[1]['payload']['thread_id'],'thread-one')
 
+    def test_admin_can_reset_a_completed_native_session_without_deleting_chat(self):
+        csrf=self.bootstrap()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'hello'}).json()['job_id']
+        import time; time.sleep(.05)
+        reset=self.client.post(f'/api/admin/codex-sessions/{job}/reset',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(reset.status_code,200,reset.text)
+        self.assertEqual(reset.json(),{'ok':True,'conversation_id':conversation})
+        stored=self.client.get(f'/api/conversations/{conversation}').json()
+        self.assertIsNone(stored['conversation']['agent_session_id'])
+        self.assertEqual(stored['conversation']['thread_input_tokens_estimate'],0)
+        self.assertEqual(len(stored['messages']),2)
+
     def test_admin_can_filter_custom_analysis_and_view_user_facing_conversation(self):
         csrf=self.bootstrap(); self.app.state.runner=CustomAnalysisRunner()
         conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
