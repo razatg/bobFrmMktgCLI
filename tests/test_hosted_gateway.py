@@ -674,6 +674,11 @@ class GatewayTests(unittest.TestCase):
         self.assertIsNone(stored['conversation']['agent_session_id'])
         self.assertEqual(stored['conversation']['thread_input_tokens_estimate'],0)
         self.assertEqual(len(stored['messages']),2)
+        fresh=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'start again'}).json()['job_id']
+        time.sleep(.05)
+        self.assertEqual(self.app.state.runner.calls[-1]['session_id'],None)
+        self.assertNotIn('CONTINUITY FROM THE PREVIOUS CODEX THREAD',self.app.state.runner.calls[-1]['prompt'])
+        self.assertFalse(self.client.get(f'/api/conversations/{conversation}').json()['conversation']['fresh_start_pending'])
 
     def test_admin_can_filter_custom_analysis_and_view_user_facing_conversation(self):
         csrf=self.bootstrap(); self.app.state.runner=CustomAnalysisRunner()

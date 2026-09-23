@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   agent_backend TEXT NOT NULL DEFAULT 'codex', agent_session_id TEXT, workspace_id TEXT NOT NULL,
   title TEXT NOT NULL DEFAULT 'New conversation', created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
   thread_input_tokens_estimate INTEGER NOT NULL DEFAULT 0,
+  fresh_start_pending INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(user_id) REFERENCES users(id), FOREIGN KEY(client_instance_id) REFERENCES client_instances(id)
 );
 CREATE TABLE IF NOT EXISTS messages (

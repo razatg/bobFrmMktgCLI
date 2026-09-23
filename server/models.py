@@ -27,6 +27,7 @@ class Store:
         self._ensure_column('client_accounts', 'bid_budget_change_pct', 'REAL NOT NULL DEFAULT 10')
         self._ensure_column('client_accounts', 'bid_budget_cooldown_days', 'INTEGER NOT NULL DEFAULT 14')
         self._ensure_column('conversations', 'thread_input_tokens_estimate', 'INTEGER NOT NULL DEFAULT 0')
+        self._ensure_column('conversations', 'fresh_start_pending', 'INTEGER NOT NULL DEFAULT 0')
         self._ensure_column('jobs', 'input_tokens_estimate', 'INTEGER')
         self._ensure_column('jobs', 'cached_input_tokens_estimate', 'INTEGER')
         self._ensure_column('jobs', 'output_tokens_estimate', 'INTEGER')

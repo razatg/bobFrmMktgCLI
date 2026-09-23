@@ -779,7 +779,7 @@ async def admin_reset_codex_session(jid: str, request: Request):
     if not row: raise HTTPException(404,'job not found')
     active=s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") LIMIT 1',(row['conversation_id'],))
     if active: raise HTTPException(409,'cannot reset a conversation with an active job')
-    s.run('UPDATE conversations SET agent_session_id=NULL,thread_input_tokens_estimate=0,last_activity_at=? WHERE id=?',(now(),row['conversation_id']))
+    s.run('UPDATE conversations SET agent_session_id=NULL,thread_input_tokens_estimate=0,fresh_start_pending=1,last_activity_at=? WHERE id=?',(now(),row['conversation_id']))
     runtime_log('native_session_reset',job_id=jid,conversation_id=row['conversation_id'],user_id=user['id'])
     return {'ok':True,'conversation_id':row['conversation_id']}
 def explorer_state_root():
@@ -1281,7 +1281,8 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     environment['BOB_SELECTED_CUSTOMER_ID'] = selected_account['customer_id']
                 policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
                 internal_prompt=prompt_for_selected_account(s,row,prompt)
-                continuity = conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION']) if not row['agent_session_id'] else ''
+                fresh_start = bool(row.get('fresh_start_pending'))
+                continuity = '' if fresh_start or row['agent_session_id'] else conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION'])
                 prior_usage = previous_thread_usage(s,cid,jid) if row['agent_session_id'] else None
                 sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION'], google_connected, None if row['agent_session_id'] else row['client_instance_id'], selected_account['customer_id'] if selected_account else None, continuity),workspace,policy,emit,app.state.cancel.get(jid))
                 if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
@@ -1306,7 +1307,7 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 next_sid = None if handoff else sid
                 next_lifetime = 0 if handoff else lifetime
                 assistant_message_id = new_id()
-                s.run('UPDATE conversations SET agent_session_id=?,thread_input_tokens_estimate=?,last_activity_at=? WHERE id=?',(next_sid,next_lifetime,now(),cid))
+                s.run('UPDATE conversations SET agent_session_id=?,thread_input_tokens_estimate=?,fresh_start_pending=0,last_activity_at=? WHERE id=?',(next_sid,next_lifetime,now(),cid))
                 s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(assistant_message_id,cid,'assistant',final,'completed',now()))
                 if estimates:
                     s.run('''UPDATE jobs SET status='completed',completed_at=?,input_tokens_estimate=?,cached_input_tokens_estimate=?,output_tokens_estimate=? WHERE id=?''',(now(),estimates['input_tokens'],estimates['cached_input_tokens'],estimates['output_tokens'],jid))
