@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from lib.bob.platform.core import *  # noqa: F403
+from lib.bob.platform.google_ads import _normalize_account_config_files, _resolve_profile_config_path
 from lib.bob.platform.presentation import *  # noqa: F403
 
 def load_mapping(path: str | None) -> dict[str, str]:

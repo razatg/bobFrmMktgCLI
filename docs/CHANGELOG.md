@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-23
+
+### Wings It exploratory analysis
+
+- Reworked novel read-only analysis to use Codex's disposable sandbox and Pandas after the user
+  confirms the method, rather than forcing every analysis into a custom MCP operation graph.
+- Kept MCP as the trusted boundary for selected-account data preparation and independent result
+  checks: account scope, bounded output, finite values, and CPM/primary-CPA reconciliation.
+- Kept all normal CLI commands, deterministic workflows, permissions, and Google Ads mutation
+  paths unchanged.
+
 ## 2026-09-13
 
 ### Account-bound hosted conversations

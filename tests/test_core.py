@@ -33,6 +33,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import datapull as dp  # noqa: E402
 from lib.bob.performance import fetch as performance_fetch  # noqa: E402
+from lib.bob.performance import validation as performance_validation  # noqa: E402
+
+
+class TestConfigurationCheck(unittest.TestCase):
+    def test_check_config_runs_account_config_normalization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "read.yaml"
+            config.write_text("developer_token: token\nlogin_customer_id: 1234567890\n")
+            profile = {
+                "google_ads_customer_id": "9876543210",
+                "google_ads_read_config_path": str(config),
+            }
+            with mock.patch.object(performance_validation, "load_profile", return_value=profile), \
+                 mock.patch.object(performance_validation, "_normalize_account_config_files", return_value=[]) as normalize, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                performance_validation.check_config(argparse.Namespace(config=None, account=None))
+        normalize.assert_called_once_with(profile)
 
 
 class TestMetricFormulas(unittest.TestCase):
