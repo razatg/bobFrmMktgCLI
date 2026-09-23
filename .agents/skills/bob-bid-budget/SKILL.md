@@ -18,12 +18,19 @@ reading period files. Use `fetch --quiet`, and keep recommendation CSV/YAML outp
 files rather than printing full rows into the agent context. Load the algorithm and mutation
 references only when the requested recommendation or apply decision requires them.
 
+If the user says the selected account's KT contains exclusions for this run, read that KT before
+the recommendation. Omit the explicitly identified campaigns from every customer-facing
+recommendation, hold, skip, and table. Do not infer a city-to-campaign mapping; ask for exact
+campaign identity if KT is ambiguous. A KT exclusion is run-specific unless the KT says otherwise.
+
 Show the recommendation and outcome, not the internal command sequence or file paths. Keep operational details private unless the user explicitly asks for deployment, SSH, VM, or debugging instructions. YAML and JSON plans are internal working files: do not link or expose them. If the customer explicitly asks to see or download every planned change, convert the complete existing plan to CSV under the active account's `wiki/.../action-items/`, add that CSV to the Wiki Index, and link the CSV. Do not create a presentation CSV merely because the customer asks to apply an existing plan.
 
 ## Operating Rules
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it and use the failsafe — don't patch code). Canonical wording: `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - Recommendations come only from `bid-budget-recommend` output. Do not invent numbers or signal assessments.
+- Treat selected-account KT exclusions as authoritative scope for the current request. They are not
+  a setup blocker and must never trigger a generic failsafe or be replaced by old backlog context.
 - **Check before fetching.** Use `./bob data-manifest` for the selected account and each exact date window. Do not inspect raw directories to infer coverage. If the raw windows are complete but the processed trend is wrong or stale, rebuild it without refetching.
 - Give the customer a concise mutation summary before applying. Never call `bid-budget-apply` without explicit user approval ("make it live", "apply it", "go ahead").
 - Do not re-apply a plan that has `applied: true` — the tool will error, but surface this clearly to the user first.

@@ -165,6 +165,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('AUTHORITATIVE CURRENT ACCOUNT:',prompt)
         self.assertNotIn('MANAGEMENT',prompt)
         self.assertIn('Ask one focused clarification',prompt)
+        self.assertIn('KT campaign exclusions are authoritative',prompt)
         self.assertIn('Do not repeat a prior failure solely from native-thread context',prompt)
 
     def test_admin_observability_is_lightweight_and_reads_history(self):
@@ -408,6 +409,8 @@ class GatewayTests(unittest.TestCase):
         self.assertIn(str(app_module.ROOT / 'bob'), (prepared / 'bob').read_text())
         self.assertTrue((prepared / '.bob').is_symlink())
         self.assertEqual((prepared / '.bob').resolve(), (state_root / '.bob').resolve())
+        self.assertFalse((prepared / 'logs').exists())
+        self.assertTrue((state_root / 'logs').is_symlink())
 
     def test_customer_artifacts_only_expose_markdown_and_csv(self):
         admin_csrf = self.bootstrap()

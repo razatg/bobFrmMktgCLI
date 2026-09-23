@@ -346,7 +346,7 @@ def is_obviously_bob_scope(store, row, prompt):
     return True, 'pass'
 def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity=''):
     account_kt_path = f"wiki/{account_customer_id}/KT.md" if account_customer_id else 'wiki/<customer_id>/KT.md'
-    kt_guidance = f"Selected-account terminology and clarification: the account KT is at {account_kt_path}. Read it for account-specific meanings, metrics, campaign naming, and scope. Ask one focused clarification when ambiguity could change the metric, data pull, or recommendation; otherwise proceed with a brief stated assumption. Never invent a term definition or silently map an unsupported entity (for example, city data) to a campaign label. If the user explicitly confirms a new term or meaning, add the exact clarification to the selected account KT.\n\n" if account_customer_id else ''
+    kt_guidance = f"Selected-account terminology and scope: the account KT is at {account_kt_path}. Read it when the user refers to KT or when its account-specific meanings, metrics, campaign naming, or exclusions affect the request. KT campaign exclusions are authoritative for that run: omit those campaigns from recommendation, hold, skip, and customer-facing tables. Never infer a city-to-campaign mapping; ask for exact campaign identity when KT is ambiguous. Ask one focused clarification when ambiguity could change the metric, data pull, or recommendation; otherwise proceed with a brief stated assumption. If the user explicitly confirms a new term or meaning, add the exact clarification to the selected account KT.\n\n" if account_customer_id else ''
     return ("You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
             "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
@@ -457,8 +457,16 @@ def prepare_conversation_runtime(workspace_id: str):
         target.mkdir(parents=True, exist_ok=True)
         _safe_link(state_root / shared, target)
     (state_root / '.bob').mkdir(parents=True, exist_ok=True)
-    for name in ('.bob', 'data', 'wiki', 'logs', 'validation'):
+    for name in ('.bob', 'data', 'wiki', 'validation'):
         _safe_link(workspace / name, state_root / name)
+    # Backlog entries are historical learning signals, not live operating
+    # context. Keep the shared logs behind the application boundary so a
+    # conversation cannot mistake an old failure for an instruction.
+    workspace_logs = workspace / 'logs'
+    if workspace_logs.is_symlink() or workspace_logs.is_file():
+        workspace_logs.unlink()
+    elif workspace_logs.is_dir():
+        shutil.rmtree(workspace_logs)
 
     # Codex's Linux sandbox treats agent instructions as read-only. A symlink
     # from the writable workspace to /app/.agents makes bubblewrap reject the
