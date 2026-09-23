@@ -59,9 +59,9 @@ def last_complete_iso_week(reference: dt.date) -> tuple[int, int]:
 
 
 def bid_budget_week_windows(reference: dt.date | None = None) -> list[tuple[dt.date, dt.date]]:
-    """Return partial W0 through yesterday plus the prior two complete ISO weeks."""
+    """Return three contiguous rolling seven-day windows ending yesterday."""
     as_of = (reference or today()) - dt.timedelta(days=1)
-    w0_start = as_of - dt.timedelta(days=as_of.weekday())
+    w0_start = as_of - dt.timedelta(days=6)
     w1_end = w0_start - dt.timedelta(days=1)
     w1_start = w1_end - dt.timedelta(days=6)
     w2_end = w1_start - dt.timedelta(days=1)

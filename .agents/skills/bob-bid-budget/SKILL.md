@@ -83,9 +83,8 @@ Read `wiki/{customer_id_no_hyphens}/Index.md`. It is small and must always be ch
 ```bash
 ./bob resolve-dates --period bid-budget-weeks
 ```
-W0 is Monday through yesterday, so it can contain only part of the current ISO week. W-1 and W-2
-are the two prior complete ISO weeks. For each printed window, check the selected account before
-fetching:
+W0 is the seven days ending yesterday. W-1 and W-2 are the preceding two contiguous seven-day
+windows. For each printed window, check the selected account before fetching:
 ```bash
 ./bob data-manifest --account CUSTOMER_ID --query campaign_network_period --from DATE --to DATE
 ```

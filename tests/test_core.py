@@ -179,18 +179,18 @@ class TestPeriodDates(unittest.TestCase):
         self.assertEqual(dp.resolve_period_dates("last_week"), last_week)
         self.assertEqual(dp.resolve_period_dates("last complete week"), last_week)
 
-    def test_bid_budget_windows_use_partial_current_iso_week(self):
+    def test_bid_budget_windows_are_three_rolling_seven_day_periods(self):
         os.environ["BOB_TODAY"] = "2026-06-18"
         self.assertEqual(
             dp.resolve_period_dates("bid-budget-weeks"),
             [
-                (self.d("2026-06-15"), self.d("2026-06-17")),
-                (self.d("2026-06-08"), self.d("2026-06-14")),
-                (self.d("2026-06-01"), self.d("2026-06-07")),
+                (self.d("2026-06-11"), self.d("2026-06-17")),
+                (self.d("2026-06-04"), self.d("2026-06-10")),
+                (self.d("2026-05-28"), self.d("2026-06-03")),
             ],
         )
 
-    def test_bid_budget_windows_use_last_full_week_on_monday(self):
+    def test_bid_budget_windows_are_rolling_even_on_monday(self):
         self.assertEqual(
             dp.resolve_period_dates("bid_budget_weeks"),
             [
@@ -247,7 +247,7 @@ class TestBidBudgetInputSelection(unittest.TestCase):
     def test_exact_partial_week_wins_over_later_starting_stale_file(self):
         trend_dir = dp.account_processed_dir("123-456-7890", "campaign-trend")
         trend_dir.mkdir(parents=True)
-        expected = trend_dir / "1234567890_2026-09-07_2026-09-09.csv"
+        expected = trend_dir / "1234567890_2026-09-03_2026-09-09.csv"
         stale = trend_dir / "1234567890_2026-09-08_2026-09-08.csv"
         expected.write_text("customer_id\n1234567890\n")
         stale.write_text("customer_id\n1234567890\n")
@@ -255,7 +255,7 @@ class TestBidBudgetInputSelection(unittest.TestCase):
         selected, windows = dp.bid_budget_trend_path("123-456-7890")
 
         self.assertEqual(selected, expected)
-        self.assertEqual(windows[0], (dt.date(2026, 9, 7), dt.date(2026, 9, 9)))
+        self.assertEqual(windows[0], (dt.date(2026, 9, 3), dt.date(2026, 9, 9)))
 
     def test_explicit_stale_trend_is_rejected(self):
         trend_dir = dp.account_processed_dir("1234567890", "campaign-trend")
@@ -271,9 +271,9 @@ class TestBidBudgetInputSelection(unittest.TestCase):
         valid = {
             "customer_id": "1234567890",
             "current_iso_week": "37", "prior1_iso_week": "36", "prior2_iso_week": "35",
-            "w37_start": "2026-09-07", "w37_end": "2026-09-09",
-            "w36_start": "2026-08-31", "w36_end": "2026-09-06",
-            "w35_start": "2026-08-24", "w35_end": "2026-08-30",
+            "w37_start": "2026-09-03", "w37_end": "2026-09-09",
+            "w36_start": "2026-08-27", "w36_end": "2026-09-02",
+            "w35_start": "2026-08-20", "w35_end": "2026-08-26",
         }
         dp.validate_bid_budget_trend_rows([valid], "1234567890", windows)
         with self.assertRaises(SystemExit):
@@ -423,12 +423,12 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
 
     def test_uses_exact_customer_windows_and_newest_duplicate(self):
         customer = "1234567890"
-        self._write_period(customer, "2026-06-15", "2026-06-17", "a-old", 111)
-        self._write_period(customer, "2026-06-15", "2026-06-17", "z-new", 222)
-        self._write_period(customer, "2026-06-08", "2026-06-14", "run", 100)
-        self._write_period(customer, "2026-06-01", "2026-06-07", "run", 90)
+        self._write_period(customer, "2026-06-11", "2026-06-17", "a-old", 111)
+        self._write_period(customer, "2026-06-11", "2026-06-17", "z-new", 222)
+        self._write_period(customer, "2026-06-04", "2026-06-10", "run", 100)
+        self._write_period(customer, "2026-05-28", "2026-06-03", "run", 90)
         self._write_period(customer, "2026-06-14", "2026-06-17", "newer-overlap", 999)
-        self._write_period("9998887777", "2026-06-15", "2026-06-17", "foreign", 999)
+        self._write_period("9998887777", "2026-06-11", "2026-06-17", "foreign", 999)
 
         output = Path(self.tmp.name) / "trend.csv"
         dp._agg_campaign_weekly_trend(
@@ -440,7 +440,7 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
         row = dp.read_csv(output)[0]
         self.assertEqual(row["customer_id"], customer)
         self.assertEqual(row["current_iso_week"], "25")
-        self.assertEqual(row["w25_start"], "2026-06-15")
+        self.assertEqual(row["w25_start"], "2026-06-11")
         self.assertEqual(row["w25_end"], "2026-06-17")
         self.assertEqual(row["w25_impressions"], "222")
         self.assertEqual(row["w24_impressions"], "100")
@@ -448,9 +448,9 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
 
     def test_missing_exact_window_is_not_replaced_by_overlap(self):
         customer = "1234567890"
-        self._write_period(customer, "2026-06-15", "2026-06-17", "run", 100)
-        self._write_period(customer, "2026-06-07", "2026-06-14", "overlap", 100)
-        self._write_period(customer, "2026-06-01", "2026-06-07", "run", 100)
+        self._write_period(customer, "2026-06-11", "2026-06-17", "run", 100)
+        self._write_period(customer, "2026-06-04", "2026-06-09", "overlap", 100)
+        self._write_period(customer, "2026-05-28", "2026-06-03", "run", 100)
 
         with self.assertRaises(SystemExit):
             dp._agg_campaign_weekly_trend(
@@ -461,12 +461,12 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
 
     def test_matching_file_rejects_foreign_account_rows(self):
         customer = "1234567890"
-        self._write_period(customer, "2026-06-15", "2026-06-17", "run", 100)
+        self._write_period(customer, "2026-06-11", "2026-06-17", "run", 100)
         self._write_period(
-            customer, "2026-06-08", "2026-06-14", "run", 100,
+            customer, "2026-06-04", "2026-06-10", "run", 100,
             row_customer="9998887777",
         )
-        self._write_period(customer, "2026-06-01", "2026-06-07", "run", 100)
+        self._write_period(customer, "2026-05-28", "2026-06-03", "run", 100)
 
         with self.assertRaises(SystemExit):
             dp._agg_campaign_weekly_trend(

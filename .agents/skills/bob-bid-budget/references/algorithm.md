@@ -2,11 +2,11 @@
 
 ## Signal Inputs
 
-Two signals, each compared against the average of the prior two ISO weeks (W-1 and W-2):
+Two signals, each compared against the average of the prior two rolling seven-day windows (W-1
+and W-2):
 
-- **W0** = Monday through yesterday in yesterday's ISO week. It may be a partial current week;
-  there is no minimum-day requirement. On Monday, W0 is the just-completed prior week.
-- **W-1 and W-2** = the two complete ISO weeks immediately before W0.
+- **W0** = the seven calendar days ending yesterday.
+- **W-1 and W-2** = the two preceding contiguous seven-day windows.
 
 - **CPI** = W0 cost / W0 installs
 - **CPM** = W0 cost / W0 impressions × 1000

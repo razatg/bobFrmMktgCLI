@@ -46,7 +46,7 @@ def bid_budget_trend_path(customer_id: str, explicit: str | None = None) -> tupl
 def validate_bid_budget_trend_rows(
     rows: list[dict[str, str]], customer_id: str, windows: list[tuple[dt.date, dt.date]]
 ) -> None:
-    """Fail closed when a trend does not encode the exact account and three weekly windows."""
+    """Fail closed when a trend does not encode the exact account and rolling windows."""
     if not rows:
         die("campaign-trend file contains no campaign rows")
     normalized_customer = str(customer_id).replace("-", "")
@@ -63,7 +63,7 @@ def validate_bid_budget_trend_rows(
     first = rows[0]
     week_fields = ("current_iso_week", "prior1_iso_week", "prior2_iso_week")
     for field, (start, end) in zip(week_fields, windows):
-        iso_week = start.isocalendar().week
+        iso_week = end.isocalendar().week
         if str(first.get(field, "")) != str(iso_week):
             die(f"campaign-trend {field} is {first.get(field, '<missing>')}, expected {iso_week}")
         if first.get(f"w{iso_week}_start") != start.isoformat() or first.get(f"w{iso_week}_end") != end.isoformat():

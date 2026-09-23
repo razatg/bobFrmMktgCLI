@@ -261,7 +261,9 @@ def _agg_campaign_weekly_trend(
                 f"expected only {customer}"
             )
         w_start, w_end = start.isoformat(), end.isoformat()
-        iso_week = start.isocalendar().week
+        # Keep the established W<ISO> column compatibility, labelling each rolling
+        # period by its end date's ISO week so W0 remains the current period label.
+        iso_week = end.isocalendar().week
         agg = _aggregate_period_rows(rows, campaign_key_cols, primary_goal)
         week_data.append((iso_week, w_start, w_end, {r["campaign_id"]: r for r in agg}))
 
