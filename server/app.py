@@ -507,11 +507,14 @@ def prepare_conversation_runtime(workspace_id: str):
 def runtime_google_config(store, user_id, client_instance_id, state_root: Path, account_id=None):
     config=client_google_config(store, client_instance_id)
     connection=store.one('SELECT * FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(user_id,client_instance_id))
-    if not config or not connection: return None
+    path=state_root / '.bob' / 'runtime' / f'google-ads-{user_id}.yaml'
+    if not config or not connection:
+        path.unlink(missing_ok=True)
+        return None
     developer=app.state.secrets.get(config['developer_token_ref'])
     secret=app.state.secrets.get(config['oauth_client_secret_ref'])
     refresh=app.state.secrets.get(connection['refresh_token_ref'])
-    path=state_root / '.bob' / 'runtime' / f'google-ads-{user_id}.yaml'; path.parent.mkdir(parents=True,exist_ok=True)
+    path.parent.mkdir(parents=True,exist_ok=True)
     lines=[f'developer_token: {json.dumps(developer)}',f'client_id: {json.dumps(config["oauth_client_id"])}',f'client_secret: {json.dumps(secret)}',f'refresh_token: {json.dumps(refresh)}','use_proto_plus: true']
     if config['mcc_id']: lines.append(f'login_customer_id: {json.dumps(config["mcc_id"])}')
     path.write_text('\n'.join(lines)+'\n')
@@ -566,6 +569,16 @@ def account_permission(store, user_id, client_instance_id, account_id):
     return row['permission'] if row and row['permission'] in {'read', 'read_write'} else 'read'
 
 GOOGLE_SETUP_HANDOFF = "I can do that once you connect Bob to Google Ads. Say ‘Hey Bob, set me up’ and I’ll take you through it."
+GOOGLE_REAUTH_HANDOFF = "You need to log in to your Google account again. Just say ‘Set me up again.’"
+def google_auth_handoff(store, user_id, client_instance_id):
+    connection=store.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user_id,client_instance_id))
+    return GOOGLE_REAUTH_HANDOFF if connection and connection['status']=='reauth_required' else GOOGLE_SETUP_HANDOFF
+def is_google_setup_request(text):
+    normalized=re.sub(r'[^a-z0-9]+',' ',text.casefold()).strip()
+    return (
+        'set me up' in normalized or 'set up' in normalized or normalized in {'setup','onboard me','onboard me bob'}
+        or 'connect google ads' in normalized or 'connect to google ads' in normalized or 'connect bob to google ads' in normalized
+    )
 def cookie(response, sid): response.set_cookie('bob_session',sid,httponly=True,secure=os.getenv('BOB_SECURE_COOKIES','0')=='1',samesite='lax',max_age=86400)
 
 @app.get('/')
@@ -993,6 +1006,16 @@ async def update_client_user(client_id: str, uid: str, body: UserUpdateIn, reque
     if body.status not in {'approved','waitlisted','suspended'}: raise HTTPException(400,'invalid user status')
     s.run('UPDATE client_memberships SET status=? WHERE user_id=? AND client_instance_id=?',(body.status,uid,client_id))
     return {'ok':True,'user_id':uid,'status':body.status}
+@app.post('/api/admin/clients/{client_id}/users/{uid}/google-ads/reauth')
+async def require_user_google_reauth(client_id: str, uid: str, request: Request):
+    admin=await csrf(request); s=request.app.state.store; client_for_user(s,admin,client_id)
+    if admin['role']!='admin': raise HTTPException(403,'admin required')
+    member=s.one('SELECT role FROM client_memberships WHERE user_id=? AND client_instance_id=?',(uid,client_id))
+    if not member or member['role']!='member': raise HTTPException(404,'client user not found')
+    connection=s.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(uid,client_id))
+    if not connection: raise HTTPException(409,'user has no Google Ads connection to renew')
+    s.run('UPDATE google_ads_connections SET status="reauth_required",last_error="Reauthorization requested by an administrator",updated_at=? WHERE id=?',(now(),connection['id']))
+    return {'ok':True,'user_id':uid,'google_status':'reauth_required'}
 @app.delete('/api/admin/clients/{client_id}/users/{uid}')
 async def remove_client_user(client_id: str, uid: str, request: Request):
     admin=await csrf(request); s=request.app.state.store; client_for_user(s,admin,client_id)
@@ -1138,7 +1161,7 @@ async def google_oauth_callback(code: str | None = None, state: str | None = Non
         return RedirectResponse(url=urlunsplit(('', '', parts.path or '/', urlencode(query), '')), status_code=303)
     if error: s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); return result('failed')
     if not code: s.run('UPDATE oauth_transactions SET status="failed" WHERE id=?',(tx['id'],)); return result('failed')
-    config=s.one('SELECT * FROM client_google_configs WHERE client_instance_id=?',(tx['client_instance_id'],))
+    config=client_google_config(s,tx['client_instance_id'])
     try:
         if not config: raise HTTPException(503,'Google Ads application is not configured')
         token=exchange_google_code(code,config['oauth_client_id'],app.state.secrets.get(config['oauth_client_secret_ref']),app.state.secrets.get(tx['pkce_verifier_ref']),configured_redirect_uri(s))
@@ -1215,8 +1238,7 @@ async def message(cid: str, body: MessageIn, request: Request):
     active = s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
     if active:
         raise HTTPException(409, 'Bob is still working on this conversation. Please wait for the current job or stop it before sending another prompt.')
-    setup_request=body.content.strip().lower()
-    if 'set me up' in setup_request or setup_request in {'setup','onboard me','onboard me bob'}:
+    if is_google_setup_request(body.content):
         mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
         connection=s.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],row['client_instance_id']))
         if connection and connection['status']=='connected':
@@ -1294,7 +1316,7 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     save_learned_offscope(learned)
                     final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
                 if auth_required:
-                    final = GOOGLE_SETUP_HANDOFF
+                    final = google_auth_handoff(s,row['user_id'],row['client_instance_id'])
                 final = sanitize_user_response(
                     final,
                     technical=user_requested_technical_help(prompt),
@@ -1328,7 +1350,7 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='cancelled',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
                 else:
                     if auth_required:
-                        final = GOOGLE_SETUP_HANDOFF
+                        final = google_auth_handoff(s,row['user_id'],row['client_instance_id'])
                         s.run('UPDATE conversations SET agent_session_id=?,last_activity_at=? WHERE id=?',(sid if 'sid' in locals() else row.get('agent_session_id'),now(),cid))
                         s.run('UPDATE jobs SET status="completed",completed_at=?,error=NULL WHERE id=?',(now(),jid))
                         assistant_message_id=new_id(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(assistant_message_id,cid,'assistant',final,'completed',now()))

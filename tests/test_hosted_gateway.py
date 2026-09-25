@@ -366,6 +366,32 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(registry.exists())
         self.assertFalse((Path(self.workspace) / '.bob' / 'accounts.json').exists())
 
+    def test_admin_can_require_user_google_reauthorization(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']
+        added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={
+            'identifier':'renew@example.com','password':'renew-password'})
+        self.assertEqual(added.status_code,200,added.text)
+        user_id=added.json()['user']['id']; refresh_ref=self.app.state.secrets.put('old-refresh-token')
+        s.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(
+            'renew-connection',user_id,client_id,None,None,refresh_ref,
+            'https://www.googleapis.com/auth/adwords','connected',None,None,
+            '2026-09-25T00:00:00+00:00','2026-09-25T00:00:00+00:00'))
+        required=self.client.post(f'/api/admin/clients/{client_id}/users/{user_id}/google-ads/reauth',headers={'X-CSRF-Token':admin_csrf})
+        self.assertEqual(required.status_code,200,required.text)
+        self.assertEqual(required.json()['google_status'],'reauth_required')
+        connection=s.one('SELECT status,last_error,refresh_token_ref FROM google_ads_connections WHERE id=?',('renew-connection',))
+        self.assertEqual(connection['status'],'reauth_required')
+        self.assertIn('administrator',connection['last_error'])
+        self.assertEqual(self.app.state.secrets.get(connection['refresh_token_ref']),'old-refresh-token')
+        state_root=Path(self.tmp.name)/'reauth-runtime'; stale=state_root/'.bob'/'runtime'/f'google-ads-{user_id}.yaml'
+        stale.parent.mkdir(parents=True); stale.write_text('refresh_token: old-refresh-token\n')
+        from server.app import runtime_google_config
+        self.assertIsNone(runtime_google_config(s,user_id,client_id,state_root))
+        self.assertFalse(stale.exists())
+        self.client.post('/auth/login',json={'identifier':'renew@example.com','password':'renew-password'})
+        self.assertFalse(self.client.get('/auth/session').json()['google_connected'])
+
     def test_admin_account_permission_grant_and_revoke(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
         client_id=s.one('SELECT id FROM client_instances')['id']
@@ -475,7 +501,7 @@ class GatewayTests(unittest.TestCase):
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
         member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'setup-user','password':'another-secure-password'})
         member_csrf=member.json()['csrf']; conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
-        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'set me up'})
+        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'Can you set up Google Ads?'})
         self.assertEqual(response.status_code,200,response.text)
         self.assertIsNone(response.json()['job_id'])
         self.assertIn('https://accounts.google.com/o/oauth2/v2/auth',response.json()['immediate_response'])
@@ -531,6 +557,12 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.text)
         self.assertIsNone(response.json()['job_id'])
         self.assertIn('https://accounts.google.com/o/oauth2/v2/auth',response.json()['immediate_response'])
+        state=parse_qs(urlparse(response.json()['immediate_response']).query)['state'][0]
+        from server import app as app_module
+        with patch.object(app_module,'exchange_google_code',return_value={'refresh_token':'beta-refresh','scope':'https://www.googleapis.com/auth/adwords'}):
+            callback=self.client.get('/api/google-ads/oauth/callback',params={'code':'auth-code','state':state})
+        self.assertEqual(callback.status_code,200,callback.text)
+        self.assertTrue(self.client.get('/auth/session').json()['google_connected'])
 
     def test_multi_client_admin_console_is_client_scoped(self):
         admin_csrf=self.bootstrap()
@@ -580,7 +612,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=31', html)
+        self.assertIn('/static/app.js?v=32', html)
         self.assertIn('/api/admin/runtime-settings', js)
         self.assertIn('Aggregate processed input tokens', js)
         self.assertIn('cached_input_tokens_estimate', js)
@@ -623,7 +655,7 @@ class GatewayTests(unittest.TestCase):
         bundle=self.client.get('/static/app.js?v=31')
         self.assertEqual(shell.status_code,200,shell.text)
         self.assertEqual(bundle.status_code,200,bundle.text)
-        self.assertIn('/static/app.js?v=31',shell.text)
+        self.assertIn('/static/app.js?v=32',shell.text)
         self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
         self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 
@@ -904,6 +936,23 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(job['status'],'completed')
         events=s.all('SELECT payload FROM job_events WHERE job_id=?',(response.json()['job_id'],))
         self.assertTrue(any(json.loads(event['payload'])=={'type':'bob.error','code':'GOOGLE_AUTH_REQUIRED'} for event in events))
+
+    def test_live_fetch_with_forced_reauth_gets_reconnect_handoff(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
+        s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('reauth-account',client_id,'1234567890','Fetch account',1,stamp))
+        added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={'identifier':'reauth-reader@example.com','password':'reader-password'})
+        user_id=added.json()['user']['id']
+        self.client.post(f'/api/admin/users/{user_id}/accounts/reauth-account/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read'})
+        refresh_ref=self.app.state.secrets.put('expired-refresh-token')
+        s.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',('reauth-reader',user_id,client_id,None,None,refresh_ref,'scope','reauth_required',None,'Reauthorization requested by an administrator',stamp,stamp))
+        login=self.client.post('/auth/login',json={'identifier':'reauth-reader@example.com','password':'reader-password'})
+        csrf=login.json()['csrf']; self.app.state.runner=FetchRunner()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()
+        response=self.client.post(f"/api/conversations/{conversation['id']}/messages",headers={'X-CSRF-Token':csrf},json={'content':'What happened last week?'})
+        import time; time.sleep(.1)
+        messages=self.client.get(f"/api/conversations/{conversation['id']}").json()['messages']
+        self.assertEqual(messages[-1]['content'],"You need to log in to your Google account again. Just say ‘Set me up again.’")
 
     def test_command_name_does_not_turn_unrelated_failure_into_google_setup(self):
         csrf=self.bootstrap(); self.app.state.runner=UnrelatedFetchFailureRunner()
