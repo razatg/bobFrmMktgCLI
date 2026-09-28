@@ -429,6 +429,9 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse((prepared / '.agents').is_symlink())
         self.assertTrue((prepared / '.agents' / 'skills').is_dir())
         self.assertFalse((prepared / 'AGENTS.md').is_symlink())
+        self.assertIn('Admin owns Google Ads application credentials',(prepared / 'AGENTS.md').read_text())
+        self.assertFalse((prepared / '.agents' / 'skills' / 'bob-accounts').exists())
+        self.assertTrue((app_module.ROOT / '.agents' / 'skills' / 'bob-accounts').is_dir())
         self.assertFalse((prepared / 'garf' / 'queries').is_symlink())
         self.assertFalse((prepared / 'bob').is_symlink())
         self.assertTrue(os.access(prepared / 'bob', os.X_OK))
@@ -498,10 +501,14 @@ class GatewayTests(unittest.TestCase):
         admin_csrf=self.bootstrap()
         self.client.post('/api/admin/google-ads/config',headers={'X-CSRF-Token':admin_csrf},json={
             'developer_token':'dev-token','client_id':'client-id','client_secret':'client-secret','mcc_id':'1234567890'})
+        client_id=self.app.state.store.one('SELECT id FROM client_instances')['id']
+        self.app.state.store.run('''INSERT INTO client_accounts
+          (id,client_instance_id,customer_id,account_name,is_active,created_at)
+          VALUES (?,?,?,?,?,?)''',('setup-account',client_id,'1234567890','Setup Account',1,'2026-09-28T00:00:00+00:00'))
         invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
         member=self.client.post('/auth/invite/redeem',json={'code':invite,'identifier':'setup-user','password':'another-secure-password'})
         member_csrf=member.json()['csrf']; conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
-        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'Can you set up Google Ads?'})
+        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={'content':'Connect the Google Ads read access for this client.'})
         self.assertEqual(response.status_code,200,response.text)
         self.assertIsNone(response.json()['job_id'])
         self.assertIn('https://accounts.google.com/o/oauth2/v2/auth',response.json()['immediate_response'])
@@ -547,7 +554,8 @@ class GatewayTests(unittest.TestCase):
             'developer_token':'dev-token','client_id':'client-id','client_secret':'client-secret','mcc_id':'1234567890'})
         self.assertEqual(config.status_code,200,config.text)
         created=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':admin_csrf},json={
-            'name':'Beta','slug':'beta','identifier':'owner@beta.com','password':'beta-owner-password'})
+            'name':'Beta','slug':'beta','identifier':'owner@beta.com','password':'beta-owner-password',
+            'accounts':[{'account_name':'Beta Demand','customer_id':'111-111-1111'}]})
         self.assertEqual(created.status_code,200,created.text)
         client_login=self.client.post('/auth/login',json={'identifier':'owner@beta.com','password':'beta-owner-password'})
         self.assertEqual(client_login.status_code,200,client_login.text)
@@ -563,6 +571,8 @@ class GatewayTests(unittest.TestCase):
             callback=self.client.get('/api/google-ads/oauth/callback',params={'code':'auth-code','state':state})
         self.assertEqual(callback.status_code,200,callback.text)
         self.assertTrue(self.client.get('/auth/session').json()['google_connected'])
+        messages=self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        self.assertEqual(messages[-1]['content'],"You’re all set, mate. Your Google Ads account is connected. What would you like to check first?")
 
     def test_multi_client_admin_console_is_client_scoped(self):
         admin_csrf=self.bootstrap()
@@ -612,7 +622,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=32', html)
+        self.assertIn('/static/app.js?v=33', html)
         self.assertIn('/api/admin/runtime-settings', js)
         self.assertIn('Aggregate processed input tokens', js)
         self.assertIn('cached_input_tokens_estimate', js)
@@ -652,10 +662,10 @@ class GatewayTests(unittest.TestCase):
 
     def test_browser_shell_and_app_bundle_always_revalidate(self):
         shell=self.client.get('/')
-        bundle=self.client.get('/static/app.js?v=31')
+        bundle=self.client.get('/static/app.js?v=33')
         self.assertEqual(shell.status_code,200,shell.text)
         self.assertEqual(bundle.status_code,200,bundle.text)
-        self.assertIn('/static/app.js?v=32',shell.text)
+        self.assertIn('/static/app.js?v=33',shell.text)
         self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
         self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 
@@ -939,6 +949,8 @@ class GatewayTests(unittest.TestCase):
 
     def test_live_fetch_with_forced_reauth_gets_reconnect_handoff(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
+        self.client.post('/api/admin/google-ads/config',headers={'X-CSRF-Token':admin_csrf},json={
+            'developer_token':'dev-token','client_id':'client-id','client_secret':'client-secret'})
         client_id=s.one('SELECT id FROM client_instances')['id']; stamp='2026-08-31T00:00:00+00:00'
         s.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',('reauth-account',client_id,'1234567890','Fetch account',1,stamp))
         added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={'identifier':'reauth-reader@example.com','password':'reader-password'})

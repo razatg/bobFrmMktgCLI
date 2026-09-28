@@ -352,6 +352,7 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
             "For a confirmed novel read-only analysis not covered by a standard Bob workflow, use the registered Bob MCP data tools first. Materialize only the prepared tables, use the Codex sandbox only for a temporary Pandas analysis in .wings-it, then call the registered verifier before presenting a result. Do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
             "When the user says a previous blocker or code has been fixed, or asks to retry or recheck, verify the affected capability now with its safe registered tool or data check. Do not repeat a prior failure solely from native-thread context.\n\n"
+            "Hosted setup is Admin-owned: never ask the user for a Google Ads developer token, customer ID, MCC ID, account name, campaign type, currency, or account configuration. Never run local CLI onboarding. If Google authorization is missing, ask the user to say ‘Set me up again’; the gateway supplies the authorization link.\n\n"
             + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
             + continuity
@@ -472,13 +473,17 @@ def prepare_conversation_runtime(workspace_id: str):
     # from the writable workspace to /app/.agents makes bubblewrap reject the
     # whole command before any tool can run. Refresh small, disposable runtime
     # snapshots instead; authoritative code remains image-owned under ROOT.
-    for name in ('AGENTS.md', 'CLAUDE.md', 'SOUL.md', 'pyproject.toml'):
+    for name in ('CLAUDE.md', 'SOUL.md', 'pyproject.toml'):
         target = ROOT / name
         if target.exists():
             _replace_runtime_copy(workspace / name, target)
+    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'server' / 'hosted_agent_instructions.txt')
     agents_source = ROOT / '.agents'
     if agents_source.exists():
         _replace_runtime_copy(workspace / '.agents', agents_source)
+        hosted_onboarding_skill = workspace / '.agents' / 'skills' / 'bob-accounts'
+        if hosted_onboarding_skill.exists():
+            shutil.rmtree(hosted_onboarding_skill)
 
     # Do not expose image-owned bin/lib trees through writable symlinks. The
     # local wrapper executes the image launcher, which resolves /app/.venv and
@@ -570,15 +575,41 @@ def account_permission(store, user_id, client_instance_id, account_id):
 
 GOOGLE_SETUP_HANDOFF = "I can do that once you connect Bob to Google Ads. Say ‘Hey Bob, set me up’ and I’ll take you through it."
 GOOGLE_REAUTH_HANDOFF = "You need to log in to your Google account again. Just say ‘Set me up again.’"
+OAUTH_SUCCESS_MESSAGE = "You’re all set, mate. Your Google Ads account is connected. What would you like to check first?"
+
+def hosted_connection_state(store, user, client_instance_id):
+    if not client_google_config(store, client_instance_id):
+        return 'admin_configuration_required'
+    if not store.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND is_active=1',(client_instance_id,)):
+        return 'admin_configuration_required'
+    if not permitted_accounts(store, user, client_instance_id):
+        return 'account_access_required'
+    connection=store.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],client_instance_id))
+    return connection['status'] if connection else 'authorization_required'
+
 def google_auth_handoff(store, user_id, client_instance_id):
-    connection=store.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user_id,client_instance_id))
-    return GOOGLE_REAUTH_HANDOFF if connection and connection['status']=='reauth_required' else GOOGLE_SETUP_HANDOFF
+    user=store.one('SELECT * FROM users WHERE id=?',(user_id,))
+    state=hosted_connection_state(store, user, client_instance_id) if user else 'authorization_required'
+    return GOOGLE_REAUTH_HANDOFF if state=='reauth_required' else GOOGLE_SETUP_HANDOFF
+
 def is_google_setup_request(text):
     normalized=re.sub(r'[^a-z0-9]+',' ',text.casefold()).strip()
     return (
         'set me up' in normalized or 'set up' in normalized or normalized in {'setup','onboard me','onboard me bob'}
-        or 'connect google ads' in normalized or 'connect to google ads' in normalized or 'connect bob to google ads' in normalized
+        or ('connect' in normalized and any(term in normalized for term in ('google','ads','access','account')))
+        or ('authoriz' in normalized and any(term in normalized for term in ('google','ads','access','account')))
     )
+
+def hosted_connection_reply(store, user, client_instance_id, return_path):
+    state=hosted_connection_state(store, user, client_instance_id)
+    if state=='connected':
+        return "You’re already connected to Google Ads with your own Google account. Ask me what you’d like to check."
+    if state=='admin_configuration_required':
+        return "Your Admin needs to configure Google Ads and add an active account for this client before you can connect."
+    if state=='account_access_required':
+        return "Your Admin needs to grant you access to an active Google Ads account before you can connect."
+    url,_=create_google_oauth_transaction(store,user,client_instance_id,return_path)
+    return "Righto — open this Google Ads authorization link and sign in with your own Google account:\n\n"+url+"\n\nOnce Google sends you back, I’ll confirm the connection here."
 def cookie(response, sid): response.set_cookie('bob_session',sid,httponly=True,secure=os.getenv('BOB_SECURE_COOKIES','0')=='1',samesite='lax',max_age=86400)
 
 @app.get('/')
@@ -1151,6 +1182,14 @@ async def google_oauth_start(request: Request):
     authorization_url,expires=create_google_oauth_transaction(s,user,client_id,request.query_params.get('return_path','/'))
     return {'authorization_url':authorization_url,'expires_at':expires}
 
+def oauth_return_conversation(store, transaction):
+    query=dict(parse_qsl(urlsplit(transaction['return_path'] or '/').query,keep_blank_values=True))
+    conversation_id=query.get('conversation')
+    if not conversation_id:
+        return None
+    return store.one('SELECT id FROM conversations WHERE id=? AND user_id=? AND client_instance_id=?',(
+        conversation_id,transaction['user_id'],transaction['client_instance_id']))
+
 @app.get('/api/google-ads/oauth/callback')
 async def google_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None, request: Request = None):
     if not state: return RedirectResponse(url='/?google_auth=failed', status_code=303)
@@ -1174,6 +1213,10 @@ async def google_oauth_callback(code: str | None = None, state: str | None = Non
     if existing: s.run('UPDATE google_ads_connections SET refresh_token_ref=?,scopes=?,status="connected",last_error=NULL,last_verified_at=?,updated_at=? WHERE id=?',(ref,token.get('scope','https://www.googleapis.com/auth/adwords'),t,t,existing['id']))
     else: s.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(new_id(),tx['user_id'],tx['client_instance_id'],None,None,ref,token.get('scope','https://www.googleapis.com/auth/adwords'),'connected',t,None,t,t))
     s.run('UPDATE oauth_transactions SET status="consumed" WHERE id=?',(tx['id'],))
+    conversation=oauth_return_conversation(s,tx)
+    if conversation:
+        s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),conversation['id'],'assistant',OAUTH_SUCCESS_MESSAGE,'completed',now()))
+        s.run('UPDATE conversations SET last_activity_at=? WHERE id=?',(now(),conversation['id']))
     return result('success')
 
 def datetime_plus(hours):
@@ -1240,15 +1283,7 @@ async def message(cid: str, body: MessageIn, request: Request):
         raise HTTPException(409, 'Bob is still working on this conversation. Please wait for the current job or stop it before sending another prompt.')
     if is_google_setup_request(body.content):
         mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
-        connection=s.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],row['client_instance_id']))
-        if connection and connection['status']=='connected':
-            reply="You’re already connected to Google Ads with your own Google account. Ask me what you’d like to check."
-        else:
-            try:
-                url,_=create_google_oauth_transaction(s,user,row['client_instance_id'],f'/?conversation={cid}')
-                reply="Righto — open this Google Ads authorization link and sign in with your own Google account:\n\n"+url+"\n\nOnce Google sends you back, tell me you’re ready and I’ll verify the connection."
-            except HTTPException as exc:
-                reply=f"I can start that setup once the admin configures Google Ads for this workspace. ({exc.detail})"
+        reply=hosted_connection_reply(s,user,row['client_instance_id'],f'/?conversation={cid}')
         s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
         return {'job_id':None,'message_id':mid,'immediate_response':reply}
     connection=s.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],row['client_instance_id']))

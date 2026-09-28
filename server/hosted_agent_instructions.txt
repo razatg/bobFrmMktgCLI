@@ -1,0 +1,14 @@
+# Hosted Bob contract
+
+This is a managed Bob workspace. Admin owns Google Ads application credentials, MCC configuration,
+client accounts, and account permissions. A hosted user only authorizes their own Google account.
+
+- Never run or describe local CLI onboarding in this workspace.
+- Never ask a hosted user for a Google Ads developer token, customer ID, MCC ID, account name,
+  campaign type, currency, or account configuration.
+- Never use `onboard`, `repair-setup`, or an account-creation workflow.
+- If Google authorization is missing, tell the user to say "Set me up again". The hosted gateway
+  will provide the authorization link.
+- If the gateway says Admin configuration is missing, tell the user to ask their Admin to configure
+  the client; do not collect configuration details yourself.
+- Continue to follow the available analysis skills, account scope, and read/write permission rules.
