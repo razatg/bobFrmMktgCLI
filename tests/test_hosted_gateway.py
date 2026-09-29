@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 import unittest
 from pathlib import Path
@@ -184,8 +185,9 @@ class GatewayTests(unittest.TestCase):
         from server import app as app_module
         with patch.object(app_module,'runtime_log_path',return_value=Path(self.workspace)/'logs'/'bob-runtime.jsonl'):
             log=Path(self.workspace)/'logs'/'bob-runtime.jsonl'; log.parent.mkdir(parents=True,exist_ok=True)
-            log.write_text(json.dumps({'ts':'2026-08-29T10:00:00+00:00','event':'job_resource_summary','job_id':'job-a','status':'failed','peak_bytes':123,'oom_kill_count':1})+'\n')
-            history=self.client.get('/api/admin/observability/history?from=2026-08-29&to=2026-08-29',headers={'X-CSRF-Token':csrf})
+            day=datetime.now(timezone.utc).date().isoformat()
+            log.write_text(json.dumps({'ts':f'{day}T10:00:00+00:00','event':'job_resource_summary','job_id':'job-a','status':'failed','peak_bytes':123,'oom_kill_count':1})+'\n')
+            history=self.client.get(f'/api/admin/observability/history?from={day}&to={day}',headers={'X-CSRF-Token':csrf})
         self.assertEqual(history.status_code,200,history.text); self.assertEqual(history.json()[0]['job_id'],'job-a')
 
     def test_agent_info_is_dynamic(self):
@@ -622,7 +624,8 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=33', html)
+        self.assertIn('/static/app.js?v=34', html)
+        self.assertIn('DOWNLOAD THREAD', html)
         self.assertIn('/api/admin/runtime-settings', js)
         self.assertIn('Aggregate processed input tokens', js)
         self.assertIn('cached_input_tokens_estimate', js)
@@ -662,10 +665,10 @@ class GatewayTests(unittest.TestCase):
 
     def test_browser_shell_and_app_bundle_always_revalidate(self):
         shell=self.client.get('/')
-        bundle=self.client.get('/static/app.js?v=33')
+        bundle=self.client.get('/static/app.js?v=34')
         self.assertEqual(shell.status_code,200,shell.text)
         self.assertEqual(bundle.status_code,200,bundle.text)
-        self.assertIn('/static/app.js?v=33',shell.text)
+        self.assertIn('/static/app.js?v=34',shell.text)
         self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
         self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 
@@ -703,6 +706,22 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(events.json()[1]['event_type'],'agent')
         self.assertEqual(events.json()[1]['payload']['type'],'thread.started')
         self.assertEqual(events.json()[1]['payload']['thread_id'],'thread-one')
+
+    def test_admin_can_download_the_native_codex_thread(self):
+        csrf=self.bootstrap()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        job=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'hello'}).json()['job_id']
+        import time; time.sleep(.05)
+        codex_root=Path(self.tmp.name)/'codex'; thread=codex_root/'sessions'/'2026'/'09'/'29'/'rollout-thread-one.jsonl'
+        thread.parent.mkdir(parents=True); thread.write_text('{"type":"thread.started","thread_id":"thread-one"}\n{"type":"event_msg"}\n')
+        with patch.dict(os.environ,{'CODEX_HOME':str(codex_root)}):
+            download=self.client.get(f'/api/admin/codex-sessions/{job}/thread-download',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(download.status_code,200,download.text)
+        self.assertEqual(download.content,thread.read_bytes())
+        self.assertEqual(download.headers['content-type'],'application/x-ndjson')
+        self.assertIn('codex-thread-thread-one.jsonl',download.headers['content-disposition'])
+        self.client.post('/auth/logout',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(self.client.get(f'/api/admin/codex-sessions/{job}/thread-download').status_code,401)
 
     def test_admin_can_reset_a_completed_native_session_without_deleting_chat(self):
         csrf=self.bootstrap()

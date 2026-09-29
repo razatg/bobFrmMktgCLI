@@ -798,6 +798,39 @@ async def admin_codex_session_events(jid: str, request: Request):
         events.append(item)
     return events
 
+def codex_thread_file(session_id: str):
+    """Return the native JSONL for one validated Codex thread, if retained."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,255}', str(session_id or '')):
+        return None
+    codex_home=os.getenv('CODEX_HOME','').strip()
+    if not codex_home:
+        return None
+    sessions_root=(Path(codex_home).expanduser() / 'sessions').resolve()
+    if not sessions_root.is_dir():
+        return None
+    candidates=[]
+    for path in sessions_root.rglob(f'*{session_id}*.jsonl'):
+        try:
+            resolved=path.resolve()
+            resolved.relative_to(sessions_root)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_file():
+            candidates.append(resolved)
+    return max(candidates,key=lambda path:path.stat().st_mtime) if candidates else None
+
+@app.get('/api/admin/codex-sessions/{jid}/thread-download')
+async def admin_codex_session_thread_download(jid: str, request: Request):
+    user=await csrf(request); s=request.app.state.store
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    row=s.one('''SELECT json_extract(payload,'$.thread_id') AS session_id FROM job_events
+      WHERE job_id=? AND event_type='agent' AND json_extract(payload,'$.type')='thread.started'
+      ORDER BY event_id LIMIT 1''',(jid,))
+    if not row: raise HTTPException(404,'native Codex session not found')
+    path=codex_thread_file(row['session_id'])
+    if not path: raise HTTPException(404,'native Codex thread file is unavailable')
+    return FileResponse(path,media_type='application/x-ndjson',filename=f'codex-thread-{row["session_id"]}.jsonl')
+
 @app.post('/api/admin/codex-sessions/{jid}/cancel')
 async def admin_cancel_codex_session(jid: str, request: Request):
     user=await csrf(request); s=request.app.state.store
