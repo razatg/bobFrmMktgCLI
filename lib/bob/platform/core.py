@@ -93,7 +93,7 @@ DATE_QUERIES = {
     "adgroup_primary_conversion_period",
     "creative_period",
     "creative_headline_period", "creative_description_period",
-    "creative_image_period", "creative_video_period",
+    "creative_image_period", "creative_image_inventory", "creative_video_period",
 }
 
 # Granular entity-level queries are intentionally capped so a single Codex job
@@ -200,7 +200,7 @@ ADGROUP_PRIMARY_CONVERSION_PERIOD_COLUMNS = [
 
 CREATIVE_PERIOD_COLUMNS = [
     "customer_id", "campaign_id", "campaign_name",
-    "ad_group_id", "ad_group_name",
+    "ad_group_id", "ad_group_name", "ad_id",
     "asset_view_resource_name", "asset_resource_name",
     "asset_id", "asset_name", "asset_type", "asset_text", "video_id", "field_type", "performance_label",
     "image_url", "image_width", "image_height", "mime_type", "file_size_bytes",

@@ -200,13 +200,14 @@ def _agg_creative_period(
         rows.extend(read_csv(input_path))
     key_cols = [
         "customer_id", "campaign_id", "campaign_name",
-        "ad_group_id", "ad_group_name",
+        "ad_group_id", "ad_group_name", "ad_id",
         "asset_view_resource_name", "asset_resource_name",
         "asset_id", "asset_name", "asset_type", "asset_text", "video_id", "field_type", "performance_label",
         "image_url", "image_width", "image_height", "mime_type", "file_size_bytes",
     ]
     out_rows = _aggregate_period_rows(rows, key_cols, primary_goal)
-    min_imp = int(profile.get("creative_min_impressions", DEFAULT_CREATIVE_MIN_IMPRESSIONS))
+    inventory = source == "creative_image_inventory"
+    min_imp = 0 if inventory else int(profile.get("creative_min_impressions", DEFAULT_CREATIVE_MIN_IMPRESSIONS))
     out_rows = [r for r in out_rows if number(r.get("impressions")) >= min_imp]
 
     if range_start and range_end:
@@ -219,7 +220,9 @@ def _agg_creative_period(
         output_path = Path(args.output).expanduser()
     else:
         suffix = f"_{source}" if source in CREATIVE_ASSET_QUERIES.values() else ""
-        output_path = account_processed_dir(customer, "creative") / f"{customer}_{file_start}_{file_end}{suffix}.csv"
+        subdir = "creative-inventory" if inventory else "creative"
+        suffix = "_image_inventory" if inventory else suffix
+        output_path = account_processed_dir(customer, subdir) / f"{customer}_{file_start}_{file_end}{suffix}.csv"
     write_csv(output_path, out_rows, CREATIVE_PERIOD_COLUMNS)
     print(f"processed aggregate written: {output_path} ({len(out_rows)} creatives >= {min_imp} impressions)")
     if not out_rows:

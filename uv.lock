@@ -94,6 +94,7 @@ dependencies = [
     { name = "garf-google-ads" },
     { name = "mcp" },
     { name = "pandas" },
+    { name = "pillow" },
     { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -103,7 +104,6 @@ video = [
     { name = "google-genai" },
     { name = "moviepy" },
     { name = "numpy" },
-    { name = "pillow" },
 ]
 write = [
     { name = "google-ads" },
@@ -128,7 +128,7 @@ requires-dist = [
     { name = "moviepy", marker = "extra == 'video'", specifier = ">=2.1.0" },
     { name = "numpy", marker = "extra == 'video'", specifier = ">=1.26.0" },
     { name = "pandas", specifier = "==2.3.2" },
-    { name = "pillow", marker = "extra == 'video'", specifier = ">=10.0.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.35.0" },
 ]

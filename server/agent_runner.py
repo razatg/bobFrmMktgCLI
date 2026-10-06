@@ -96,6 +96,7 @@ def bob_mcp_config(environment):
         'BOB_STATE_ROOT',
         'BOB_CLIENT_INSTANCE_ID',
         'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
+        'BOB_CREATIVE_PROVIDER_CONFIG',
         'BOB_ACCOUNT_PERMISSION',
         'BOB_SELECTED_CUSTOMER_ID',
         'BOB_EXPLORATION_DIR',

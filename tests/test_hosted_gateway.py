@@ -137,6 +137,74 @@ class GatewayTests(unittest.TestCase):
         secret=Path(self.workspace)/'secrets'/'x.txt'; secret.parent.mkdir(); secret.write_text('nope')
         self.assertEqual(self.client.get('/api/admin/data-explorer/file?path=secrets/x.txt',headers={'X-CSRF-Token':csrf}).status_code,404)
 
+    def test_chat_upload_is_persistent_attached_and_materialized_for_bob(self):
+        csrf=self.bootstrap()
+        png=b'\x89PNG\r\n\x1a\n'+b'validated-image-bytes'
+        uploaded=self.client.post(
+            '/api/assets?filename=campaign-reference.png',
+            headers={'X-CSRF-Token':csrf,'Content-Type':'image/png'},content=png,
+        )
+        self.assertEqual(uploaded.status_code,200,uploaded.text)
+        asset=uploaded.json()
+        self.assertEqual(asset['name'],'campaign-reference.png')
+        self.assertEqual(asset['media_type'],'image/png')
+        stored=self.app.state.store.one('SELECT * FROM client_assets WHERE id=?',(asset['id'],))
+        from server.app import STATE_ROOT
+        self.assertTrue((STATE_ROOT/stored['storage_relpath']).is_file())
+
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        sent=self.client.post(
+            f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},
+            json={'content':'Review this creative','attachment_ids':[asset['id']]},
+        )
+        self.assertEqual(sent.status_code,200,sent.text)
+        import time; time.sleep(.05)
+        shown=self.client.get(f'/api/conversations/{conversation}').json()['messages'][0]
+        self.assertEqual(shown['attachments'],[asset])
+        call=self.app.state.runner.calls[-1]
+        self.assertIn('campaign-reference.png (image/png',call['prompt'])
+        materialized=Path(call['workspace'])/'.attachments'/sent.json()['message_id']/asset['id']/'original.png'
+        self.assertEqual(materialized.read_bytes(),png)
+        downloaded=self.client.get(asset['download_url'])
+        self.assertEqual(downloaded.content,png)
+        self.assertIn('campaign-reference.png',downloaded.headers['content-disposition'])
+
+    def test_chat_upload_rejects_unsupported_content_and_cross_user_reuse(self):
+        admin_csrf=self.bootstrap()
+        invalid=self.client.post(
+            '/api/assets?filename=payload.txt',headers={'X-CSRF-Token':admin_csrf},content=b'not media',
+        )
+        self.assertEqual(invalid.status_code,400,invalid.text)
+        self.assertEqual(self.app.state.store.one('SELECT COUNT(*) n FROM client_assets')['n'],0)
+
+        png=b'\x89PNG\r\n\x1a\n'+b'admin-owned'
+        owned=self.client.post(
+            '/api/assets?filename=admin.png',headers={'X-CSRF-Token':admin_csrf},content=png,
+        ).json()
+        second=self.client.post(
+            '/api/assets?filename=second.png',headers={'X-CSRF-Token':admin_csrf},content=png,
+        ).json()
+        admin_conversation=self.client.post(
+            '/api/conversations',headers={'X-CSRF-Token':admin_csrf},
+        ).json()['id']
+        too_many=self.client.post(
+            f'/api/conversations/{admin_conversation}/messages',headers={'X-CSRF-Token':admin_csrf},
+            json={'content':'Use both','attachment_ids':[owned['id'],second['id']]},
+        )
+        self.assertEqual(too_many.status_code,400,too_many.text)
+        invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
+        member=self.client.post('/auth/invite/redeem',json={
+            'code':invite,'identifier':'asset-member','password':'another-secure-password',
+        })
+        member_csrf=member.json()['csrf']
+        self.assertEqual(self.client.get(owned['download_url']).status_code,404)
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
+        reused=self.client.post(
+            f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},
+            json={'content':'Use this file','attachment_ids':[owned['id']]},
+        )
+        self.assertEqual(reused.status_code,404,reused.text)
+
     def test_account_knowledge_is_separate_and_editable(self):
         csrf=self.bootstrap(); s=self.app.state.store
         client_id=s.one('SELECT id FROM client_instances')['id']
@@ -443,7 +511,7 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse((prepared / 'logs').exists())
         self.assertTrue((state_root / 'logs').is_symlink())
 
-    def test_customer_artifacts_only_expose_markdown_and_csv(self):
+    def test_customer_artifacts_expose_design_docs_and_generated_outputs_only(self):
         admin_csrf = self.bootstrap()
         store = self.app.state.store
         client_id = store.one('SELECT id FROM client_instances')['id']
@@ -472,6 +540,14 @@ class GatewayTests(unittest.TestCase):
         (demand_root / 'action-items' / 'bid-budget.yaml').write_text('status: proposed\n')
         (demand_root / 'action-items' / 'suggestions.json').write_text('[{"id":1}]\n')
         (demand_root / 'action-items' / 'batch.txt').write_text('internal prompt\n')
+        (demand_root / 'design').mkdir()
+        (demand_root / 'design' / 'DESIGN.md').write_text('# Design\n')
+        (demand_root / 'design' / 'DESIGN_STRATEGY.md').write_text('# Strategy\n')
+        run=demand_root/'creative-runs'/'run-001'; (run/'outputs').mkdir(parents=True); (run/'references').mkdir()
+        (run/'outputs'/'static-1-v1.png').write_bytes(b'\x89PNG\r\n\x1a\noutput')
+        (run/'references'/'source.png').write_bytes(b'\x89PNG\r\n\x1a\nsource')
+        (run/'manifest.json').write_text('{}')
+        (run/'index.md').write_text('# Internal run\n')
         (supply_root / 'secret.md').write_text('# Supply only\n')
 
         with patch.object(app_module, 'STATE_ROOT', runtime_root):
@@ -482,6 +558,9 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(paths, [
                 '1112223333/Index.md',
                 '1112223333/action-items/bid-budget.csv',
+                '1112223333/creative-runs/run-001/outputs/static-1-v1.png',
+                '1112223333/design/DESIGN.md',
+                '1112223333/design/DESIGN_STRATEGY.md',
             ])
             csv_page = self.client.get('/api/artifacts/1112223333/action-items/bid-budget.csv')
             self.assertEqual(csv_page.status_code, 200, csv_page.text)
@@ -493,11 +572,55 @@ class GatewayTests(unittest.TestCase):
             for internal_name in ('bid-budget.yaml', 'suggestions.json', 'batch.txt'):
                 hidden = self.client.get(f'/api/artifacts/1112223333/action-items/{internal_name}')
                 self.assertEqual(hidden.status_code, 404, hidden.text)
+            self.assertEqual(self.client.get('/api/artifacts/1112223333/creative-runs/run-001/manifest.json').status_code,404)
+            self.assertEqual(self.client.get('/api/artifacts/1112223333/creative-runs/run-001/index.md').status_code,404)
+            self.assertEqual(self.client.get('/api/artifacts/1112223333/creative-runs/run-001/references/source.png').status_code,404)
+            image=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/outputs/static-1-v1.png')
+            self.assertEqual(image.json()['type'],'image')
+            self.assertIn('?raw=1',image.json()['media_url'])
+            design=self.client.get('/api/artifacts/1112223333/design/DESIGN.md').json()
+            self.assertTrue(design['editable'])
+            saved=self.client.put('/api/artifacts/1112223333/design/DESIGN.md',headers={'X-CSRF-Token':member_csrf},json={'content':'# Updated Design\n'})
+            self.assertEqual(saved.status_code,200,saved.text)
+            self.assertEqual((demand_root/'design'/'DESIGN.md').read_text(),'# Updated Design\n')
             supply = self.client.get('/api/artifacts/9998887777/secret.md')
             self.assertEqual(supply.status_code, 200, supply.text)
             self.assertIn('# Supply only', supply.json()['content'])
             legacy = self.client.get('/api/wiki')
             self.assertIn('9998887777/secret.md', [page['path'] for page in legacy.json()])
+
+    def test_client_creative_config_is_masked_and_reaches_only_runtime_file(self):
+        csrf=self.bootstrap(); store=self.app.state.store
+        client_id=store.one('SELECT id FROM client_instances')['id']
+        saved=self.client.put(
+            f'/api/admin/clients/{client_id}/creative-config',
+            headers={'X-CSRF-Token':csrf},
+            json={'api_key':'gemini-secret-value'},
+        )
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertNotIn('gemini-secret-value',saved.text)
+        shown=self.client.get(f'/api/admin/clients/{client_id}/creative-config',headers={'X-CSRF-Token':csrf})
+        self.assertEqual(shown.json(),{'configured':True,'provider':'gemini'})
+        row=store.one('SELECT * FROM client_creative_configs WHERE client_instance_id=?',(client_id,))
+        self.assertTrue(row['api_key_ref'].startswith('secret:'))
+        self.assertEqual(row['image_model'],'')
+        self.assertNotIn('gemini-secret-value',json.dumps(dict(row)))
+        retained=self.client.put(f'/api/admin/clients/{client_id}/creative-config',
+            headers={'X-CSRF-Token':csrf},json={'api_key':''})
+        self.assertEqual(retained.status_code,200,retained.text)
+        self.assertEqual(store.one('SELECT api_key_ref FROM client_creative_configs WHERE client_instance_id=?',
+            (client_id,))['api_key_ref'],row['api_key_ref'])
+
+        store.run('INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',
+                  ('creative-account',client_id,'1234567890','Creative account',1,'2026-10-01T00:00:00+00:00'))
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        sent=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={'content':'Check static creatives'})
+        self.assertEqual(sent.status_code,200,sent.text)
+        import time; time.sleep(.05)
+        environment=self.app.state.runner.calls[-1]['environment']
+        runtime=Path(environment['BOB_CREATIVE_PROVIDER_CONFIG'])
+        self.assertEqual(json.loads(runtime.read_text()),{'provider':'gemini','api_key':'gemini-secret-value'})
+        self.assertNotIn('gemini-secret-value',self.app.state.runner.calls[-1]['prompt'])
 
     def test_set_me_up_is_a_chat_response_with_google_url(self):
         admin_csrf=self.bootstrap()
@@ -624,7 +747,17 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=34', html)
+        self.assertIn('/static/app.js?v=37', html)
+        self.assertIn('id="asset-upload"', html)
+        self.assertIn('aria-label="Add attachment"', html)
+        self.assertIn('data-upload-kind="image"', html)
+        self.assertIn('data-upload-kind="video"', html)
+        self.assertIn("fetch(`/api/assets?filename=", js)
+        self.assertIn("kind==='video'?'.mp4,video/mp4'", js)
+        self.assertIn('SAVE GEMINI KEY', js)
+        self.assertNotIn('creative-image-model', js)
+        self.assertIn("page.type==='image'", js)
+        self.assertIn('artifactSaveTimer', js)
         self.assertIn('DOWNLOAD THREAD', html)
         self.assertIn('/api/admin/runtime-settings', js)
         self.assertIn('Aggregate processed input tokens', js)
@@ -665,10 +798,10 @@ class GatewayTests(unittest.TestCase):
 
     def test_browser_shell_and_app_bundle_always_revalidate(self):
         shell=self.client.get('/')
-        bundle=self.client.get('/static/app.js?v=34')
+        bundle=self.client.get('/static/app.js?v=36')
         self.assertEqual(shell.status_code,200,shell.text)
         self.assertEqual(bundle.status_code,200,bundle.text)
-        self.assertIn('/static/app.js?v=34',shell.text)
+        self.assertIn('/static/app.js?v=37',shell.text)
         self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
         self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 

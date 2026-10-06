@@ -12,6 +12,7 @@ dependencies = [
     "bcrypt==4.3.0",
     "mcp==2.2.0",
     "pandas==2.3.2",
+    "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -22,7 +23,6 @@ write = [
 video = [
     "google-genai>=1.0.0",
     "moviepy>=2.1.0",
-    "pillow>=10.0.0",
     "numpy>=1.26.0",
 ]
 

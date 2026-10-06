@@ -1,6 +1,6 @@
 ---
 name: bob-wings-it
-description: Use for a novel, read-only Google Ads analysis that no existing Bob skill or CLI workflow can answer. It uses registered datasets, a disposable Codex-sandboxed Pandas analysis, and a deterministic result check. Not for account setup, standard performance comparisons, bid/budget work, creative replacement, static banners, sync, or any Google Ads mutation.
+description: Use for a novel, read-only Google Ads analysis that no existing Bob skill or CLI workflow can answer. It uses registered datasets, a disposable Codex-sandboxed Pandas analysis, and a deterministic result check. Not for account setup, standard performance comparisons, bid/budget work, creative replacement or generation, sync, or any Google Ads mutation.
 ---
 
 # Bob Wings It

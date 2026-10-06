@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 from .auth import check_password, csrf, current_user, hash_code, hash_password, same_code
 from .agent_runner import AgentRunner, ExecutionPolicy, codex_usage, compact_codex_event, custom_analysis_marker, estimate_usage, redact_event_text
+from .assets import AssetValidationError, resolve_asset_path, store_upload
 from .models import SecretStore, Store, new_id, now
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +24,10 @@ runtime_logger = logging.getLogger('bob.runtime')
 def user_requested_technical_help(prompt):
     return bool(re.search(r'\b(deploy|deployment|ssh|vm|docker|terminal|debug|debugging)\b', str(prompt).lower()))
 
-CUSTOMER_ARTIFACT_SUFFIXES = {'.md': 'markdown', '.csv': 'csv'}
+CUSTOMER_ARTIFACT_SUFFIXES = {
+    '.md': 'markdown', '.csv': 'csv', '.png': 'image', '.jpg': 'image',
+    '.jpeg': 'image', '.webp': 'image',
+}
 _WIKI_TARGET = r'(?:wiki/\d{9,10}/[^\s)>]+|/(?:app|data|home|tmp)/[^\s)>]*/wiki/\d{9,10}/[^\s)>]+)'
 
 def _safe_artifact_marker(target, label='', customer_id=None):
@@ -203,8 +207,11 @@ class Credentials(BaseModel): identifier: str; password: str
 class Bootstrap(BaseModel): secret: str; identifier: str; password: str; client_name: str = 'Bob Client'
 class Invite(BaseModel): expires_hours: int = 72; max_uses: int = 10; client_instance_id: str | None = None
 class Redeem(BaseModel): code: str; identifier: str; password: str
-class MessageIn(BaseModel): content: str
+class MessageIn(BaseModel):
+    content: str
+    attachment_ids: list[str] | None = None
 class AccountKnowledgeIn(BaseModel): customer_id: str; content: str
+class ArtifactContentIn(BaseModel): content: str
 class AccountSelectIn(BaseModel): account_id: str
 class PasswordIn(BaseModel): current_password: str; new_password: str
 class AccountIn(BaseModel):
@@ -232,6 +239,8 @@ class GoogleConfigIn(BaseModel):
     mcc_name: str | None = None
     base_url: str | None = None
     redirect_uri: str | None = None
+class CreativeConfigIn(BaseModel):
+    api_key: str = ''
 class AccountPermissionIn(BaseModel): permission: str
 class RuntimeSettingsIn(BaseModel): thread_handoff_input_tokens: int
 
@@ -477,7 +486,7 @@ def prepare_conversation_runtime(workspace_id: str):
         target = ROOT / name
         if target.exists():
             _replace_runtime_copy(workspace / name, target)
-    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'server' / 'hosted_agent_instructions.txt')
+    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'AGENTS.md')
     agents_source = ROOT / '.agents'
     if agents_source.exists():
         _replace_runtime_copy(workspace / '.agents', agents_source)
@@ -564,6 +573,25 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
         }, indent=2) + '\n')
         try: profile_path.chmod(0o600)
         except OSError: pass
+    return str(path)
+
+def runtime_creative_config(store, client_instance_id, state_root: Path):
+    config=store.one('SELECT * FROM client_creative_configs WHERE client_instance_id=?',(client_instance_id,))
+    path=state_root / '.bob' / 'runtime' / 'creative-provider.json'
+    if not config:
+        path.unlink(missing_ok=True)
+        return None
+    try:
+        api_key=app.state.secrets.get(config['api_key_ref'])
+    except (OSError,ValueError):
+        path.unlink(missing_ok=True)
+        return None
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(json.dumps({
+        'provider':config['provider'],'api_key':api_key,
+    }))
+    try: path.chmod(0o600)
+    except OSError: pass
     return str(path)
 
 def account_permission(store, user_id, client_instance_id, account_id):
@@ -983,7 +1011,34 @@ async def admin_client_detail(client_id: str, request: Request):
       WHERE m.client_instance_id=? AND m.role='member' ORDER BY u.email_or_identifier''',(client_id,))]
     permissions=[dict(x) for x in s.all('''SELECT ua.user_id,ua.account_id,ua.permission FROM user_account_access ua
       JOIN client_accounts a ON a.id=ua.account_id WHERE a.client_instance_id=?''',(client_id,))]
-    return {'client':dict(client),'config':dict(cfg) if cfg else None,'accounts':accounts,'users':users,'permissions':permissions}
+    creative=s.one('SELECT provider FROM client_creative_configs WHERE client_instance_id=?',(client_id,))
+    return {'client':dict(client),'config':dict(cfg) if cfg else None,
+            'creative_config':{'configured':bool(creative),'provider':creative['provider'] if creative else 'gemini'},
+            'accounts':accounts,'users':users,'permissions':permissions}
+
+@app.get('/api/admin/clients/{client_id}/creative-config')
+async def get_client_creative_config(client_id: str, request: Request):
+    user=await csrf(request); s=request.app.state.store; client_for_user(s,user,client_id)
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    row=s.one('SELECT provider FROM client_creative_configs WHERE client_instance_id=?',(client_id,))
+    return {'configured':bool(row),'provider':row['provider'] if row else 'gemini'}
+
+@app.put('/api/admin/clients/{client_id}/creative-config')
+async def put_client_creative_config(client_id: str, body: CreativeConfigIn, request: Request):
+    user=await csrf(request); s=request.app.state.store; client_for_user(s,user,client_id)
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    existing=s.one('SELECT * FROM client_creative_configs WHERE client_instance_id=?',(client_id,))
+    api_key=body.api_key.strip()
+    if not api_key and not existing:
+        raise HTTPException(400,'Gemini API key is required')
+    key_ref=app.state.secrets.put(api_key) if api_key else existing['api_key_ref']
+    created=existing['created_at'] if existing else now(); updated=now()
+    s.run('''INSERT INTO client_creative_configs
+      (client_instance_id,provider,api_key_ref,image_model,created_at,updated_at)
+      VALUES (?,"gemini",?,'',?,?) ON CONFLICT(client_instance_id) DO UPDATE SET
+      provider="gemini",api_key_ref=excluded.api_key_ref,image_model='',updated_at=excluded.updated_at''',
+      (client_id,key_ref,created,updated))
+    return {'configured':True,'provider':'gemini'}
 @app.post('/api/admin/clients/{client_id}/accounts')
 async def add_client_account(client_id: str, body: AccountIn, request: Request):
     user=await csrf(request); s=request.app.state.store; client_for_user(s,user,client_id)
@@ -1279,6 +1334,100 @@ async def create_conversation(request: Request):
     account_id = accounts[0]['id'] if accounts else None
     return create_account_conversation(s, user, m['client_instance_id'], account_id)
 
+def asset_payload(row):
+    return {
+        'id': row['id'],
+        'name': row['original_name'],
+        'media_type': row['media_type'],
+        'size_bytes': row['size_bytes'],
+        'download_url': f"/api/assets/{row['id']}",
+    }
+
+def message_asset_rows(store, message_id):
+    return store.all('''SELECT a.* FROM message_attachments ma
+      JOIN client_assets a ON a.id=ma.asset_id
+      WHERE ma.message_id=? ORDER BY ma.position''',(message_id,))
+
+def validated_message_assets(store, user, conversation_row, asset_ids):
+    ids=list(dict.fromkeys(asset_ids or []))
+    if len(ids)>1:
+        raise HTTPException(400,'one attachment per message is supported')
+    if not ids:
+        return []
+    asset=store.one('''SELECT * FROM client_assets
+      WHERE id=? AND client_instance_id=? AND uploader_user_id=?''',(
+        ids[0],conversation_row['client_instance_id'],user['id']))
+    if not asset:
+        raise HTTPException(404,'attachment not found')
+    return [asset]
+
+def insert_user_message(store, conversation_id, content, assets):
+    message_id=new_id(); created=now()
+    store.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(
+        message_id,conversation_id,'user',content,'completed',created))
+    for position,asset in enumerate(assets):
+        store.run('INSERT INTO message_attachments VALUES (?,?,?)',(
+            message_id,asset['id'],position))
+    return message_id,created
+
+def materialize_message_assets(store, message_id, workspace):
+    rows=message_asset_rows(store,message_id)
+    if not rows:
+        return ''
+    lines=['USER ATTACHMENTS (validated, client-scoped source files):']
+    for row in rows:
+        source=resolve_asset_path(STATE_ROOT,row['storage_relpath'])
+        if not source:
+            raise RuntimeError('attached source file is unavailable')
+        target_dir=workspace/'.attachments'/message_id/row['id']
+        target_dir.mkdir(parents=True,exist_ok=True)
+        target=target_dir/f'original{source.suffix.lower()}'
+        shutil.copy2(source,target)
+        target.chmod(0o444)
+        lines.append(
+            f"- {row['original_name']} ({row['media_type']}, {row['size_bytes']} bytes): {target}"
+        )
+    return '\n'.join(lines)+'\n\n'
+
+@app.post('/api/assets')
+async def upload_asset(request: Request):
+    user=await csrf(request); s=request.app.state.store; client=membership(s,user)
+    if not client:
+        raise HTTPException(403,'no client access')
+    raw_length=request.headers.get('content-length','').strip()
+    try:
+        content_length=int(raw_length) if raw_length else None
+    except ValueError:
+        raise HTTPException(400,'invalid content length') from None
+    asset_id=new_id()
+    try:
+        stored=await store_upload(
+            request.stream(),STATE_ROOT,client['client_instance_id'],asset_id,
+            request.query_params.get('filename','upload'),content_length,
+        )
+    except AssetValidationError as exc:
+        raise HTTPException(exc.status_code,str(exc)) from exc
+    s.run('''INSERT INTO client_assets
+      (id,client_instance_id,uploader_user_id,original_name,media_type,size_bytes,sha256,storage_relpath,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?)''',(
+        asset_id,client['client_instance_id'],user['id'],stored.original_name,stored.media_type,
+        stored.size_bytes,stored.sha256,stored.storage_relpath,now(),
+    ))
+    return asset_payload(s.one('SELECT * FROM client_assets WHERE id=?',(asset_id,)))
+
+@app.get('/api/assets/{asset_id}')
+async def download_asset(asset_id: str, request: Request):
+    user=await current_user(request); s=request.app.state.store
+    asset=s.one('SELECT * FROM client_assets WHERE id=?',(asset_id,))
+    if not asset or not membership(s,user,asset['client_instance_id']):
+        raise HTTPException(404,'asset not found')
+    if asset['uploader_user_id']!=user['id'] and user['role']!='admin':
+        raise HTTPException(404,'asset not found')
+    path=resolve_asset_path(STATE_ROOT,asset['storage_relpath'])
+    if not path:
+        raise HTTPException(404,'asset file not found')
+    return FileResponse(path,media_type=asset['media_type'],filename=asset['original_name'])
+
 @app.get('/api/accounts')
 async def user_accounts(request: Request):
     user=await current_user(request); s=request.app.state.store; client=membership(s,user)
@@ -1302,7 +1451,13 @@ async def select_conversation_account(cid: str, body: AccountSelectIn, request: 
     return {'ok':True,'account_id':body.account_id,'conversation_id':target['id'],'created':created}
 @app.get('/api/conversations/{cid}')
 async def get_conversation(cid: str, request: Request):
-    _,row=await conversation(request,cid); msgs=request.app.state.store.all('SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at',(cid,)); return {'conversation':dict(row),'messages':[dict(x) for x in msgs]}
+    _,row=await conversation(request,cid); s=request.app.state.store
+    messages=[]
+    for stored in s.all('SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at',(cid,)):
+        item=dict(stored)
+        item['attachments']=[asset_payload(asset) for asset in message_asset_rows(s,stored['id'])]
+        messages.append(item)
+    return {'conversation':dict(row),'messages':messages}
 @app.post('/api/conversations/{cid}/messages')
 async def message(cid: str, body: MessageIn, request: Request):
     user,row=await conversation(request,cid); s=request.app.state.store; row=dict(row)
@@ -1314,23 +1469,23 @@ async def message(cid: str, body: MessageIn, request: Request):
     active = s.one('SELECT id FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
     if active:
         raise HTTPException(409, 'Bob is still working on this conversation. Please wait for the current job or stop it before sending another prompt.')
+    assets=validated_message_assets(s,user,row,body.attachment_ids)
     if is_google_setup_request(body.content):
-        mid=new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
+        mid,_=insert_user_message(s,cid,body.content,assets)
         reply=hosted_connection_reply(s,user,row['client_instance_id'],f'/?conversation={cid}')
         s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',reply,'completed',now()))
         return {'job_id':None,'message_id':mid,'immediate_response':reply}
     connection=s.one('SELECT status FROM google_ads_connections WHERE user_id=? AND client_instance_id=?',(user['id'],row['client_instance_id']))
     allowed,_reason = is_obviously_bob_scope(s, row, body.content)
-    if not allowed:
-        mid=new_id(); t=now()
-        s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t))
+    if not allowed and not assets:
+        mid,_=insert_user_message(s,cid,body.content,assets)
         s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(new_id(),cid,'assistant',OFF_SCOPE_REPLY,'completed',now()))
         return {'job_id':None,'message_id':mid,'immediate_response':OFF_SCOPE_REPLY}
     # Serialize only within one conversation. Different conversations get
     # isolated runtime state and may run concurrently.
     lock=app.state.locks.setdefault(cid,asyncio.Lock())
     if lock.locked(): raise HTTPException(409,'conversation is busy')
-    mid,jid=new_id(),new_id(); t=now(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(mid,cid,'user',body.content,'completed',t)); s.run('''INSERT INTO jobs
+    mid,t=insert_user_message(s,cid,body.content,assets); jid=new_id(); s.run('''INSERT INTO jobs
       (id,conversation_id,message_id,status,error,started_at,completed_at,created_at)
       VALUES (?,?,?,?,?,?,?,?)''',(jid,cid,mid,'queued',None,None,None,t)); runtime_log('job_queued',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id')); asyncio.create_task(run_job(request,jid,cid,body.content,row,lock)); return {'job_id':jid,'message_id':mid}
 async def run_job(request,jid,cid,prompt,row,lock):
@@ -1360,17 +1515,21 @@ async def run_job(request,jid,cid,prompt,row,lock):
                         s.event(jid,'custom_analysis',marker)
                         analysis_marked = True
                 workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
+                attachment_context=materialize_message_assets(s,current['message_id'],workspace)
                 runtime_config=runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
+                creative_config=runtime_creative_config(s,row['client_instance_id'],state_root)
                 google_connected = bool(s.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(row['user_id'],row['client_instance_id'])))
                 environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id'], 'BOB_EXPLORATION_DIR': str(workspace / '.wings-it')}
                 if runtime_config:
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
+                if creative_config:
+                    environment['BOB_CREATIVE_PROVIDER_CONFIG'] = creative_config
                 environment['BOB_ACCOUNT_PERMISSION'] = account_permission(s, row['user_id'], row['client_instance_id'], row.get('account_id'))
                 selected_account=s.one('SELECT account_name,customer_id FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
                 if selected_account:
                     environment['BOB_SELECTED_CUSTOMER_ID'] = selected_account['customer_id']
                 policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
-                internal_prompt=prompt_for_selected_account(s,row,prompt)
+                internal_prompt=attachment_context+prompt_for_selected_account(s,row,prompt)
                 fresh_start = bool(row.get('fresh_start_pending'))
                 continuity = '' if fresh_start or row['agent_session_id'] else conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION'])
                 prior_usage = previous_thread_usage(s,cid,jid) if row['agent_session_id'] else None
@@ -1522,7 +1681,7 @@ def safe_wiki_path(path: str):
     return target
 
 ARTIFACT_SUFFIXES = CUSTOMER_ARTIFACT_SUFFIXES
-HIDDEN_ARTIFACT_NAMES = {'kt.md'}
+HIDDEN_ARTIFACT_NAMES = {'kt.md','banner-design.md','banner-design-strategy.md'}
 
 def artifact_accounts(store, user, conversation_id=None):
     client = membership(store, user)
@@ -1553,6 +1712,31 @@ def artifact_title(path: Path):
             pass
     return path.stem.replace('-', ' ').replace('_', ' ').strip().title()
 
+def visible_artifact_path(path: Path) -> bool:
+    parts=path.parts; suffix=path.suffix.lower()
+    if suffix not in ARTIFACT_SUFFIXES:
+        return False
+    if suffix in {'.png','.jpg','.jpeg','.webp'}:
+        # Expose only generated run outputs and dated, account-scoped design
+        # evidence. Keep arbitrary images elsewhere in the wiki private.
+        if (
+            len(parts) == 5
+            and parts[0].isdigit()
+            and parts[1:3] == ('design', 'static-banner-assets')
+            and re.fullmatch(r'\d{4}-\d{2}-\d{2}', parts[3])
+            and parts[4]
+        ):
+            return True
+        if 'creative-runs' not in parts:
+            return False
+    if 'creative-runs' not in parts:
+        return True
+    run_index=parts.index('creative-runs')
+    return suffix in {'.png','.jpg','.jpeg','.webp'} and len(parts)>run_index+3 and parts[run_index+2]=='outputs'
+
+def editable_design_artifact(path: Path) -> bool:
+    return len(path.parts)>=2 and path.parts[-2]=='design' and path.name in {'DESIGN.md','DESIGN_STRATEGY.md'}
+
 def permitted_artifact(store, user, path: str):
     normalized = path.strip('/')
     parts = Path(normalized).parts
@@ -1570,9 +1754,16 @@ def permitted_artifact(store, user, path: str):
     if not account:
         raise HTTPException(404, 'artifact not found')
     target = safe_wiki_path(normalized)
-    if target.is_symlink() or target.suffix.lower() not in ARTIFACT_SUFFIXES or not target.is_file():
+    if target.is_symlink() or not visible_artifact_path(Path(normalized)) or not target.is_file():
         raise HTTPException(404, 'artifact not found')
     return target, account
+
+def user_facing_artifact_markdown(path: Path) -> str:
+    content = path.read_text(errors='replace')
+    # Older strategist docs included the runtime's absolute input path. It is
+    # internal metadata, not useful artifact content; suppress it in every
+    # user-facing read/download while preserving the stored source document.
+    return re.sub(r'(?m)^\s*-\s*Strategist input:.*(?:\n|$)', '', content)
 
 @app.get('/api/artifacts')
 async def artifact_index(request: Request):
@@ -1588,7 +1779,8 @@ async def artifact_index(request: Request):
             continue
         for path in account_root.rglob('*'):
             kind = ARTIFACT_SUFFIXES.get(path.suffix.lower())
-            if path.is_symlink() or not path.is_file() or not kind or path.name.lower() in HIDDEN_ARTIFACT_NAMES:
+            relative_path=path.relative_to(root)
+            if path.is_symlink() or not path.is_file() or not kind or path.name.lower() in HIDDEN_ARTIFACT_NAMES or not visible_artifact_path(relative_path):
                 continue
             resolved = path.resolve()
             if account_root.resolve() not in resolved.parents:
@@ -1612,17 +1804,40 @@ async def artifact_index(request: Request):
 async def artifact_page(path: str, request: Request):
     user = await current_user(request)
     target, account = permitted_artifact(request.app.state.store, user, path)
+    kind=ARTIFACT_SUFFIXES[target.suffix.lower()]
     if request.query_params.get('download') == '1':
+        if kind == 'markdown':
+            return Response(
+                user_facing_artifact_markdown(target),
+                media_type='text/markdown; charset=utf-8',
+                headers={'Content-Disposition': f'attachment; filename="{target.name}"'},
+            )
         return FileResponse(target, filename=target.name, media_type='application/octet-stream')
+    if request.query_params.get('raw') == '1':
+        if kind!='image': raise HTTPException(400,'raw view is available only for images')
+        return FileResponse(target)
     return {
         'path': path,
         'title': artifact_title(target),
-        'type': ARTIFACT_SUFFIXES[target.suffix.lower()],
-        'content': target.read_text(errors='replace'),
+        'type': kind,
+        'content': '' if kind=='image' else user_facing_artifact_markdown(target) if kind=='markdown' else target.read_text(errors='replace'),
+        'media_url': f'/api/artifacts/{path}?raw=1' if kind=='image' else None,
+        'editable': editable_design_artifact(Path(path)),
         'account_name': account['account_name'],
         'customer_id': account['customer_id'],
         'updated_at': target.stat().st_mtime,
     }
+
+@app.put('/api/artifacts/{path:path}')
+async def update_artifact(path: str, body: ArtifactContentIn, request: Request):
+    user=await csrf(request); target,_=permitted_artifact(request.app.state.store,user,path)
+    if not editable_design_artifact(Path(path)):
+        raise HTTPException(403,'artifact is read-only')
+    encoded=body.content.encode('utf-8')
+    if len(encoded)>250_000:
+        raise HTTPException(413,'design document is too large')
+    target.write_bytes(encoded)
+    return {'ok':True,'updated_at':target.stat().st_mtime}
 
 @app.get('/api/wiki')
 async def wiki_index(request: Request):
@@ -1636,7 +1851,7 @@ async def wiki_index(request: Request):
 async def wiki_page(path: str, request: Request):
     user=await current_user(request); target,_=permitted_artifact(request.app.state.store,user,path)
     if target.suffix.lower()!='.md': raise HTTPException(404,'wiki page not found')
-    return {'path':path,'content':target.read_text(errors='replace'),'updated_at':target.stat().st_mtime}
+    return {'path':path,'content':user_facing_artifact_markdown(target),'updated_at':target.stat().st_mtime}
 
 def account_for_knowledge(store, user, customer_id):
     client = membership(store, user)

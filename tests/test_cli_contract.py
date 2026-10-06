@@ -33,6 +33,7 @@ EXPECTED_HANDLERS = {
     "suggest-static-banners": "suggest_static_banners",
     "suggest-static-variants": "suggest_static_variants",
     "static-variants-apply": "static_variants_apply",
+    "create-static-replacements": "create_static_replacements",
     "creative-copy-apply": "creative_copy_apply",
     "bid-budget-recommend": "bid_budget_recommend",
     "bid-budget-apply": "bid_budget_apply",

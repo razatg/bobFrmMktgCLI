@@ -1,0 +1,11 @@
+version: 1
+
+image:
+  default: gemini-3.1-flash-image
+  allowed:
+    - gemini-3.1-flash-image
+    - gemini-3-pro-image
+
+video:
+  enabled: false
+  planned_default: gemini-omni-1.1-flash

@@ -24,6 +24,35 @@ Run `python3 lib/datapull.py onboard --interactive` once (a human in a real term
 
 If a question doesn't match any reference file in `.agents/skills/`, run `./bob` to see the command map, then `./bob <name> --help` for the right subcommand. **Never invent a subcommand name.**
 
+## Skill routing protocol
+
+Route to the most specific available skill before considering a general fallback. In particular:
+
+- Visual creative requests, including LOW static replacement, campaign image refresh, named
+  revisions, and publication of generated assets, use `bob-creates-it`.
+- `bob-wings-it` is only for a confirmed, novel, read-only Google Ads analysis that no existing
+  skill or deterministic CLI workflow covers. Do not route creative replacement or generation to
+  Wings It merely because the user asks which assets to change or wants replacement ideas.
+- If both a domain skill and a fallback appear relevant, use the domain skill. Its scope and stop
+  conditions take precedence for that workflow.
+
+## Hosted workspace exceptions
+
+These rules apply only when Bob is running through the managed hosted gateway. Local CLI and
+development workflows continue to follow the general rules above.
+
+- Admin owns Google Ads application credentials, MCC configuration, client accounts, and account
+  permissions. A hosted user only authorizes their own Google account.
+- Never run or describe local CLI onboarding in a hosted workspace. Never ask a hosted user for a
+  developer token, customer ID, MCC ID, account name, campaign type, currency, or account setup
+  details. Never use `onboard`, `repair-setup`, or another account-creation workflow there.
+- If Google authorization is missing, tell the hosted user to say “Set me up again”; the gateway
+  supplies the authorization link.
+- If the gateway reports missing Admin configuration, tell the user to ask their Admin to configure
+  the client. Do not collect configuration details from them.
+- Continue to follow the available domain skills, selected-account scope, and read/write permission
+  rules in hosted conversations.
+
 ## First-run network requirement
 
 First setup and `repair-setup` install Python dependencies from PyPI. A user's browser internet is not enough if the AI app runs commands in a restricted sandbox. If dependency installation fails with DNS, package-index, HTTPS, `garf-executors`, `garf-google-ads`, `google-ads`, or `No matching distribution found` errors, treat agent-terminal network restriction as the likely blocker first — not a missing package.
@@ -227,5 +256,7 @@ other agents follow these steps directly):
 - `.agents/skills/bob-performance-analysis/` — Per-intent reference files for performance analysis/diagnosis (period/segment/calendar comparisons, delta diagnosis, change history, creative-underperformance, question suggestions) with exact CLI commands, significance thresholds, and wiki templates.
 - `.agents/skills/bob-accounts/` — Account setup & management: onboarding, switch/list accounts, check/repair config.
 - `.agents/skills/bob-bid-budget/` — Bid/budget algorithm, mutation plan, retrospective.
+- `.agents/skills/bob-creates-it/` — Visual creative loop for account image evidence, review-only generation, revisions, and approved publishing; LOW is one source selector.
+- `.agents/skills/bob-wings-it/` — Confirmed novel read-only Google Ads analyses that have no existing workflow.
 - `SOUL.md` — Bob's personality and voice.
 - `./bob --help` and `./bob <subcommand> --help` — Always the canonical answer for "what command does X".

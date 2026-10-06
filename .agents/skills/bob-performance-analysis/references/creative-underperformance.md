@@ -52,7 +52,7 @@ See `references/creative-copy-suggest.md` for the full workflow.
 #   downloaded source images when URLs are available
 ```
 
-Use the `bob-static-banners` skill's LOW Static Variant Workflow after this command. The agent must inspect each source image with `view_image`, ask the user for hard SLA constraints before every regeneration, generate only a same-size preview variant, and run spec-only QA. Preview generation must not upload or replace Google Ads assets.
+Use the `bob-creates-it` skill's LOW Static Replacement Workflow after this command. The agent inspects each source image, consumes the selected account's editable design guidance, generates review-only replacements, and presents only output images. Generation must not upload or replace Google Ads assets.
 
 After the user explicitly approves a preview to make live, use:
 ```bash
@@ -96,7 +96,7 @@ Then show the low-action table from the CLI output.
 
 - **pause**: low-action text asset — stop serving, review copy
 - **replace text**: LOW-action text asset — use `suggest-creative-copy`, then `creative-copy-apply` only after explicit user approval
-- **replace static image preview**: LOW `IMAGE` asset — use `suggest-static-variants`, then the `bob-static-banners` LOW Static Variant Workflow
+- **replace static image preview**: LOW `IMAGE` asset — use `suggest-static-variants`, then the `bob-creates-it` LOW Static Replacement Workflow
 - **apply approved static image**: approved generated `IMAGE` replacement — use `static-variants-apply`, which asks for final approval before upload/mutation
 - **review media**: LOW `YOUTUBE_VIDEO` or `MEDIA_BUNDLE` asset — review for refresh; no automated generation path yet
 - **observe**: low-watch — monitor for one more week before acting

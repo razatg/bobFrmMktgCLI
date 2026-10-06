@@ -1,6 +1,6 @@
 ---
 name: bob-performance-analysis
-description: Use when answering Bob Frm Mktg Google Ads performance questions — yesterday-vs-SDLW, WoW/MoM/MTD account comparisons, ISO-week and calendar-month comparisons, named campaign-segment comparisons, delta diagnosis, creative-underperformance diagnosis, change-history summaries, and suggesting what to ask. Account setup/switching, bid/budget, creative-copy edits, static banners, and sync each have their own skill.
+description: Use when answering Bob Frm Mktg Google Ads performance questions — yesterday-vs-SDLW, WoW/MoM/MTD account comparisons, ISO-week and calendar-month comparisons, named campaign-segment comparisons, delta diagnosis, creative-underperformance diagnosis, change-history summaries, and suggesting what to ask. Account setup/switching, bid/budget, creative-copy edits, static replacement generation, and sync each have their own skill.
 ---
 
 # Bob Google Ads Skill

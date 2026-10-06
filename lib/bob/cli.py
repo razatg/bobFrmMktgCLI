@@ -14,6 +14,7 @@ from lib.bob.performance.creatives import *
 from lib.bob.performance.manifest import *
 from lib.bob.bid_budget import *
 from lib.bob.static_banners import *
+from lib.bob.creates_it import *
 from lib.bob.creative_copy import *
 from lib.bob.accounts import *
 from lib.bob.self_improve import *
@@ -201,20 +202,31 @@ def build_parser() -> argparse.ArgumentParser:
     ssb_parser.set_defaults(func=suggest_static_banners)
 
     ssv_parser = sub.add_parser("suggest-static-variants",
-        help="prepare LOW static image candidates for source-guided same-size variants")
+        help="prepare LOW, campaign, or named static images for source-guided variants")
     ssv_parser.add_argument("--input", help="explicit processed creative CSV (default: newest account creative slice)")
     ssv_parser.add_argument("--customer", help="customer ID for selecting account-scoped wiki/data paths")
     ssv_parser.add_argument("--min-impressions", type=float, help="minimum impressions (default: profile or 50000)")
+    ssv_parser.add_argument("--selection", choices=["low", "campaign", "assets"], default="low",
+                            help="source selection; campaign and assets use the unfiltered image inventory")
+    ssv_parser.add_argument("--campaign-id", help="exact campaign ID for --selection campaign")
+    ssv_parser.add_argument("--asset-ids", help="comma-separated image asset IDs for --selection assets")
     ssv_parser.set_defaults(func=suggest_static_variants)
 
     sva_parser = sub.add_parser("static-variants-apply",
         help="upload approved static image variants and replace matching app-ad image assets")
     sva_parser.add_argument("--plan", help="YAML plan with manifest and changes/replacements")
-    sva_parser.add_argument("--manifest", help="LOW static variants manifest for direct single replacement")
-    sva_parser.add_argument("--asset-id", help="source LOW image asset ID for direct single replacement")
+    sva_parser.add_argument("--manifest", help="static source manifest for direct single replacement")
+    sva_parser.add_argument("--asset-id", help="source image asset ID for direct single replacement")
     sva_parser.add_argument("--replacement", help="generated PNG/JPEG replacement path for direct single replacement")
     sva_parser.add_argument("--dry-run", action="store_true", help="validate and show approval table without mutating Google Ads")
     sva_parser.set_defaults(func=static_variants_apply)
+
+    csr_parser = sub.add_parser("create-static-replacements",
+        help="generate review-only static images from a confirmed account creative brief")
+    csr_parser.add_argument("--manifest", required=True, help="selected static image source manifest")
+    csr_parser.add_argument("--brief", required=True, help="confirmed replacement brief JSON")
+    csr_parser.add_argument("--run-id", help="append a regeneration to an existing creative run")
+    csr_parser.set_defaults(func=create_static_replacements)
 
     cca_parser = sub.add_parser("creative-copy-apply",
         help="review and apply an approved copy plan: creates new text assets, pauses old ones")
@@ -341,7 +353,8 @@ ACTIONS
   bid-budget-retrospective      Evaluate W+1/W+2 outcomes of an applied plan
   suggest-creative-copy         Build copy plan + prompt for LOW text assets
   suggest-static-banners        Build the quarterly static-banner design guide
-  suggest-static-variants       Prepare LOW static image variant candidates
+  suggest-static-variants       Prepare LOW, campaign, or named static images
+  create-static-replacements    Generate review-only static replacements
   static-variants-apply         Upload approved static variants to Google Ads
   creative-copy-apply           Push approved copy changes to Google Ads
 

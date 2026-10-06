@@ -128,6 +128,7 @@ def _static_banner_asset(row: dict[str, Any], ratio_bucket: str, source_label: s
         "campaign_name": row.get("campaign_name", ""),
         "ad_group_id": row.get("ad_group_id", ""),
         "ad_group_name": row.get("ad_group_name", ""),
+        "ad_id": row.get("ad_id", ""),
         "asset_id": row.get("asset_id", ""),
         "asset_name": row.get("asset_name", ""),
         "asset_type": row.get("asset_type", ""),
@@ -168,6 +169,7 @@ def _static_banner_placement(asset: dict[str, Any]) -> dict[str, Any]:
         "campaign_name": asset.get("campaign_name", ""),
         "ad_group_id": asset.get("ad_group_id", ""),
         "ad_group_name": asset.get("ad_group_name", ""),
+        "ad_id": asset.get("ad_id", ""),
         "field_type": asset.get("field_type", ""),
         "impressions": asset.get("impressions", ""),
         "clicks": asset.get("clicks", ""),
@@ -338,7 +340,10 @@ def _write_static_banner_index_entry(index_path: Path, entry: str, section: str 
             in_target_section = line.strip() == f"## {section}"
             out.append(line)
             continue
-        if "Static Banner Design" in line:
+        if (
+            "Static Banner Design" in line
+            or ("[DESIGN.md]" in line and "[DESIGN_STRATEGY.md]" in line)
+        ):
             if not inserted:
                 if in_target_section:
                     out.append(entry)
@@ -530,7 +535,6 @@ def _write_static_banner_strategy_markdown(
     grouped_assets: dict[str, list[dict[str, Any]]],
     secondary_assets: list[dict[str, Any]],
     strategy: dict[str, Any],
-    strategy_input_path: Path,
     design_path: Path,
     currency: str,
     diagnostic: bool = False,
@@ -652,7 +656,6 @@ def _write_static_banner_strategy_markdown(
         "- Ask only for the missing elements needed for fidelity or approval.",
         "- Optional future inputs: ratios, count per ratio, language or locale, offer or coupon, must-use text, and must-avoid text.",
         "- Future output expectations: exact Google dimensions, .jpg or .png, under 5MB, review files only.",
-        f"- Strategist input: `{strategy_input_path}`",
     ]
     for note in strategy.get("future_generation_contract_notes", []):
         lines.append(f"- {note}")
@@ -661,7 +664,7 @@ def _write_static_banner_strategy_markdown(
         lines += [
             "",
             "## Strategist Status",
-            "Visual strategist JSON was not supplied, so this file is diagnostic only. Refetch creative_period if image URLs are missing, then run the `bob-static-banners` skill with the strategist packet.",
+            "Visual strategist JSON was not supplied, so this file is diagnostic only. Refetch creative_period if image URLs are missing, then run the `bob-creates-it` skill with the strategist packet.",
         ]
 
     path.write_text("\n".join(lines) + "\n")
@@ -971,18 +974,17 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
     currency = _currency_symbol(profile.get("currency", ""))
     wiki_base = account_wiki_dir(customer_id) if customer_id != "unknown" else STATE_ROOT / "wiki"
     design_dir = wiki_base / "design"
-    strategy_guide_path = design_dir / "banner-design-strategy.md"
+    strategy_guide_path = design_dir / "DESIGN_STRATEGY.md"
     design_md_path = design_dir / "DESIGN.md"
-    guide_path = design_dir / "banner-design.md"
     strategy_input_path = design_dir / "banner-design-strategist-input.json"
     strategy_output_path = design_dir / "banner-design-strategy.json"
     strategy_json = getattr(args, "strategy_json", None)
     data_only_diagnostic = bool(getattr(args, "data_only_diagnostic", False))
 
     if not getattr(args, "force", False) and not strategy_json and not data_only_diagnostic:
-        fresh_date = _fresh_static_banner_guide_date(strategy_guide_path if strategy_guide_path.exists() else guide_path, STATIC_BANNER_REFRESH_DAYS)
+        fresh_date = _fresh_static_banner_guide_date(strategy_guide_path, STATIC_BANNER_REFRESH_DAYS)
         if fresh_date:
-            print(f"banner design guide is fresh from {fresh_date}: {strategy_guide_path if strategy_guide_path.exists() else guide_path}")
+            print(f"banner design guide is fresh from {fresh_date}: {strategy_guide_path}")
             print("use --force to regenerate before the 90-day refresh window")
             return
 
@@ -1009,7 +1011,13 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
 
     best_assets, best_duplicate_groups = _dedupe_static_banner_assets(best_assets_raw)
     good_assets, good_duplicate_groups = _dedupe_static_banner_assets(good_assets_raw)
-    primary_assets = best_assets or good_assets
+    primary_assets = sorted(
+        best_assets or good_assets,
+        key=lambda asset: (
+            number(asset.get("in_app_conversions")), number(asset.get("installs")),
+            number(asset.get("impressions")),
+        ), reverse=True,
+    )[:20]
     secondary_assets = [] if best_assets else good_assets
     duplicate_groups = best_duplicate_groups if best_assets else good_duplicate_groups
     grouped = _group_static_banner_assets(primary_assets)
@@ -1095,7 +1103,7 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
             )
         else:
             print(
-                "\nRun the bob-static-banners skill with the strategist packet, save its JSON as "
+                "\nRun the bob-creates-it skill with the strategist packet, save its JSON as "
                 f"{design_dir / 'banner-design-strategy.json'}, then finalize with:\n"
                 f"  ./bob suggest-static-banners --customer {customer_id} --force "
                 f"--strategy-json {design_dir / 'banner-design-strategy.json'}"
@@ -1110,7 +1118,6 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
         grouped_with_downloads,
         secondary_assets,
         strategy,
-        strategy_input_path,
         design_md_path,
         currency,
         diagnostic=data_only_diagnostic,
@@ -1121,21 +1128,13 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
         strategy_guide_path,
         customer_id,
     )
-    _write_static_banner_overview_markdown(
-        guide_path,
-        strategy_guide_path,
-        design_md_path,
-        len(primary_assets),
-        diagnostic=data_only_diagnostic,
-    )
     entry = (
-        f"- [{'Static Banner Diagnostic' if data_only_diagnostic else 'Static Banner Design'} — {today().isoformat()}](design/banner-design.md) — "
-        f"strategy + DESIGN.md from {len(primary_assets)} unique {'BEST' if best_assets else 'GOOD'} visual families"
+        f"- [DESIGN.md](design/DESIGN.md) · [DESIGN_STRATEGY.md](design/DESIGN_STRATEGY.md) — "
+        f"account design guidance from {len(primary_assets)} unique {'BEST' if best_assets else 'GOOD'} visual families"
         + ("; GOOD fallback used" if not best_assets else "")
     )
     _write_static_banner_index_entry(wiki_base / "Index.md", entry, section="Design")
 
-    print(f"{'banner diagnostic overview' if data_only_diagnostic else 'banner design overview'} written: {guide_path}")
     print(f"banner strategy written:     {strategy_guide_path}")
     print(f"design spec written:         {design_md_path}")
     print(f"strategist input written:    {strategy_input_path}")

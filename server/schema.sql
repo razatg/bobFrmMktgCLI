@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS client_google_configs (
   mcc_id TEXT, mcc_name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   FOREIGN KEY(client_instance_id) REFERENCES client_instances(id)
 );
+CREATE TABLE IF NOT EXISTS client_creative_configs (
+  client_instance_id TEXT PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'gemini',
+  api_key_ref TEXT NOT NULL, image_model TEXT NOT NULL DEFAULT '', -- legacy; model selection is in the versioned catalog
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  FOREIGN KEY(client_instance_id) REFERENCES client_instances(id)
+);
 CREATE TABLE IF NOT EXISTS global_google_configs (
   environment TEXT PRIMARY KEY, developer_token_ref TEXT NOT NULL,
   oauth_client_id TEXT NOT NULL, oauth_client_secret_ref TEXT NOT NULL,
@@ -85,6 +91,19 @@ CREATE TABLE IF NOT EXISTS messages (
   status TEXT NOT NULL DEFAULT 'completed', created_at TEXT NOT NULL,
   FOREIGN KEY(conversation_id) REFERENCES conversations(id)
 );
+CREATE TABLE IF NOT EXISTS client_assets (
+  id TEXT PRIMARY KEY, client_instance_id TEXT NOT NULL, uploader_user_id TEXT NOT NULL,
+  original_name TEXT NOT NULL, media_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+  sha256 TEXT NOT NULL, storage_relpath TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+  FOREIGN KEY(client_instance_id) REFERENCES client_instances(id),
+  FOREIGN KEY(uploader_user_id) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS message_attachments (
+  message_id TEXT NOT NULL, asset_id TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(message_id, asset_id), FOREIGN KEY(message_id) REFERENCES messages(id),
+  FOREIGN KEY(asset_id) REFERENCES client_assets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_attachments ON message_attachments(message_id, position);
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued', error TEXT, started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL,
