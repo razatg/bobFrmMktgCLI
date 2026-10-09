@@ -300,8 +300,9 @@ class CreatesItTests(unittest.TestCase):
             writer.writerow({"customer_id": self.customer, "campaign_id": "10",
                              "campaign_name": "Campaign", "ad_group_id": "20", "ad_id": "30",
                              "asset_id": "40", "asset_type": "IMAGE", "image_url": "https://example.invalid/a.png"})
+        raw.with_suffix(".meta.json").write_text(json.dumps({"query_name": "creative_image_inventory"}))
         output = self.root / "inventory-processed.csv"
-        args = SimpleNamespace(grain="creative_period", source="creative_image_inventory",
+        args = SimpleNamespace(grain="creative_period", source=None,
                                goal=None, input=str(raw), input_paths=None, customer=self.customer,
                                output=str(output), from_date="2026-10-05", to="2026-10-05")
         with patch.object(performance_aggregate, "load_profile", return_value={"creative_min_impressions": 50000}):
@@ -311,6 +312,19 @@ class CreatesItTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["asset_id"], "40")
         self.assertEqual(rows[0]["ad_id"], "30")
+        output_metadata = json.loads(output.with_suffix(".meta.json").read_text())
+        self.assertEqual(output_metadata["source_query"], "creative_image_inventory")
+
+    def test_creative_aggregation_rejects_source_metadata_conflict(self):
+        raw = self.root / "inventory-raw.csv"
+        raw.write_text("customer_id,campaign_id,asset_id\n1234567890,1,2\n")
+        raw.with_suffix(".meta.json").write_text(json.dumps({"query_name": "creative_image_inventory"}))
+        args = SimpleNamespace(grain="creative_period", source="creative_image_period",
+                               goal=None, input=str(raw), input_paths=None, customer=self.customer,
+                               output=str(self.root / "processed.csv"), from_date=None, to=None)
+        with patch.object(performance_aggregate, "load_profile", return_value={}):
+            with self.assertRaises(SystemExit):
+                performance_aggregate.aggregate(args)
 
     def test_apply_match_requires_exact_ad_when_asset_is_shared(self):
         def row(ad_id):
@@ -324,9 +338,9 @@ class CreatesItTests(unittest.TestCase):
             variants._matching_app_ad(rows, "customers/123/assets/asset-1", "")
 
     def test_campaign_preparation_keeps_good_and_low_images_in_separate_inventory(self):
-        inventory_dir = self.root / "creative-inventory"
-        inventory_dir.mkdir()
-        source = inventory_dir / f"{self.customer}_2026-10-05_2026-10-05_image_inventory.csv"
+        source_dir = self.root / "arbitrary-output-location"
+        source_dir.mkdir()
+        source = source_dir / f"{self.customer}_2026-10-05_2026-10-05_image_inventory.csv"
         fields = ["customer_id", "campaign_id", "campaign_name", "ad_group_id",
                   "ad_group_name", "ad_id", "asset_id", "asset_type", "performance_label",
                   "image_width", "image_height", "impressions", "image_url"]
@@ -339,6 +353,10 @@ class CreatesItTests(unittest.TestCase):
                                  "asset_id": asset_id, "asset_type": "IMAGE",
                                  "performance_label": label, "image_width": 80,
                                  "image_height": 60, "impressions": 0})
+        source.with_suffix(".meta.json").write_text(json.dumps({
+            "source_query": "creative_image_inventory", "grain": "creative_period",
+            "customer_id": self.customer,
+        }))
         args = SimpleNamespace(selection="campaign", campaign_id="c1", asset_ids="",
                                customer=self.customer, input=str(source), min_impressions=None)
         with patch.object(variants, "load_profile", return_value={"creative_min_impressions": 50000}), \
@@ -349,6 +367,20 @@ class CreatesItTests(unittest.TestCase):
         prepared = json.loads(manifests[0].read_text())
         self.assertEqual(prepared["selection"], "campaign")
         self.assertEqual({item["asset_id"] for item in prepared["assets"]}, {"1", "2"})
+
+    def test_campaign_preparation_rejects_non_inventory_source_metadata(self):
+        source_dir = self.root / "arbitrary-output-location"
+        source_dir.mkdir()
+        source = source_dir / "processed.csv"
+        source.write_text("customer_id,campaign_id,asset_id,asset_type\n1234567890,c1,1,IMAGE\n")
+        source.with_suffix(".meta.json").write_text(json.dumps({
+            "source_query": "creative_image_period", "grain": "creative_period",
+            "customer_id": self.customer,
+        }))
+        args = SimpleNamespace(selection="campaign", campaign_id="c1", asset_ids="",
+                               customer=self.customer, input=str(source), min_impressions=None)
+        with self.assertRaises(SystemExit):
+            variants.suggest_static_variants(args)
 
     def test_partial_apply_retry_skips_placements_already_replaced(self):
         first = {"asset_id": "1", "ad_group_id": "10", "ad_id": "100",

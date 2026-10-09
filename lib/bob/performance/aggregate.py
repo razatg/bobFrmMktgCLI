@@ -173,7 +173,6 @@ def _agg_network_period(
 def _agg_creative_period(
     args: argparse.Namespace, profile: dict, primary_goal: str
 ) -> None:
-    source = args.source or "creative_period"
     range_start: dt.date | None = None
     range_end: dt.date | None = None
     customer = (args.customer or profile.get("google_ads_customer_id") or "unknown").replace("-", "")
@@ -183,6 +182,9 @@ def _agg_creative_period(
             range_end = dt.date.fromisoformat(args.to)
         except ValueError:
             die("--from and --to must be ISO dates: YYYY-MM-DD")
+    explicit_inputs = ([Path(args.input).expanduser()] if args.input else
+                       [Path(path).expanduser() for path in getattr(args, "input_paths", None) or []])
+    source = _resolve_creative_source(args.source, explicit_inputs)
     if args.input:
         input_paths = [Path(args.input).expanduser()]
     elif getattr(args, "input_paths", None):
@@ -192,9 +194,10 @@ def _agg_creative_period(
             die("aggregate period selection requires both --from and --to")
         input_paths = find_raw_files_for_range(source, range_start, range_end, customer) or []
         if not input_paths:
-            die(f"no complete raw CSV range found for {source} {range_start}–{range_end}")
+            die(f"no complete raw CSV range found for {source or 'creative_period'} {range_start}–{range_end}")
     else:
-        input_paths = [newest_raw(source)]
+        input_paths = [newest_raw(source or "creative_period")]
+    source = _resolve_creative_source(args.source, input_paths)
     rows: list[dict[str, Any]] = []
     for input_path in input_paths:
         rows.extend(read_csv(input_path))
@@ -224,12 +227,42 @@ def _agg_creative_period(
         suffix = "_image_inventory" if inventory else suffix
         output_path = account_processed_dir(customer, subdir) / f"{customer}_{file_start}_{file_end}{suffix}.csv"
     write_csv(output_path, out_rows, CREATIVE_PERIOD_COLUMNS)
+    write_metadata(output_path.with_suffix(".meta.json"), {
+        "source_query": source,
+        "grain": "creative_period",
+        "customer_id": customer,
+        "from": file_start,
+        "to": file_end,
+        "inputs": [str(path) for path in input_paths],
+    })
     print(f"processed aggregate written: {output_path} ({len(out_rows)} creatives >= {min_imp} impressions)")
     if not out_rows:
         print(
             f"WARNING: aggregate creative_period produced 0 rows above {min_imp} impressions.",
             file=sys.stderr,
         )
+
+
+def _resolve_creative_source(requested_source: str | None, input_paths: list[Path]) -> str:
+    """Resolve and validate source query names from raw-file metadata."""
+    input_sources: set[str] = set()
+    for input_path in input_paths:
+        metadata_path = input_path.with_suffix(".meta.json")
+        if not metadata_path.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            die(f"invalid source metadata for {input_path}")
+        query_name = str(metadata.get("query_name", "")).strip()
+        if query_name:
+            input_sources.add(query_name)
+    if len(input_sources) > 1:
+        die("creative aggregation inputs come from different source queries")
+    input_source = next(iter(input_sources), "")
+    if requested_source and input_source and requested_source != input_source:
+        die(f"--source {requested_source} does not match input query {input_source}")
+    return requested_source or input_source or "creative_period"
 
 
 def _agg_campaign_weekly_trend(

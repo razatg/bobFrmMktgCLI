@@ -61,8 +61,17 @@ def suggest_static_variants(args: argparse.Namespace) -> None:
                     else profile.get("creative_min_impressions", DEFAULT_CREATIVE_MIN_IMPRESSIONS))
     subdir = "creative" if selection == "low" else "creative-inventory"
     creative_path = Path(args.input).expanduser() if getattr(args, "input", None) else newest_processed(subdir, customer_id)
-    if selection != "low" and creative_path.parent.name != "creative-inventory":
-        die("campaign and named-asset selection require a processed creative image inventory")
+    if selection != "low":
+        metadata_path = creative_path.with_suffix(".meta.json")
+        try:
+            source_metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            die("campaign and named-asset selection require processed inventory with source metadata; aggregate the current image inventory first")
+        if (source_metadata.get("grain") != "creative_period"
+                or source_metadata.get("source_query") != "creative_image_inventory"):
+            die("campaign and named-asset selection require processed creative_image_inventory data")
+        if str(source_metadata.get("customer_id", "")).replace("-", "") != str(customer_id).replace("-", ""):
+            die("creative inventory metadata does not match the selected account")
     rows = read_csv(creative_path)
     period_start, period_end = _creative_file_period(creative_path)
     foreign = {str(row.get("customer_id", "")).replace("-", "") for row in rows
