@@ -25,4 +25,5 @@ SELECT
 FROM campaign
 WHERE campaign.advertising_channel_type = "MULTI_CHANNEL"
   AND campaign.advertising_channel_sub_type IN ("APP_CAMPAIGN", "APP_CAMPAIGN_FOR_ENGAGEMENT")
+  AND campaign.status = "ENABLED"
   AND segments.date BETWEEN "{start_date}" AND "{end_date}";

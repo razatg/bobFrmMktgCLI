@@ -12,6 +12,8 @@ SELECT customer.id AS customer_id, campaign.id AS campaign_id, campaign.name AS 
 FROM ad_group_ad_asset_view
 WHERE campaign.advertising_channel_type = "MULTI_CHANNEL"
   AND campaign.advertising_channel_sub_type IN ("APP_CAMPAIGN", "APP_CAMPAIGN_FOR_ENGAGEMENT")
+  AND campaign.status = "ENABLED"
+  AND ad_group.status = "ENABLED"
   AND ad_group_ad_asset_view.enabled = TRUE
   AND ad_group_ad.status != "REMOVED"
   AND asset.type = "IMAGE";

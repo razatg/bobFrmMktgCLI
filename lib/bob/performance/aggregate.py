@@ -283,7 +283,8 @@ def _agg_campaign_weekly_trend(
 
     campaign_key_cols = ["customer_id", "campaign_id", "campaign_name", "campaign_status"]
     week_data: list[tuple[int, str, str, dict[str, dict]]] = []
-    for path, (start, end) in zip(period_files, windows):
+    enabled_campaign_ids: set[str] = set()
+    for index, (path, (start, end)) in enumerate(zip(period_files, windows)):
         assert path is not None
         rows = read_csv(path)
         foreign_accounts = sorted({
@@ -296,6 +297,18 @@ def _agg_campaign_weekly_trend(
                 f"{path.name} contains rows for another account: {', '.join(foreign_accounts)}; "
                 f"expected only {customer}"
             )
+        if index == 0:
+            # Current W0 status governs eligibility across all historical windows.
+            enabled_campaign_ids = {
+                str(row.get("campaign_id", ""))
+                for row in rows
+                if str(row.get("campaign_status", "")).strip().upper() == "ENABLED"
+                and row.get("campaign_id")
+            }
+        rows = [
+            row for row in rows
+            if str(row.get("campaign_id", "")) in enabled_campaign_ids
+        ]
         w_start, w_end = start.isoformat(), end.isoformat()
         # Keep the established W<ISO> column compatibility, labelling each rolling
         # period by its end date's ISO week so W0 remains the current period label.

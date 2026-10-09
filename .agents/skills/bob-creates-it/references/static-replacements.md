@@ -18,7 +18,7 @@ If the configured Gemini request fails, report its error and stop generation. Do
 
 ## Design and generate
 
-Read the account's editable `DESIGN.md` and `DESIGN_STRATEGY.md`. If either is missing or the evidence is stale, use [design-guide.md](design-guide.md). Codex inspects each selected source image and proposes a specific edit. Once the user agrees to the method, save a confirmed internal brief inside Bob's state root:
+Before generation, check the selected account's editable `DESIGN.md` and `DESIGN_STRATEGY.md`. If either is missing or stale, stop the replacement flow and complete [design-guide.md](design-guide.md) first, using inspected evidence from that account; do not generate until both documents are available and current. If there is insufficient inspected evidence, explain the blocker rather than inventing design guidance. Codex inspects each selected source image and proposes a specific edit. Once the user agrees to the method, save a confirmed internal brief inside Bob's state root:
 
 ```json
 {

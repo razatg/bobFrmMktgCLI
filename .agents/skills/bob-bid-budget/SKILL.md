@@ -29,6 +29,9 @@ Show the recommendation and outcome, not the internal command sequence or file p
 
 - **Repo-wide rules apply** (no fabrication, no scratch scripts or ad-hoc analysis code, don't read or modify source files like `lib/`/`garf/queries/`/`bin/`/`tests/`; if a CLI command errors, surface it and use the failsafe — don't patch code). Canonical wording: `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
 - Recommendations come only from `bid-budget-recommend` output. Do not invent numbers or signal assessments.
+- The bid/budget weekly trend includes only campaigns marked `ENABLED` in the current W0 pull;
+  that active-campaign set is applied to all three weeks. Current `bid_budget_inputs` are also
+  restricted to enabled campaigns. Shared campaign-performance pulls remain status-unfiltered.
 - Treat selected-account KT exclusions as authoritative scope for the current request. They are not
   a setup blocker and must never trigger a generic failsafe or be replaced by old backlog context.
 - **Check before fetching.** Use `./bob data-manifest` for the selected account and each exact date window. Do not inspect raw directories to infer coverage. If the raw windows are complete but the processed trend is wrong or stale, rebuild it without refetching.

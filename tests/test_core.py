@@ -357,6 +357,30 @@ class TestAggregation(unittest.TestCase):
         self.assertIn("asset.text_asset.text AS asset_text", description)
         self.assertIn("asset.youtube_video_asset.youtube_video_id AS video_id", video)
 
+    def test_bid_budget_and_creative_pulls_filter_to_enabled_entities(self):
+        start = dt.date(2026, 10, 1)
+        end = dt.date(2026, 10, 7)
+        query = dp.render_query("campaign_network_period", start, end)
+        self.assertNotIn('campaign.status = "ENABLED"', query)
+
+        for query_name in ("bid_budget_inputs",):
+            with self.subTest(query=query_name):
+                query = dp.render_query(query_name, start, end)
+                self.assertIn('campaign.status = "ENABLED"', query)
+
+        creative_queries = (
+            "creative_asset_daily", "creative_conversion_action_daily",
+            "creative_description_period", "creative_headline_period",
+            "creative_image_inventory", "creative_image_period",
+            "creative_period", "creative_video_period",
+        )
+        for query_name in creative_queries:
+            with self.subTest(query=query_name):
+                query = dp.render_query(query_name, start, end, {"min_impressions": 1})
+                self.assertIn('campaign.status = "ENABLED"', query)
+                self.assertIn('ad_group.status = "ENABLED"', query)
+                self.assertIn("ad_group_ad_asset_view.enabled = TRUE", query)
+
     def test_creative_rows_prefer_text_over_stale_blank_duplicate(self):
         rows = [
             {"campaign_id": "c", "ad_group_id": "g", "asset_id": "1", "asset_type": "TEXT", "field_type": "HEADLINE", "asset_text": "", "impressions": "100"},
@@ -417,9 +441,9 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
         else:
             os.environ["BOB_TODAY"] = self._today
 
-    def _write_period(self, customer, start, end, run_id, impressions, row_customer=None):
+    def _write_period(self, customer, start, end, run_id, impressions, row_customer=None, rows=None):
         path = dp.RAW_DIR / "campaign_network_period" / f"{customer}_{start}_{end}_{run_id}.csv"
-        dp.write_csv(path, [{
+        default_row = {
             "customer_id": row_customer or customer,
             "campaign_id": "campaign-1",
             "campaign_name": "Campaign One",
@@ -430,7 +454,8 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
             "cost": "100",
             "installs": "20",
             "in_app_conversions": "4",
-        }], [
+        }
+        dp.write_csv(path, rows or [default_row], [
             "customer_id", "campaign_id", "campaign_name", "campaign_status", "network",
         ] + dp.SUM_METRICS)
         return path
@@ -462,6 +487,33 @@ class TestCampaignWeeklyTrendSelection(unittest.TestCase):
         self.assertEqual(row["w25_impressions"], "222")
         self.assertEqual(row["w24_impressions"], "100")
         self.assertEqual(row["w23_impressions"], "90")
+
+    def test_bid_budget_trend_uses_current_enabled_campaign_set_only(self):
+        customer = "1234567890"
+        active = {
+            "customer_id": customer, "campaign_id": "active", "campaign_name": "Active",
+            "campaign_status": "ENABLED", "network": "DISPLAY", "impressions": "100",
+            "clicks": "20", "cost": "100", "installs": "20", "in_app_conversions": "4",
+        }
+        paused_now = {
+            **active, "campaign_id": "paused", "campaign_name": "Paused",
+            "campaign_status": "PAUSED", "impressions": "900",
+        }
+        historically_active = {**paused_now, "campaign_status": "ENABLED"}
+        self._write_period(customer, "2026-06-11", "2026-06-17", "w0", 100,
+                           rows=[active, paused_now])
+        self._write_period(customer, "2026-06-04", "2026-06-10", "w1", 100,
+                           rows=[active, historically_active])
+        self._write_period(customer, "2026-05-28", "2026-06-03", "w2", 100,
+                           rows=[active, historically_active])
+
+        output = Path(self.tmp.name) / "trend.csv"
+        dp._agg_campaign_weekly_trend(
+            self._args(customer, output), {"google_ads_customer_id": customer}, "installs",
+        )
+
+        rows = dp.read_csv(output)
+        self.assertEqual([row["campaign_id"] for row in rows], ["active"])
 
     def test_missing_exact_window_is_not_replaced_by_overlap(self):
         customer = "1234567890"
