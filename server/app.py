@@ -6,14 +6,16 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request as URLRequest, urlopen
 from urllib.error import HTTPError, URLError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 from .auth import check_password, csrf, current_user, hash_code, hash_password, same_code
-from .agent_runner import AgentRunner, ExecutionPolicy, codex_usage, compact_codex_event, custom_analysis_marker, estimate_usage, redact_event_text
+from .agent_runner import AgentRunner, ExecutionPolicy, codex_usage, compact_codex_event, custom_analysis_marker, estimate_usage, redact_event_text, schedule_tool_marker
 from .assets import AssetValidationError, resolve_asset_path, store_upload
 from .models import SecretStore, Store, new_id, now
+from .scheduling import ScheduleRepository, Scheduler, display_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE_ROOT = Path(os.getenv('BOB_STATE_ROOT', str(ROOT / 'data' / 'client'))).expanduser().resolve()
@@ -228,6 +230,7 @@ class AccountIn(BaseModel):
 class ClientIn(BaseModel):
     name: str; slug: str | None = None; identifier: str; password: str
     mcc_name: str | None = None; mcc_id: str | None = None; codex_model: str | None = None
+    scheduling_timezone: str = 'Asia/Kolkata'
     accounts: list[AccountIn] = []
 class GoogleConfigIn(BaseModel):
     client_instance_id: str | None = None
@@ -241,7 +244,9 @@ class GoogleConfigIn(BaseModel):
     redirect_uri: str | None = None
 class CreativeConfigIn(BaseModel):
     api_key: str = ''
-class AccountPermissionIn(BaseModel): permission: str
+class AccountPermissionIn(BaseModel):
+    permission: str
+    can_schedule: bool | None = None
 class RuntimeSettingsIn(BaseModel): thread_handoff_input_tokens: int
 
 def account_settings(body):
@@ -252,6 +257,16 @@ def account_settings(body):
     if body.creative_min_impressions < 0 or body.cac_ceiling < 0 or body.bid_budget_change_pct < 0 or body.bid_budget_change_pct > 20 or body.bid_budget_cooldown_days < 0:
         raise HTTPException(400, 'account thresholds must be non-negative and bid/budget change must be at most 20%')
     return (goal, body.currency.strip().upper(), 'app_installs' if goal == 'installs' else 'app_in_app_conversions', body.creative_lookback_days, body.creative_min_impressions, body.cac_ceiling, body.bid_budget_change_pct, body.bid_budget_cooldown_days)
+
+def validated_scheduling_timezone(value):
+    timezone_name = str(value or '').strip()
+    if not timezone_name:
+        raise HTTPException(400, 'scheduling timezone is required')
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(400, 'scheduling timezone must be a valid IANA timezone such as Asia/Kolkata') from None
+    return timezone_name
 def default_codex_model(): return os.getenv('BOB_CODEX_MODEL', 'gpt-5.6-luna').strip() or 'gpt-5.6-luna'
 def client_codex_model(store, client_instance_id):
     row=store.one('SELECT codex_model FROM client_instances WHERE id=?',(client_instance_id,))
@@ -278,8 +293,15 @@ async def lifespan(app):
     for account in app.state.store.all('SELECT customer_id FROM client_accounts WHERE is_active=1'):
         ensure_account_kt(account['customer_id'])
     app.state.runner = AgentRunner(); app.state.locks = {}; app.state.cancel = {}
+    app.state.conversation_subscribers = {}
     app.state.job_slots = asyncio.Semaphore(max_concurrent_jobs())
-    yield; app.state.store.close()
+    app.state.scheduler = Scheduler(app.state.store, lambda task, run: dispatch_scheduled_task(app, task, run))
+    app.state.scheduler.start()
+    try:
+        yield
+    finally:
+        await app.state.scheduler.stop()
+        app.state.store.close()
 
 app = FastAPI(title='Bob Hosted Gateway', lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=str(Path(__file__).with_name('static'))), name='static')
@@ -353,16 +375,34 @@ def is_obviously_bob_scope(store, row, prompt):
     if len(normalized.split()) <= 6 and recent:
         return True, 'followup'
     return True, 'pass'
-def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity=''):
+SCHEDULE_COMMANDS = {'/sch': 'sch', '/sch-run': 'sch-run', '/sch-pause': 'sch-pause', '/sch-resume': 'sch-resume'}
+
+def schedule_command(value: str) -> str | None:
+    """Recognize only an explicit scheduling command; ordinary text stays ordinary Chat."""
+    command = str(value or '').lstrip().split(maxsplit=1)[0].casefold() if str(value or '').strip() else ''
+    return SCHEDULE_COMMANDS.get(command)
+
+def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity='', schedule_action=None):
     account_kt_path = f"wiki/{account_customer_id}/KT.md" if account_customer_id else 'wiki/<customer_id>/KT.md'
     kt_guidance = f"Selected-account terminology and scope: the account KT is at {account_kt_path}. Read it when the user refers to KT or when its account-specific meanings, metrics, campaign naming, or exclusions affect the request. KT campaign exclusions are authoritative for that run: omit those campaigns from recommendation, hold, skip, and customer-facing tables. Never infer a city-to-campaign mapping; ask for exact campaign identity when KT is ambiguous. Ask one focused clarification when ambiguity could change the metric, data pull, or recommendation; otherwise proceed with a brief stated assumption. If the user explicitly confirms a new term or meaning, add the exact clarification to the selected account KT.\n\n" if account_customer_id else ''
+    schedule_mode = ''
+    if schedule_action:
+        action = {'sch':'create a weekly scheduled job', 'sch-run':'run an existing scheduled job now',
+                  'sch-pause':'pause an existing scheduled job', 'sch-resume':'resume an existing scheduled job'}[schedule_action]
+        schedule_mode = (
+            f"This is the explicit /{schedule_action} command. Your sole task is to {action}. "
+            "Do not fetch data, inspect Google Ads performance, run an analysis, or use shell commands. "
+            "Use only the scheduling MCP tools available in this turn. If the command lacks information "
+            "or names several possible jobs, ask one focused clarification and make no change.\n\n"
+        )
     return ("You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
             "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
             "For a confirmed novel read-only analysis not covered by a standard Bob workflow, use the registered Bob MCP data tools first. Materialize only the prepared tables, use the Codex sandbox only for a temporary Pandas analysis in .wings-it, then call the registered verifier before presenting a result. Do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
             "When the user says a previous blocker or code has been fixed, or asks to retry or recheck, verify the affected capability now with its safe registered tool or data check. Do not repeat a prior failure solely from native-thread context.\n\n"
+            "Scheduling is available only through explicit /sch commands. When the user message starts with /sch, follow the bob-scheduling skill and use only Bob's typed scheduling tools. Otherwise do not create or manage a schedule. Never create, update, pause, resume, or delete a native Codex, ChatGPT, Page, Space, operating-system cron job, or other external automation.\n\n"
             "Hosted setup is Admin-owned: never ask the user for a Google Ads developer token, customer ID, MCC ID, account name, campaign type, currency, or account configuration. Never run local CLI onboarding. If Google authorization is missing, ask the user to say ‘Set me up again’; the gateway supplies the authorization link.\n\n"
-            + kt_guidance
+            + schedule_mode + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
             + continuity
             + f"User message:\n{prompt}\n\nAUTHORITATIVE CURRENT ACCOUNT: {account_context or 'none'} ({account_customer_id or 'no customer ID'}). Use this account for every lookup, explanation, and recommendation in this turn. Do not reuse an account name from earlier conversation turns."
@@ -601,6 +641,15 @@ def account_permission(store, user_id, client_instance_id, account_id):
     row = store.one('SELECT permission FROM user_account_access WHERE user_id=? AND account_id=?', (user_id, account_id))
     return row['permission'] if row and row['permission'] in {'read', 'read_write'} else 'read'
 
+def can_schedule_account(store, user, account_id):
+    if not account_id:
+        return False
+    if user['role'] == 'admin':
+        return True
+    row=store.one('SELECT can_schedule FROM user_account_access WHERE user_id=? AND account_id=?',
+                  (user['id'],account_id))
+    return bool(row and row['can_schedule'])
+
 GOOGLE_SETUP_HANDOFF = "I can do that once you connect Bob to Google Ads. Say ‘Hey Bob, set me up’ and I’ll take you through it."
 GOOGLE_REAUTH_HANDOFF = "You need to log in to your Google account again. Just say ‘Set me up again.’"
 OAUTH_SUCCESS_MESSAGE = "You’re all set, mate. Your Google Ads account is connected. What would you like to check first?"
@@ -699,7 +748,9 @@ async def redeem(body: Redeem, request: Request):
     s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,identifier,hash_password(body.password),'member','approved',0,t,None))
     s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,inv['client_instance_id'],'member','approved',inv['created_by'],t))
     for account in accounts:
-        s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',(uid,account['id'],'read',inv['created_by'],t))
+        s.run('''INSERT INTO user_account_access
+          (user_id,account_id,permission,can_schedule,granted_by,created_at)
+          VALUES (?,?,?,0,?,?)''',(uid,account['id'],'read',inv['created_by'],t))
     sid,token=s.create_session(uid); out=JSONResponse({'ok':True,'csrf':token,'client_id':client['id'],'client_name':client['display_name'],'account_count':len(accounts),'redirect':'chat'}); cookie(out,sid); return out
 
 @app.post('/api/profile/password')
@@ -958,13 +1009,13 @@ async def admin_clients(request: Request):
     user=await csrf(request); s=request.app.state.store
     if user['role']!='admin': raise HTTPException(403,'admin required')
     if user['role']=='admin':
-        return [dict(x) for x in s.all('''SELECT c.id,c.slug,c.display_name,c.status,c.created_at,'admin' role,
+        return [dict(x) for x in s.all('''SELECT c.id,c.slug,c.display_name,c.status,c.created_at,c.scheduling_timezone,'admin' role,
           COALESCE(c.mcc_id,gc.mcc_id,'') mcc_id,COALESCE(c.mcc_name,gc.mcc_name,'') mcc_name,
           (SELECT COUNT(*) FROM client_accounts a WHERE a.client_instance_id=c.id) account_count,
           (SELECT COUNT(*) FROM client_memberships m2 WHERE m2.client_instance_id=c.id AND m2.role='member') user_count
           FROM client_instances c LEFT JOIN client_google_configs gc ON gc.client_instance_id=c.id
           ORDER BY c.created_at''')]
-    return [dict(x) for x in s.all('''SELECT c.id,c.slug,c.display_name,c.status,c.created_at,cm.role,
+    return [dict(x) for x in s.all('''SELECT c.id,c.slug,c.display_name,c.status,c.created_at,c.scheduling_timezone,cm.role,
       COALESCE(c.mcc_id,gc.mcc_id,'') mcc_id,COALESCE(c.mcc_name,gc.mcc_name,'') mcc_name,
       (SELECT COUNT(*) FROM client_accounts a WHERE a.client_instance_id=c.id) account_count,
       (SELECT COUNT(*) FROM client_memberships m2 WHERE m2.client_instance_id=c.id AND m2.role='member') user_count
@@ -985,10 +1036,13 @@ async def create_client(body: ClientIn, request: Request):
         if len(customer_id)!=10: raise HTTPException(400,'customer ID must contain 10 digits')
         if customer_id in seen_accounts: raise HTTPException(409,'duplicate account customer ID')
         seen_accounts.add(customer_id); normalized_accounts.append((account,customer_id,account_settings(account)))
+    scheduling_timezone=validated_scheduling_timezone(body.scheduling_timezone)
     cid,uid=new_id(),new_id(); t=now(); source_config=s.one('''SELECT g.developer_token_ref,g.oauth_client_id,g.oauth_client_secret_ref
       FROM client_google_configs g JOIN client_memberships m ON m.client_instance_id=g.client_instance_id
       WHERE m.user_id=? AND m.role="admin" AND m.status="approved" ORDER BY g.updated_at DESC LIMIT 1''',(user['id'],))
-    s.run('INSERT INTO client_instances (id,slug,display_name,worker_ref,status,created_at,mcc_id,mcc_name,codex_model) VALUES (?,?,?,?,?,?,?,?,?)',(cid,slug,name,cid,'active',t,(body.mcc_id or '').replace('-',''),body.mcc_name or '',(body.codex_model or '').strip())); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(user['id'],cid,'admin','approved',user['id'],t)); s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,body.identifier.strip(),hash_password(body.password),'member','approved',0,t,None)); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,cid,'member','approved',user['id'],t))
+    s.run('''INSERT INTO client_instances
+      (id,slug,display_name,worker_ref,status,created_at,mcc_id,mcc_name,codex_model,scheduling_timezone)
+      VALUES (?,?,?,?,?,?,?,?,?,?)''',(cid,slug,name,cid,'active',t,(body.mcc_id or '').replace('-',''),body.mcc_name or '',(body.codex_model or '').strip(),scheduling_timezone)); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(user['id'],cid,'admin','approved',user['id'],t)); s.run('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)',(uid,body.identifier.strip(),hash_password(body.password),'member','approved',0,t,None)); s.run('INSERT INTO client_memberships VALUES (?,?,?,?,?,?)',(uid,cid,'member','approved',user['id'],t))
     if source_config: s.run('INSERT INTO client_google_configs (client_instance_id,developer_token_ref,oauth_client_id,oauth_client_secret_ref,mcc_id,mcc_name,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',(cid,source_config['developer_token_ref'],source_config['oauth_client_id'],source_config['oauth_client_secret_ref'],(body.mcc_id or '').replace('-',''),body.mcc_name or '',t,t))
     for account,customer_id,settings in normalized_accounts:
         if s.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=?',(cid,customer_id)): raise HTTPException(409,'duplicate account customer ID')
@@ -996,8 +1050,10 @@ async def create_client(body: ClientIn, request: Request):
           (id,client_instance_id,customer_id,account_name,is_active,created_at,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days)
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(account_id,cid,customer_id,(account.account_name or customer_id).strip(),1,t,*settings))
         if account.permission in {'read','read_write'}:
-            s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?)',(uid,account_id,account.permission,user['id'],t))
-    return {'ok':True,'client':{'id':cid,'slug':slug,'display_name':name},'user':{'id':uid,'identifier':body.identifier.strip()}}
+            s.run('''INSERT INTO user_account_access
+              (user_id,account_id,permission,can_schedule,granted_by,created_at)
+              VALUES (?,?,?,0,?,?)''',(uid,account_id,account.permission,user['id'],t))
+    return {'ok':True,'client':{'id':cid,'slug':slug,'display_name':name,'scheduling_timezone':scheduling_timezone},'user':{'id':uid,'identifier':body.identifier.strip()}}
 @app.get('/api/admin/clients/{client_id}')
 async def admin_client_detail(client_id: str, request: Request):
     user=await csrf(request); s=request.app.state.store; client_for_user(s,user,client_id)
@@ -1009,7 +1065,7 @@ async def admin_client_detail(client_id: str, request: Request):
     users=[dict(x) for x in s.all('''SELECT u.id,u.email_or_identifier,u.role,m.status,COALESCE(g.status,'not_connected') google_status
       FROM users u JOIN client_memberships m ON m.user_id=u.id LEFT JOIN google_ads_connections g ON g.user_id=u.id AND g.client_instance_id=m.client_instance_id
       WHERE m.client_instance_id=? AND m.role='member' ORDER BY u.email_or_identifier''',(client_id,))]
-    permissions=[dict(x) for x in s.all('''SELECT ua.user_id,ua.account_id,ua.permission FROM user_account_access ua
+    permissions=[dict(x) for x in s.all('''SELECT ua.user_id,ua.account_id,ua.permission,ua.can_schedule FROM user_account_access ua
       JOIN client_accounts a ON a.id=ua.account_id WHERE a.client_instance_id=?''',(client_id,))]
     creative=s.one('SELECT provider FROM client_creative_configs WHERE client_instance_id=?',(client_id,))
     return {'client':dict(client),'config':dict(cfg) if cfg else None,
@@ -1053,18 +1109,25 @@ async def add_client_account(client_id: str, body: AccountIn, request: Request):
     return {'ok':True,'account':{'id':aid,'customer_id':customer_id,'account_name':body.account_name or customer_id}}
 class ClientUpdateIn(BaseModel):
     name: str; slug: str; mcc_name: str | None = None; mcc_id: str | None = None; codex_model: str | None = None
+    scheduling_timezone: str | None = None
 @app.patch('/api/admin/clients/{client_id}')
 async def update_client(client_id: str, body: ClientUpdateIn, request: Request):
     user=await csrf(request); s=request.app.state.store; client_for_user(s,user,client_id)
     if user['role']!='admin': raise HTTPException(403,'admin required')
     name=body.name.strip(); slug=body.slug.strip().lower().replace(' ','-'); mcc_id=''.join(ch for ch in (body.mcc_id or '') if ch.isdigit())
+    existing=s.one('SELECT scheduling_timezone FROM client_instances WHERE id=?',(client_id,))
+    if not existing: raise HTTPException(404,'client not found')
+    scheduling_timezone=validated_scheduling_timezone(
+        body.scheduling_timezone if body.scheduling_timezone is not None else existing['scheduling_timezone'])
     if not name or not slug: raise HTTPException(400,'client name and slug are required')
     if len(mcc_id) not in {0,9,10}: raise HTTPException(400,'MCC ID must contain 9 or 10 digits')
     if s.one('SELECT id FROM client_instances WHERE slug=? AND id<>?',(slug,client_id)): raise HTTPException(409,'client slug already exists')
-    s.run('UPDATE client_instances SET display_name=?,slug=?,mcc_id=?,mcc_name=?,codex_model=? WHERE id=?',(name,slug,mcc_id,body.mcc_name or '',(body.codex_model or '').strip(),client_id))
+    s.run('''UPDATE client_instances SET display_name=?,slug=?,mcc_id=?,mcc_name=?,codex_model=?,
+      scheduling_timezone=? WHERE id=?''',(name,slug,mcc_id,body.mcc_name or '',(body.codex_model or '').strip(),scheduling_timezone,client_id))
     if s.one('SELECT client_instance_id FROM client_google_configs WHERE client_instance_id=?',(client_id,)):
         s.run('UPDATE client_google_configs SET mcc_id=?,mcc_name=?,updated_at=? WHERE client_instance_id=?',(mcc_id,body.mcc_name or '',now(),client_id))
-    return {'ok':True,'client_id':client_id,'display_name':name,'slug':slug,'mcc_id':mcc_id,'mcc_name':body.mcc_name or ''}
+    return {'ok':True,'client_id':client_id,'display_name':name,'slug':slug,'mcc_id':mcc_id,'mcc_name':body.mcc_name or '',
+            'scheduling_timezone':scheduling_timezone}
 class AccountUpdateIn(BaseModel):
     account_name: str = ''
     customer_id: str
@@ -1220,8 +1283,15 @@ async def grant_account(uid: str, account_id: str, body: AccountPermissionIn, re
     if not account or not target: raise HTTPException(404,'user or account not found')
     if not membership(s,admin,account['client_instance_id']) or not membership(s,target,account['client_instance_id']): raise HTTPException(403,'client membership required')
     if body.permission not in {'read','read_write'}: raise HTTPException(400,'permission must be read or read_write')
-    s.run('INSERT INTO user_account_access VALUES (?,?,?,?,?) ON CONFLICT(user_id,account_id) DO UPDATE SET permission=excluded.permission,granted_by=excluded.granted_by,created_at=excluded.created_at',(uid,account_id,body.permission,admin['id'],now()))
-    return {'ok':True,'user_id':uid,'account_id':account_id,'permission':body.permission}
+    current=s.one('SELECT can_schedule FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id))
+    can_schedule=int(body.can_schedule) if body.can_schedule is not None else int(current['can_schedule']) if current else 0
+    s.run('''INSERT INTO user_account_access
+      (user_id,account_id,permission,can_schedule,granted_by,created_at)
+      VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,account_id) DO UPDATE SET
+      permission=excluded.permission,can_schedule=excluded.can_schedule,
+      granted_by=excluded.granted_by,created_at=excluded.created_at''',
+      (uid,account_id,body.permission,can_schedule,admin['id'],now()))
+    return {'ok':True,'user_id':uid,'account_id':account_id,'permission':body.permission,'can_schedule':bool(can_schedule)}
 
 @app.post('/api/admin/users/{uid}/accounts/{account_id}/revoke')
 async def revoke_account(uid: str, account_id: str, request: Request):
@@ -1370,6 +1440,18 @@ def insert_user_message(store, conversation_id, content, assets):
             message_id,asset['id'],position))
     return message_id,created
 
+def insert_assistant_message(store, conversation_id, content):
+    message_id=new_id(); timestamp=now()
+    store.run('''INSERT INTO messages (id,conversation_id,role,content,status,created_at)
+      VALUES (?,?,?,?,?,?)''',(message_id,conversation_id,'assistant',content,'completed',timestamp))
+    store.run('UPDATE conversations SET last_activity_at=? WHERE id=?',(timestamp,conversation_id))
+    return message_id
+
+def publish_conversation_event(app_instance, conversation_id, payload):
+    for queue in tuple(app_instance.state.conversation_subscribers.get(conversation_id,set())):
+        try: queue.put_nowait(payload)
+        except asyncio.QueueFull: pass
+
 def materialize_message_assets(store, message_id, workspace):
     rows=message_asset_rows(store,message_id)
     if not rows:
@@ -1458,6 +1540,28 @@ async def get_conversation(cid: str, request: Request):
         item['attachments']=[asset_payload(asset) for asset in message_asset_rows(s,stored['id'])]
         messages.append(item)
     return {'conversation':dict(row),'messages':messages}
+
+@app.get('/api/conversations/{cid}/events')
+async def conversation_events(cid: str, request: Request):
+    await conversation(request,cid)
+    queue=asyncio.Queue(maxsize=20)
+    subscribers=request.app.state.conversation_subscribers.setdefault(cid,set())
+    subscribers.add(queue)
+    async def stream():
+        try:
+            yield 'event: ready\ndata: {}\n\n'
+            while True:
+                try:
+                    payload=await asyncio.wait_for(queue.get(),timeout=15)
+                    yield f'event: conversation\ndata: {json.dumps(payload,separators=(",",":"))}\n\n'
+                except asyncio.TimeoutError:
+                    yield ': keepalive\n\n'
+        finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                request.app.state.conversation_subscribers.pop(cid,None)
+    return StreamingResponse(stream(),media_type='text/event-stream',headers={'Cache-Control':'no-cache'})
+
 @app.post('/api/conversations/{cid}/messages')
 async def message(cid: str, body: MessageIn, request: Request):
     user,row=await conversation(request,cid); s=request.app.state.store; row=dict(row)
@@ -1470,6 +1574,7 @@ async def message(cid: str, body: MessageIn, request: Request):
     if active:
         raise HTTPException(409, 'Bob is still working on this conversation. Please wait for the current job or stop it before sending another prompt.')
     assets=validated_message_assets(s,user,row,body.attachment_ids)
+    command=schedule_command(body.content)
     if is_google_setup_request(body.content):
         mid,_=insert_user_message(s,cid,body.content,assets)
         reply=hosted_connection_reply(s,user,row['client_instance_id'],f'/?conversation={cid}')
@@ -1487,16 +1592,114 @@ async def message(cid: str, body: MessageIn, request: Request):
     if lock.locked(): raise HTTPException(409,'conversation is busy')
     mid,t=insert_user_message(s,cid,body.content,assets); jid=new_id(); s.run('''INSERT INTO jobs
       (id,conversation_id,message_id,status,error,started_at,completed_at,created_at)
-      VALUES (?,?,?,?,?,?,?,?)''',(jid,cid,mid,'queued',None,None,None,t)); runtime_log('job_queued',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id')); asyncio.create_task(run_job(request,jid,cid,body.content,row,lock)); return {'job_id':jid,'message_id':mid}
-async def run_job(request,jid,cid,prompt,row,lock):
-    s=request.app.state.store
+      VALUES (?,?,?,?,?,?,?,?)''',(jid,cid,mid,'queued',None,None,None,t)); runtime_log('job_queued',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id'),schedule_action=command); asyncio.create_task(run_job(request.app,jid,cid,body.content,row,lock,schedule_action=command)); return {'job_id':jid,'message_id':mid}
+
+def scheduled_run_for_job(store, job_id):
+    row=store.one('SELECT * FROM scheduled_runs WHERE job_id=?',(job_id,))
+    return dict(row) if row else None
+
+def scheduled_artifact(store, job_id, selected_account, final):
+    run=scheduled_run_for_job(store,job_id)
+    if not run or not selected_account:
+        return final,None
+    marker=re.search(r'\[\[artifact:([^|\]]+)(?:\|[^\]]*)?\]\]',final)
+    if marker:
+        return final,marker.group(1)
+    task=store.one('SELECT * FROM scheduled_tasks WHERE id=?',(run['task_id'],))
+    if not task:
+        return final,None
+    customer=''.join(ch for ch in selected_account['customer_id'] if ch.isdigit())
+    stamp=datetime.fromisoformat(run['scheduled_for']).astimezone(ZoneInfo(task['timezone'])).strftime('%Y-%m-%d')
+    relative=f'Scheduled/{task["id"]}/{stamp}-{run["id"][:8]}.md'
+    path=STATE_ROOT/'wiki'/customer/relative
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(f'# {task["title"]} — {stamp}\n\n{final.strip()}\n',encoding='utf-8')
+    marker=f'[[artifact:wiki/{customer}/{relative}|{task["title"]} — {stamp}]]'
+    return f'{final.rstrip()}\n\n{marker}',f'wiki/{customer}/{relative}'
+
+def finish_scheduled_job(store, job_id, final, artifact_path=None, *, needs_attention=False):
+    run=scheduled_run_for_job(store,job_id)
+    if not run:
+        return
+    summary=next((line.strip() for line in final.splitlines() if line.strip() and '[[artifact:' not in line),
+                 'Run completed.')[:240]
+    ScheduleRepository(store).finish(run['id'],'needs_attention' if needs_attention else 'completed',
+                                     summary,artifact_path=artifact_path,
+                                     failure_category='google_authorization' if needs_attention else None)
+    app.state.scheduler.wake()
+
+def fail_scheduled_dispatch(app_instance, task, run, reply, category):
+    s=app_instance.state.store
+    if s.one('SELECT id FROM conversations WHERE id=?',(task['conversation_id'],)):
+        insert_assistant_message(s,task['conversation_id'],reply)
+    ScheduleRepository(s).finish(run['id'],'needs_attention',reply,failure_category=category)
+    publish_conversation_event(app_instance,task['conversation_id'],{'type':'refresh'})
+    app_instance.state.scheduler.wake()
+
+async def dispatch_scheduled_task(app_instance, task, run):
+    s=app_instance.state.store; repo=ScheduleRepository(s)
+    user=s.one('SELECT * FROM users WHERE id=? AND status="approved"',(task['owner_user_id'],))
+    account=s.one('SELECT * FROM client_accounts WHERE id=? AND client_instance_id=? AND is_active=1',
+                  (task['account_id'],task['client_instance_id']))
+    if not user or not membership(s,user,task['client_instance_id']):
+        return fail_scheduled_dispatch(app_instance,task,run,
+            'I couldn’t run this job because its owner no longer has access. Ask your Admin to review it.',
+            'owner_access')
+    if not account or not can_schedule_account(s,user,task['account_id']):
+        return fail_scheduled_dispatch(app_instance,task,run,
+            'I couldn’t run this job because scheduling or account access was removed. Ask your Admin to review it.',
+            'account_access')
+    if hosted_connection_state(s,user,task['client_instance_id'])!='connected':
+        return fail_scheduled_dispatch(app_instance,task,run,google_auth_handoff(
+            s,user['id'],task['client_instance_id']),'google_authorization')
+    row=s.one('SELECT * FROM conversations WHERE id=? AND user_id=?',
+              (task['conversation_id'],task['owner_user_id']))
+    if not row:
+        return fail_scheduled_dispatch(app_instance,task,run,
+            'I couldn’t run this job because its Chat is no longer available.','conversation_missing')
+    row=dict(row); local=datetime.fromisoformat(run['scheduled_for']).astimezone(ZoneInfo(task['timezone']))
+    visible=f"SCHEDULED · {local.strftime('%A %I:%M %p').upper()}\n\n{task['prompt']}"
+    message_id,created=insert_user_message(s,row['id'],visible,[]); job_id=new_id()
+    s.run('''INSERT INTO jobs
+      (id,conversation_id,message_id,status,error,started_at,completed_at,created_at)
+      VALUES (?,?,?,?,?,?,?,?)''',(job_id,row['id'],message_id,'queued',None,None,None,created))
+    repo.attach_job(run['id'],job_id,message_id)
+    publish_conversation_event(app_instance,row['id'],{'type':'scheduled_job','job_id':job_id})
+    runtime_log('scheduled_job_queued',job_id=job_id,scheduled_task_id=task['id'],scheduled_run_id=run['id'],
+                conversation_id=row['id'],user_id=row['user_id'],account_id=row['account_id'])
+    lock=app_instance.state.locks.setdefault(row['id'],asyncio.Lock())
+    prompt=(task['prompt']+'\n\nThis is a scheduled read-only run. Always produce a dated customer-facing '
+            'Markdown report in the selected account wiki, link it in the final response using Bob’s Artifact marker, '
+            'and state plainly that nothing was changed in Google Ads.')
+    asyncio.create_task(run_job(app_instance,job_id,row['id'],prompt,row,lock))
+
+def handle_schedule_tool_completion(app_instance, host_job_id, tool_name):
+    """Wake the timer and hand a validated Run Now request to the normal job pipeline."""
+    s=app_instance.state.store
+    app_instance.state.scheduler.wake()
+    if tool_name!='bob_schedule_run_now':
+        return
+    run=s.one("SELECT * FROM scheduled_runs WHERE request_job_id=? AND status='claimed'",
+              (host_job_id,))
+    if not run:
+        return
+    task=s.one('SELECT * FROM scheduled_tasks WHERE id=?',(run['task_id'],))
+    if task:
+        app_instance.state.scheduler.dispatch_claimed(dict(task),dict(run))
+
+async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
+    s=app_instance.state.store
     async with lock:
-        async with app.state.job_slots:
+        async with app_instance.state.job_slots:
+            scheduled=scheduled_run_for_job(s,jid)
+            if scheduled:
+                ScheduleRepository(s).mark_started(scheduled['id'])
             current=s.one('SELECT status,message_id FROM jobs WHERE id=?',(jid,))
-            if (current and current['status']=='cancelled') or (app.state.cancel.get(jid) and app.state.cancel[jid].is_set()):
+            if (current and current['status']=='cancelled') or (app_instance.state.cancel.get(jid) and app_instance.state.cancel[jid].is_set()):
                 if current and current['status']!='cancelled':
                     changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
                     if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+                if scheduled: ScheduleRepository(s).finish(scheduled['id'],'interrupted','The scheduled run was stopped.')
                 runtime_log('job_cancelled',job_id=jid,conversation_id=cid); return
             started=time.monotonic(); s.run('UPDATE jobs SET status="running",started_at=? WHERE id=?',(now(),jid)); s.event(jid,'status',{'status':'THINKING'}); runtime_log('job_started',job_id=jid,conversation_id=cid,user_id=row['user_id'],client_instance_id=row['client_instance_id'],account_id=row.get('account_id'),timeout_seconds=job_timeout_seconds())
             auth_required = False
@@ -1514,12 +1717,24 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     if marker and not analysis_marked:
                         s.event(jid,'custom_analysis',marker)
                         analysis_marked = True
+                    schedule_tool = schedule_tool_marker(event)
+                    if schedule_tool:
+                        handle_schedule_tool_completion(app_instance,jid,schedule_tool)
                 workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
                 attachment_context=materialize_message_assets(s,current['message_id'],workspace)
-                runtime_config=runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
-                creative_config=runtime_creative_config(s,row['client_instance_id'],state_root)
+                runtime_config=None if schedule_action else runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
+                creative_config=None if schedule_action else runtime_creative_config(s,row['client_instance_id'],state_root)
                 google_connected = bool(s.one('SELECT id FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(row['user_id'],row['client_instance_id'])))
-                environment = {'BOB_STATE_ROOT': str(state_root), 'BOB_SHARED_STATE_ROOT': str(STATE_ROOT), 'BOB_CLIENT_INSTANCE_ID': row['client_instance_id'], 'BOB_EXPLORATION_DIR': str(workspace / '.wings-it')}
+                environment = {
+                    'BOB_STATE_ROOT': str(state_root),
+                    'BOB_SHARED_STATE_ROOT': str(STATE_ROOT),
+                    'BOB_METADATA_DB': str(s.path),
+                    'BOB_CLIENT_INSTANCE_ID': row['client_instance_id'],
+                    'BOB_EXPLORATION_DIR': str(workspace / '.wings-it'),
+                    'BOB_SCHEDULE_USER_ID': row['user_id'],
+                    'BOB_SCHEDULE_CONVERSATION_ID': cid,
+                    'BOB_HOST_JOB_ID': jid,
+                }
                 if runtime_config:
                     environment['BOB_GOOGLE_ADS_RUNTIME_CONFIG'] = runtime_config
                 if creative_config:
@@ -1528,13 +1743,15 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 selected_account=s.one('SELECT account_name,customer_id FROM client_accounts WHERE id=? AND client_instance_id=?',(row['account_id'],row['client_instance_id'])) if row.get('account_id') else None
                 if selected_account:
                     environment['BOB_SELECTED_CUSTOMER_ID'] = selected_account['customer_id']
-                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid)
+                    environment['BOB_SCHEDULE_ACCOUNT_ID'] = row['account_id']
+                policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid,schedule_action=schedule_action)
                 internal_prompt=attachment_context+prompt_for_selected_account(s,row,prompt)
                 fresh_start = bool(row.get('fresh_start_pending'))
-                continuity = '' if fresh_start or row['agent_session_id'] else conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION'])
-                prior_usage = previous_thread_usage(s,cid,jid) if row['agent_session_id'] else None
-                sid,final=await app.state.runner.run(row['agent_backend'],row['agent_session_id'],scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION'], google_connected, None if row['agent_session_id'] else row['client_instance_id'], selected_account['customer_id'] if selected_account else None, continuity),workspace,policy,emit,app.state.cancel.get(jid))
-                if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
+                continuity = '' if schedule_action or fresh_start or row['agent_session_id'] else conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION'])
+                prior_usage = previous_thread_usage(s,cid,jid) if row['agent_session_id'] and not schedule_action else None
+                agent_session_id = None if schedule_action else row['agent_session_id']
+                sid,final=await app_instance.state.runner.run(row['agent_backend'],agent_session_id,scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION'], google_connected, None if agent_session_id else row['client_instance_id'], selected_account['customer_id'] if selected_account else None, continuity, schedule_action),workspace,policy,emit,app_instance.state.cancel.get(jid))
+                if app_instance.state.cancel.get(jid) and app_instance.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'
                 if final.startswith(OFF_SCOPE_SENTINEL):
@@ -1549,12 +1766,15 @@ async def run_job(request,jid,cid,prompt,row,lock):
                     technical=user_requested_technical_help(prompt),
                     customer_id=selected_account['customer_id'] if selected_account else None,
                 )
+                artifact_path=None
+                if scheduled and not auth_required:
+                    final,artifact_path=scheduled_artifact(s,jid,selected_account,final)
                 estimates = estimate_usage(reported_usage, prior_usage)
                 lifetime = int(row.get('thread_input_tokens_estimate') or 0) + (estimates['input_tokens'] if estimates else 0)
                 threshold = thread_handoff_input_tokens(s)
                 handoff = bool(threshold and estimates and lifetime >= threshold)
-                next_sid = None if handoff else sid
-                next_lifetime = 0 if handoff else lifetime
+                next_sid = row['agent_session_id'] if schedule_action else None if handoff else sid
+                next_lifetime = int(row.get('thread_input_tokens_estimate') or 0) if schedule_action else 0 if handoff else lifetime
                 assistant_message_id = new_id()
                 s.run('UPDATE conversations SET agent_session_id=?,thread_input_tokens_estimate=?,fresh_start_pending=0,last_activity_at=? WHERE id=?',(next_sid,next_lifetime,now(),cid))
                 s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(assistant_message_id,cid,'assistant',final,'completed',now()))
@@ -1563,17 +1783,24 @@ async def run_job(request,jid,cid,prompt,row,lock):
                 else:
                     s.run('UPDATE jobs SET status="completed",completed_at=? WHERE id=?',(now(),jid))
                 s.event(jid,'terminal',{'status':'COMPLETED','message_id':assistant_message_id})
+                if scheduled:
+                    finish_scheduled_job(s,jid,final,artifact_path,needs_attention=auth_required)
+                    publish_conversation_event(app_instance,cid,{'type':'refresh','job_id':jid})
                 if handoff:
                     runtime_log('thread_handoff_scheduled',job_id=jid,conversation_id=cid,input_tokens_estimate=lifetime,threshold=threshold)
                 runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),input_tokens_estimate=estimates['input_tokens'] if estimates else None,cached_input_tokens_estimate=estimates['cached_input_tokens'] if estimates else None,output_tokens_estimate=estimates['output_tokens'] if estimates else None,thread_handoff_scheduled=handoff); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='completed',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
             except asyncio.CancelledError:
                 changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
                 if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+                if scheduled: ScheduleRepository(s).finish(scheduled['id'],'interrupted','The scheduled run was stopped.')
+                if scheduled: publish_conversation_event(app_instance,cid,{'type':'refresh','job_id':jid})
                 runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='cancelled',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
             except Exception as exc:
-                if app.state.cancel.get(jid) and app.state.cancel[jid].is_set():
+                if app_instance.state.cancel.get(jid) and app_instance.state.cancel[jid].is_set():
                     changed=s.run('UPDATE jobs SET status="cancelled",completed_at=? WHERE id=? AND status IN ("queued","running")',(now(),jid))
                     if changed.rowcount: s.event(jid,'terminal',{'status':'CANCELLED'})
+                    if scheduled: ScheduleRepository(s).finish(scheduled['id'],'interrupted','The scheduled run was stopped.')
+                    if scheduled: publish_conversation_event(app_instance,cid,{'type':'refresh','job_id':jid})
                     runtime_log('job_cancelled',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2)); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='cancelled',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
                 else:
                     if auth_required:
@@ -1582,9 +1809,17 @@ async def run_job(request,jid,cid,prompt,row,lock):
                         s.run('UPDATE jobs SET status="completed",completed_at=?,error=NULL WHERE id=?',(now(),jid))
                         assistant_message_id=new_id(); s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(assistant_message_id,cid,'assistant',final,'completed',now()))
                         s.event(jid,'terminal',{'status':'COMPLETED','message_id':assistant_message_id})
+                        if scheduled: finish_scheduled_job(s,jid,final,needs_attention=True)
+                        if scheduled: publish_conversation_event(app_instance,cid,{'type':'refresh','job_id':jid})
                         runtime_log('job_completed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),authorization_required=True)
                         return
-                    detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; safe_detail=redact_event_text(detail,1000); s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=? AND status IN ("queued","running")',(safe_detail,now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':safe_detail}); runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=redact_event_text(detail,4000),exception_type=type(exc).__name__); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='failed',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
+                    detail=str(exc).strip() or f'{type(exc).__name__} (no message)'; safe_detail=redact_event_text(detail,1000); s.run('UPDATE jobs SET status="failed",error=?,completed_at=? WHERE id=? AND status IN ("queued","running")',(safe_detail,now(),jid)); s.event(jid,'terminal',{'status':'FAILED','error':safe_detail})
+                    if scheduled:
+                        reply='I couldn’t complete this scheduled run. Nothing was changed in Google Ads. You can say “run this now” to try again.'
+                        insert_assistant_message(s,cid,reply)
+                        ScheduleRepository(s).finish(scheduled['id'],'failed',reply,failure_category='runner_failure')
+                        publish_conversation_event(app_instance,cid,{'type':'refresh','job_id':jid})
+                    runtime_log('job_failed',job_id=jid,conversation_id=cid,duration_seconds=round(time.monotonic()-started,2),error=redact_event_text(detail,4000),exception_type=type(exc).__name__); runtime_log('job_resource_summary',job_id=jid,conversation_id=cid,status='failed',duration_seconds=round(time.monotonic()-started,2),**resource_summary()['resource_summary'])
 @app.get('/api/jobs/{jid}')
 async def job(jid: str, request: Request):
     user=await current_user(request); row=request.app.state.store.one('SELECT j.*,c.user_id FROM jobs j JOIN conversations c ON c.id=j.conversation_id WHERE j.id=? AND c.user_id=?',(jid,user['id']));
@@ -1592,8 +1827,48 @@ async def job(jid: str, request: Request):
     return dict(row)
 @app.get('/api/conversations/{cid}/active-job')
 async def active_job(cid: str, request: Request):
-    user,_=await conversation(request,cid); row=request.app.state.store.one('SELECT * FROM jobs WHERE conversation_id=? AND status IN ("queued","running") ORDER BY created_at DESC LIMIT 1',(cid,))
+    user,_=await conversation(request,cid); row=request.app.state.store.one('''SELECT j.*,
+      EXISTS(SELECT 1 FROM scheduled_runs sr WHERE sr.job_id=j.id) scheduled
+      FROM jobs j WHERE j.conversation_id=? AND j.status IN ('queued','running')
+      ORDER BY j.created_at DESC LIMIT 1''',(cid,))
     return dict(row) if row else None
+
+@app.get('/api/jtbd')
+async def jtbd(request: Request):
+    user=await current_user(request); s=request.app.state.store; client=membership(s,user)
+    if not client: raise HTTPException(403,'no client access')
+    account_ids={item['id'] for item in permitted_accounts(s,user,client['client_instance_id'])}
+    tasks=s.all('''SELECT st.*,a.account_name,a.customer_id,u.email_or_identifier owner_name
+      FROM scheduled_tasks st JOIN client_accounts a ON a.id=st.account_id
+      JOIN users u ON u.id=st.owner_user_id
+      WHERE st.client_instance_id=? AND st.status<>'deleted'
+      ORDER BY st.updated_at DESC''',(client['client_instance_id'],))
+    result=[]
+    for row in tasks:
+        item=dict(row); can_open=item['account_id'] in account_ids or user['role']=='admin'
+        runs=[]
+        for stored in s.all('''SELECT id,trigger_type,scheduled_for,started_at,completed_at,status,summary,
+          recommendation_count,artifact_path,failure_category FROM scheduled_runs
+          WHERE task_id=? ORDER BY created_at DESC LIMIT 3''',(item['id'],)):
+            run=dict(stored)
+            if not can_open:
+                run['summary']='Account access required to view this result.'
+                run['artifact_path']=None
+                run['recommendation_count']=None
+                run['failure_category']=None
+            runs.append(run)
+        item['schedule']=display_schedule(item['day_of_week'],item['local_time'],item['timezone'])
+        item['can_open_artifact']=can_open
+        item['runs']=runs
+        result.append(item)
+    return result
+
+@app.get('/api/admin/scheduler')
+async def scheduler_health(request: Request):
+    user=await current_user(request)
+    if user['role']!='admin': raise HTTPException(403,'admin required')
+    return request.app.state.scheduler.health()
+
 def wiki_root(): return STATE_ROOT / 'wiki'
 
 def account_kt_path(customer_id):

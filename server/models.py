@@ -18,6 +18,7 @@ class Store:
         self._ensure_column('client_instances', 'mcc_id', 'TEXT')
         self._ensure_column('client_instances', 'mcc_name', 'TEXT')
         self._ensure_column('client_instances', 'codex_model', 'TEXT')
+        self._ensure_column('client_instances', 'scheduling_timezone', "TEXT NOT NULL DEFAULT 'Asia/Kolkata'")
         self._ensure_column('client_accounts', 'primary_goal', "TEXT NOT NULL DEFAULT 'in_app_conversions'")
         self._ensure_column('client_accounts', 'currency', "TEXT NOT NULL DEFAULT ''")
         self._ensure_column('client_accounts', 'campaign_goal_type', "TEXT NOT NULL DEFAULT 'app_in_app_conversions'")
@@ -31,6 +32,9 @@ class Store:
         self._ensure_column('jobs', 'input_tokens_estimate', 'INTEGER')
         self._ensure_column('jobs', 'cached_input_tokens_estimate', 'INTEGER')
         self._ensure_column('jobs', 'output_tokens_estimate', 'INTEGER')
+        self._ensure_column('user_account_access', 'can_schedule', 'INTEGER NOT NULL DEFAULT 0')
+        self._ensure_column('scheduled_runs', 'return_status', "TEXT NOT NULL DEFAULT 'active'")
+        self._ensure_column('scheduled_runs', 'request_job_id', 'TEXT')
         legacy_invites = 'max_uses' not in {row['name'] for row in self.db.execute('PRAGMA table_info(invites)')}
         self._ensure_column('invites', 'max_uses', 'INTEGER NOT NULL DEFAULT 10')
         self._ensure_column('invites', 'use_count', 'INTEGER NOT NULL DEFAULT 0')

@@ -90,16 +90,37 @@ def custom_analysis_marker(event):
         'phase': 'identified' if tool_name == 'bob_data_catalog' else 'preparing',
     }
 
-def bob_mcp_config(environment):
+def schedule_tool_marker(event):
+    """Identify a completed Bob scheduling operation without persisting its arguments."""
+    if not isinstance(event, dict) or event.get('type') != 'item.completed':
+        return None
+    item = event.get('item') if isinstance(event.get('item'), dict) else {}
+    if item.get('type') not in {'mcp_tool_call', 'mcp_call'}:
+        return None
+    server_name = item.get('server') or item.get('server_name')
+    tool_name = item.get('tool') or item.get('tool_name') or item.get('name')
+    if server_name != 'bob' or not str(tool_name or '').startswith('bob_schedule_'):
+        return None
+    status = str(item.get('status') or '').lower()
+    if status and status not in {'completed', 'success', 'succeeded'}:
+        return None
+    return str(tool_name)
+
+def bob_mcp_config(environment, schedule_action: str | None = None):
     """Return Codex overrides for a secret-minimal local STDIO MCP child."""
     safe_keys = (
         'BOB_STATE_ROOT',
+        'BOB_METADATA_DB',
         'BOB_CLIENT_INSTANCE_ID',
         'BOB_GOOGLE_ADS_RUNTIME_CONFIG',
         'BOB_CREATIVE_PROVIDER_CONFIG',
         'BOB_ACCOUNT_PERMISSION',
         'BOB_SELECTED_CUSTOMER_ID',
         'BOB_EXPLORATION_DIR',
+        'BOB_SCHEDULE_ACCOUNT_ID',
+        'BOB_SCHEDULE_USER_ID',
+        'BOB_SCHEDULE_CONVERSATION_ID',
+        'BOB_HOST_JOB_ID',
     )
     python = str(Path(sys.executable))
     child_args = ['-i', f'PATH={Path(python).parent}:/usr/local/bin:/usr/bin:/bin', 'PYTHONUNBUFFERED=1']
@@ -113,16 +134,30 @@ def bob_mcp_config(environment):
         'bob_materialize_exploration',
         'bob_verify_exploration',
         'bob_publish_result',
+        'bob_schedule_list',
+        'bob_schedule_create',
+        'bob_schedule_update',
+        'bob_schedule_pause',
+        'bob_schedule_resume',
+        'bob_schedule_run_now',
+        'bob_schedule_delete',
     ]
+    if schedule_action:
+        tools = {
+            'sch': ['bob_schedule_create'],
+            'sch-run': ['bob_schedule_list', 'bob_schedule_run_now'],
+            'sch-pause': ['bob_schedule_list', 'bob_schedule_pause'],
+            'sch-resume': ['bob_schedule_list', 'bob_schedule_resume'],
+        }[schedule_action]
     return [
         ('mcp_servers.bob.command', '/usr/bin/env'),
         ('mcp_servers.bob.args', child_args),
         ('mcp_servers.bob.cwd', str(Path(__file__).resolve().parents[1])),
         ('mcp_servers.bob.required', True),
         ('mcp_servers.bob.enabled_tools', tools),
-        # Hosted jobs cannot pause for an interactive MCP approval. These five
-        # tools enforce account scope, read-only analysis, and publish consent
-        # at their own boundary, so Codex may invoke them non-interactively.
+        # Hosted jobs cannot pause for an interactive MCP approval. These tools
+        # enforce account scope, read-only analysis, scheduling permissions,
+        # and publish consent at their own boundary.
         ('mcp_servers.bob.default_tools_approval_mode', 'approve'),
         ('mcp_servers.bob.startup_timeout_sec', 10),
         ('mcp_servers.bob.tool_timeout_sec', 70),
@@ -184,6 +219,7 @@ class ExecutionPolicy:
     max_output_bytes: int = 2_000_000
     environment: dict[str, str] | None = None
     job_id: str | None = None
+    schedule_action: str | None = None
 
 class AgentRunner:
     SHELL_ENV_KEYS = (
@@ -313,7 +349,7 @@ class AgentRunner:
             value = environment.get(key)
             if value:
                 args += ['-c', f'shell_environment_policy.set.{key}={json.dumps(str(value))}']
-        for key, value in bob_mcp_config(environment):
+        for key, value in bob_mcp_config(environment, getattr(policy, "schedule_action", None)):
             args += ['-c', f'{key}={json.dumps(value)}']
         if not session_id: args += ['--cd', str(workspace)]
         args += ['--json', '--skip-git-repo-check']

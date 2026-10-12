@@ -26,6 +26,7 @@ class FakeRunner:
             'user_prompt': user_prompt,
             'workspace': str(workspace),
             'environment': dict(policy.environment or {}),
+            'schedule_action': getattr(policy, 'schedule_action', None),
         })
         await emit({'type':'thread.started','thread_id':session_id or 'thread-one'})
         await emit({'type':'command','message':'fake bob command'})
@@ -88,6 +89,44 @@ class CustomAnalysisRunner(FakeRunner):
             'arguments':{'analysis_name':'Ad-group CPM anomalies','operations':['private']},
         }})
         return (session_id or 'analysis-thread', 'Two ad groups need review.')
+
+class SchedulingRunner(FakeRunner):
+    async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
+        from lib.bob.mcp.server import (
+            bob_schedule_create, bob_schedule_pause, bob_schedule_resume, bob_schedule_run_now,
+        )
+        user_prompt = prompt.split('User message:\n', 1)[1] if 'User message:\n' in prompt else prompt
+        self.calls.append({'prompt':prompt,'user_prompt':user_prompt,
+                           'environment':dict(policy.environment or {}),
+                           'schedule_action':getattr(policy, 'schedule_action', None)})
+        await emit({'type':'thread.started','thread_id':session_id or 'schedule-thread'})
+        tool = None
+        with patch.dict(os.environ, policy.environment or {}, clear=False):
+            if policy.schedule_action == 'sch':
+                tool = 'bob_schedule_create'
+                result = bob_schedule_create(
+                    'Which text ads need changes based on performance?', 'Monday', '03:00'
+                )
+            elif policy.schedule_action == 'sch-pause':
+                tool = 'bob_schedule_pause'; result = bob_schedule_pause()
+            elif policy.schedule_action == 'sch-resume':
+                tool = 'bob_schedule_resume'; result = bob_schedule_resume()
+            elif policy.schedule_action == 'sch-run':
+                tool = 'bob_schedule_run_now'; result = bob_schedule_run_now()
+            else:
+                return (session_id or 'schedule-thread',
+                        'Hey mate, the following ads need review. Nothing was changed in Google Ads.')
+        await emit({'type':'item.completed','item':{
+            'type':'mcp_tool_call','server':'bob','tool':tool,'status':'completed','arguments':{},
+        }})
+        if result.get('ok'):
+            task = result.get('task') or {}
+            final = result.get('message') or f"{result.get('action','Updated').replace('_',' ').title()} {task.get('title','the scheduled job')}."
+            if result.get('first_run'):
+                final += f" First run: {result['first_run']} · {task['timezone']}."
+        else:
+            final = result['error']['message']
+        return (session_id or 'schedule-thread', final)
 
 class GatewayTests(unittest.TestCase):
     def setUp(self):
@@ -471,9 +510,10 @@ class GatewayTests(unittest.TestCase):
         uid=s.one('SELECT id FROM users WHERE email_or_identifier=?',('member',))['id']
         admin_login=self.client.post('/auth/login',json={'identifier':'admin','password':'a-secure-password'})
         admin_csrf=admin_login.json()['csrf']
-        grant=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read_write'})
+        grant=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read_write','can_schedule':True})
         self.assertEqual(grant.status_code,200,grant.text)
         self.assertEqual(s.one('SELECT permission FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id))['permission'],'read_write')
+        self.assertEqual(s.one('SELECT can_schedule FROM user_account_access WHERE user_id=? AND account_id=?',(uid,account_id))['can_schedule'],1)
         rejected=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'mutate'})
         self.assertEqual(rejected.status_code,400)
         revoke=self.client.post(f'/api/admin/users/{uid}/accounts/{account_id}/revoke',headers={'X-CSRF-Token':admin_csrf})
@@ -666,12 +706,15 @@ class GatewayTests(unittest.TestCase):
 
     def test_admin_can_create_an_additional_client(self):
         csrf=self.bootstrap()
-        response=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':csrf},json={'name':'Alpha','slug':'alpha','identifier':'owner@alpha.com','password':'alpha-owner-password'})
+        response=self.client.post('/api/admin/clients',headers={'X-CSRF-Token':csrf},json={'name':'Alpha','slug':'alpha','identifier':'owner@alpha.com','password':'alpha-owner-password','scheduling_timezone':'Europe/London'})
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.json()['client']['slug'],'alpha')
+        self.assertEqual(response.json()['client']['scheduling_timezone'],'Europe/London')
         clients=self.client.get('/api/admin/clients')
         self.assertEqual(clients.status_code,200,clients.text)
         self.assertIn('Alpha',[client['display_name'] for client in clients.json()])
+        alpha=next(client for client in clients.json() if client['display_name']=='Alpha')
+        self.assertEqual(alpha['scheduling_timezone'],'Europe/London')
 
     def test_super_admin_creates_client_and_client_sets_up_in_chat(self):
         admin_csrf=self.bootstrap()
@@ -746,8 +789,15 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("document.querySelector('aside').hidden=true",js)
         self.assertIn('global_google_configs',Path('server/schema.sql').read_text())
         self.assertIn('ARTIFACTS', html)
+        self.assertIn('data-tab="jtbd"', html)
+        self.assertIn('id="jtbd"', html)
+        self.assertIn('/api/jtbd', js)
+        self.assertIn('CAN SCHEDULE', js)
+        self.assertIn('Scheduling timezone', html)
+        self.assertIn('scheduling_timezone', js)
+        self.assertIn('/events`', js)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=37', html)
+        self.assertIn('/static/app.js?v=38', html)
         self.assertIn('id="asset-upload"', html)
         self.assertIn('aria-label="Add attachment"', html)
         self.assertIn('data-upload-kind="image"', html)
@@ -801,7 +851,7 @@ class GatewayTests(unittest.TestCase):
         bundle=self.client.get('/static/app.js?v=36')
         self.assertEqual(shell.status_code,200,shell.text)
         self.assertEqual(bundle.status_code,200,bundle.text)
-        self.assertIn('/static/app.js?v=37',shell.text)
+        self.assertIn('/static/app.js?v=38',shell.text)
         self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
         self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 
@@ -921,6 +971,20 @@ class GatewayTests(unittest.TestCase):
             'name':'Demo Client','slug':'demo-client','mcc_name':'Demo MCC','mcc_id':'12-345-6789'})
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.json()['mcc_id'],'123456789')
+
+    def test_admin_validates_and_updates_client_scheduling_timezone(self):
+        csrf=self.bootstrap()
+        client=self.client.get('/api/admin/clients',headers={'X-CSRF-Token':csrf}).json()[0]
+        updated=self.client.patch(f'/api/admin/clients/{client["id"]}',headers={'X-CSRF-Token':csrf},json={
+            'name':client['display_name'],'slug':client['slug'],'scheduling_timezone':'America/New_York'})
+        self.assertEqual(updated.status_code,200,updated.text)
+        self.assertEqual(updated.json()['scheduling_timezone'],'America/New_York')
+        detail=self.client.get(f'/api/admin/clients/{client["id"]}',headers={'X-CSRF-Token':csrf}).json()
+        self.assertEqual(detail['client']['scheduling_timezone'],'America/New_York')
+        invalid=self.client.patch(f'/api/admin/clients/{client["id"]}',headers={'X-CSRF-Token':csrf},json={
+            'name':client['display_name'],'slug':client['slug'],'scheduling_timezone':'Mars/Olympus'})
+        self.assertEqual(invalid.status_code,400,invalid.text)
+        self.assertIn('valid IANA timezone',invalid.text)
 
     def test_account_switch_opens_a_durable_account_conversation_without_mutating_the_source(self):
         admin_csrf=self.bootstrap()
@@ -1194,5 +1258,120 @@ class GatewayTests(unittest.TestCase):
         self.assertIsNone(second.json()['job_id'])
         self.assertIn('outside this Bob workspace', second.json()['immediate_response'])
         self.assertEqual(len(self.app.state.runner.calls), 1)
+
+    def test_user_creates_and_pauses_schedule_in_chat_and_every_client_user_sees_jtbd(self):
+        self.app.state.runner=SchedulingRunner()
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        configured=self.client.post('/api/admin/google-ads/config',headers={'X-CSRF-Token':admin_csrf},json={
+            'developer_token':'dev-token','mcc_id':'123-456-7890',
+            'oauth_client_json':{'web':{'client_id':'client-id','client_secret':'client-secret'}}})
+        self.assertEqual(configured.status_code,200,configured.text)
+        client_id=s.one('SELECT id FROM client_instances')['id']; stamp='2026-10-11T00:00:00+00:00'
+        s.run('UPDATE client_instances SET scheduling_timezone=? WHERE id=?',('America/New_York',client_id))
+        s.run('''INSERT INTO client_accounts
+          (id,client_instance_id,customer_id,account_name,is_active,created_at)
+          VALUES (?,?,?,?,?,?)''',('scheduled-account',client_id,'1112223333','Demo Demand',1,stamp))
+        invite=self.client.post('/api/admin/invites',headers={'X-CSRF-Token':admin_csrf},json={}).json()['code']
+        member=self.client.post('/auth/invite/redeem',json={
+            'code':invite,'identifier':'scheduler@example.com','password':'another-secure-password'})
+        self.assertEqual(member.status_code,200,member.text); member_csrf=member.json()['csrf']
+        member_id=s.one('SELECT id FROM users WHERE email_or_identifier=?',('scheduler@example.com',))['id']
+        s.run('UPDATE user_account_access SET can_schedule=1 WHERE user_id=? AND account_id=?',
+              (member_id,'scheduled-account'))
+        refresh_ref=self.app.state.secrets.put('refresh-token')
+        s.run('INSERT INTO google_ads_connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(
+            'scheduled-connection',member_id,client_id,None,None,refresh_ref,'scope','connected',stamp,None,stamp,stamp))
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':member_csrf}).json()['id']
+        created=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={
+            'content':'/sch Which text ads need changes based on performance? every Monday at 3 am'})
+        self.assertEqual(created.status_code,200,created.text)
+        self.assertIsNotNone(created.json()['job_id'])
+        import time
+        for _ in range(50):
+            if self.client.get(f"/api/jobs/{created.json()['job_id']}").json()['status'] == 'completed':
+                break
+            time.sleep(.02)
+        tasks=self.client.get('/api/jtbd').json()
+        self.assertEqual(len(tasks),1)
+        self.assertEqual(tasks[0]['title'],'Text ad performance review')
+        self.assertEqual(tasks[0]['prompt'],'Which text ads need changes based on performance?')
+        self.assertEqual(tasks[0]['status'],'active')
+        self.assertEqual(tasks[0]['timezone'],'America/New_York')
+        self.assertEqual(tasks[0]['runs'],[])
+        paused=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={
+            'content':'/sch-pause this task'})
+        self.assertEqual(paused.status_code,200,paused.text)
+        for _ in range(50):
+            if self.client.get(f"/api/jobs/{paused.json()['job_id']}").json()['status'] == 'completed':
+                break
+            time.sleep(.02)
+        self.assertEqual(self.client.get('/api/jtbd').json()[0]['status'],'paused')
+        run_now=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={
+            'content':'/sch-run this task'})
+        self.assertEqual(run_now.status_code,200,run_now.text)
+        for _ in range(100):
+            scheduled_run=s.one('SELECT * FROM scheduled_runs ORDER BY created_at DESC LIMIT 1')
+            if scheduled_run and scheduled_run['status']=='completed':
+                break
+            time.sleep(.02)
+        scheduled_run=s.one('SELECT * FROM scheduled_runs ORDER BY created_at DESC LIMIT 1')
+        self.assertEqual(scheduled_run['status'],'completed')
+        self.assertTrue(scheduled_run['artifact_path'])
+        from server import app as app_module
+        self.assertTrue((app_module.STATE_ROOT/scheduled_run['artifact_path']).exists())
+        messages=self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        self.assertTrue(any(message['content'].startswith('SCHEDULED ·') for message in messages))
+        self.assertIn('[[artifact:',messages[-1]['content'])
+        self.assertEqual(self.client.get('/api/jtbd').json()[0]['status'],'paused')
+        s.run('UPDATE user_account_access SET can_schedule=0 WHERE user_id=? AND account_id=?',
+              (member_id,'scheduled-account'))
+        refused=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':member_csrf},json={
+            'content':'/sch-resume this task'})
+        for _ in range(50):
+            if self.client.get(f"/api/jobs/{refused.json()['job_id']}").json()['status'] == 'completed':
+                break
+            time.sleep(.02)
+        refused_messages=self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        self.assertIn('scheduling permission',refused_messages[-1]['content'])
+        viewer=self.client.post('/auth/invite/redeem',json={
+            'code':invite,'identifier':'viewer@example.com','password':'viewer-secure-password'})
+        self.assertEqual(viewer.status_code,200,viewer.text)
+        visible=self.client.get('/api/jtbd').json()
+        self.assertEqual(len(visible),1)
+        self.assertTrue(visible[0]['runs'][0]['artifact_path'])
+        viewer_id=s.one('SELECT id FROM users WHERE email_or_identifier=?',('viewer@example.com',))['id']
+        s.run('DELETE FROM user_account_access WHERE user_id=? AND account_id=?',(viewer_id,'scheduled-account'))
+        redacted=self.client.get('/api/jtbd').json()
+        self.assertEqual(len(redacted),1)
+        self.assertIsNone(redacted[0]['runs'][0]['artifact_path'])
+        self.assertIn('Account access required',redacted[0]['runs'][0]['summary'])
+
+    def test_only_explicit_sch_command_enters_schedule_only_mode(self):
+        csrf=self.bootstrap()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={
+            'content':'/sch Can you schedule this sometime next week?'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertIsNotNone(response.json()['job_id'])
+        import time; time.sleep(.05)
+        self.assertEqual(len(self.app.state.runner.calls),1)
+        self.assertEqual(self.app.state.runner.calls[0]['environment'].get('BOB_GOOGLE_ADS_RUNTIME_CONFIG'), None)
+        self.assertEqual(self.app.state.store.all('SELECT * FROM scheduled_tasks'),[])
+        from server.app import scope_wrapped_prompt
+        wrapped=scope_wrapped_prompt('/sch missing schedule details',schedule_action='sch')
+        self.assertIn("This is the explicit /sch command",wrapped)
+        self.assertIn("Do not fetch data",wrapped)
+        self.assertIn('Never create, update, pause, resume, or delete a native Codex',wrapped)
+
+    def test_unprefixed_schedule_words_remain_normal_chat(self):
+        csrf=self.bootstrap()
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        response=self.client.post(f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},json={
+            'content':'Which text ads need changes? Schedule this for Tuesday at 3 AM.'})
+        self.assertEqual(response.status_code,200,response.text)
+        import time; time.sleep(.05)
+        self.assertEqual(len(self.app.state.runner.calls),1)
+        self.assertIsNone(self.app.state.runner.calls[0]['schedule_action'])
+        self.assertEqual(self.app.state.store.all('SELECT * FROM scheduled_tasks'),[])
 
 if __name__=='__main__': unittest.main()

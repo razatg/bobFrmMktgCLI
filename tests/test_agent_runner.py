@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from server.agent_runner import AgentRunner, bob_mcp_config, compact_codex_event, custom_analysis_marker, estimate_usage, normalized_bob_error, redact_event_text
+from server.agent_runner import AgentRunner, bob_mcp_config, compact_codex_event, custom_analysis_marker, estimate_usage, normalized_bob_error, redact_event_text, schedule_tool_marker
 
 
 class AgentRunnerTests(unittest.TestCase):
@@ -38,12 +38,30 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(values['mcp_servers.bob.enabled_tools'], [
             'bob_resolve_dates', 'bob_data_catalog', 'bob_prepare_data',
             'bob_analyze', 'bob_materialize_exploration', 'bob_verify_exploration', 'bob_publish_result',
+            'bob_schedule_list', 'bob_schedule_create', 'bob_schedule_update',
+            'bob_schedule_pause', 'bob_schedule_resume', 'bob_schedule_run_now',
+            'bob_schedule_delete',
         ])
         self.assertEqual(args[0], '-i')
         self.assertIn('BOB_STATE_ROOT=/safe/state', args)
         self.assertIn('BOB_SELECTED_CUSTOMER_ID=123', args)
         self.assertNotIn('BOB_EXPLORATION_DIR=', args)
         self.assertFalse(any('ADMIN_PASSWORD' in value for value in args))
+
+    def test_completed_schedule_tool_is_detected_without_persisting_arguments(self):
+        event = {'type':'item.completed','item':{'type':'mcp_tool_call','server':'bob',
+                 'tool':'bob_schedule_create','status':'completed','arguments':{
+                     'prompt':'private user prompt','day_of_week':'Monday','local_time':'03:00'}}}
+        self.assertEqual(schedule_tool_marker(event), 'bob_schedule_create')
+        compact = compact_codex_event(event)
+        self.assertEqual(compact['item']['tool'], 'bob_schedule_create')
+        self.assertNotIn('arguments', compact['item'])
+
+    def test_explicit_schedule_command_exposes_only_its_required_tools(self):
+        values = dict(bob_mcp_config({'BOB_STATE_ROOT':'/safe/state'}, 'sch-run'))
+        self.assertEqual(values['mcp_servers.bob.enabled_tools'], [
+            'bob_schedule_list', 'bob_schedule_run_now',
+        ])
 
     def test_exact_failed_bob_auth_marker_becomes_typed_event(self):
         event = {'type':'item.completed','item':{'type':'command_execution','status':'failed',

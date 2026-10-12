@@ -1,4 +1,4 @@
-"""Read-only STDIO MCP server for bounded ad-hoc Bob analysis."""
+"""Typed STDIO MCP boundary for Bob analysis and hosted JTBD scheduling."""
 
 from __future__ import annotations
 
@@ -19,13 +19,15 @@ from lib.bob.performance.adhoc import (
 from lib.bob.performance.adhoc_data import prepare_dataset, publish_result
 from lib.bob.performance.exploration import materialize_sources, verify_exploration
 from lib.bob.platform.dates import resolve_period_dates
+from server.schedule_tools import with_schedule_tools
 
 
 server = MCPServer(
     "bob",
     instructions=(
-        "Use these tools only for confirmed, read-only custom analyses on Bob's selected account. "
-        "Never invent unavailable dimensions or silently choose business thresholds."
+        "Use the analysis tools only for confirmed, read-only custom analyses on Bob's selected account. "
+        "Use the scheduling tools only for Bob JTBD jobs in the authenticated Chat. Never create an "
+        "external Codex, ChatGPT, Page, Space, or operating-system automation."
     ),
 )
 PREPARED: dict[str, PreparedDataset] = {}
@@ -170,6 +172,48 @@ def bob_publish_result(
     if result is None:
         raise AnalysisError("unknown or expired result handle")
     return publish_result(result, title, output_format)
+
+
+@server.tool(name="bob_schedule_list", structured_output=True)
+def bob_schedule_list() -> dict[str, object]:
+    """List the current user's scheduled jobs in this Chat so references can be resolved safely."""
+    return with_schedule_tools(lambda tools: tools.list())
+
+
+@server.tool(name="bob_schedule_create", structured_output=True)
+def bob_schedule_create(prompt: str, day_of_week: str, local_time: str) -> dict[str, object]:
+    """Create one weekly Bob JTBD job using a full weekday and local wall-clock time."""
+    return with_schedule_tools(lambda tools: tools.create(prompt, day_of_week, local_time))
+
+
+@server.tool(name="bob_schedule_update", structured_output=True)
+def bob_schedule_update(day_of_week: str, local_time: str, task_id: str = "") -> dict[str, object]:
+    """Move one scheduled job to a new weekly weekday and local time."""
+    return with_schedule_tools(lambda tools: tools.update(day_of_week, local_time, task_id))
+
+
+@server.tool(name="bob_schedule_pause", structured_output=True)
+def bob_schedule_pause(task_id: str = "") -> dict[str, object]:
+    """Pause one scheduled job without deleting its history."""
+    return with_schedule_tools(lambda tools: tools.pause(task_id))
+
+
+@server.tool(name="bob_schedule_resume", structured_output=True)
+def bob_schedule_resume(task_id: str = "") -> dict[str, object]:
+    """Resume one paused job and calculate its next future occurrence."""
+    return with_schedule_tools(lambda tools: tools.resume(task_id))
+
+
+@server.tool(name="bob_schedule_run_now", structured_output=True)
+def bob_schedule_run_now(task_id: str = "") -> dict[str, object]:
+    """Queue one manual occurrence without moving the recurring deadline."""
+    return with_schedule_tools(lambda tools: tools.run_now(task_id))
+
+
+@server.tool(name="bob_schedule_delete", structured_output=True)
+def bob_schedule_delete(task_id: str = "", confirm: bool = False) -> dict[str, object]:
+    """Request deletion, or confirm a deletion the user explicitly approved within ten minutes."""
+    return with_schedule_tools(lambda tools: tools.delete(task_id, confirm))
 
 
 def main() -> None:

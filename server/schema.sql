@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS client_instances (
   id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
   worker_ref TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
-  mcc_id TEXT, mcc_name TEXT, codex_model TEXT
+  mcc_id TEXT, mcc_name TEXT, codex_model TEXT,
+  scheduling_timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata'
 );
 CREATE TABLE IF NOT EXISTS client_memberships (
   user_id TEXT NOT NULL, client_instance_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member',
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS client_accounts (
 );
 CREATE TABLE IF NOT EXISTS user_account_access (
   user_id TEXT NOT NULL, account_id TEXT NOT NULL, permission TEXT NOT NULL,
+  can_schedule INTEGER NOT NULL DEFAULT 0,
   granted_by TEXT, created_at TEXT NOT NULL, PRIMARY KEY(user_id, account_id),
   FOREIGN KEY(user_id) REFERENCES users(id), FOREIGN KEY(account_id) REFERENCES client_accounts(id)
 );
@@ -120,3 +122,55 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
   thread_handoff_input_tokens INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id TEXT PRIMARY KEY,
+  client_instance_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  day_of_week INTEGER NOT NULL CHECK(day_of_week BETWEEN 0 AND 6),
+  local_time TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  recurring INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active',
+  next_run_at TEXT,
+  last_run_at TEXT,
+  delete_confirmation_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(client_instance_id) REFERENCES client_instances(id),
+  FOREIGN KEY(account_id) REFERENCES client_accounts(id),
+  FOREIGN KEY(owner_user_id) REFERENCES users(id),
+  FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next ON scheduled_tasks(status,next_run_at);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_client ON scheduled_tasks(client_instance_id,updated_at);
+
+CREATE TABLE IF NOT EXISTS scheduled_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  job_id TEXT,
+  request_job_id TEXT,
+  trigger_type TEXT NOT NULL,
+  scheduled_for TEXT NOT NULL,
+  claimed_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  status TEXT NOT NULL,
+  summary TEXT,
+  recommendation_count INTEGER,
+  message_id TEXT,
+  artifact_path TEXT,
+  failure_category TEXT,
+  return_status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id,scheduled_for),
+  FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(message_id) REFERENCES messages(id)
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task ON scheduled_runs(task_id,created_at DESC);

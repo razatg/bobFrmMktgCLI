@@ -28,6 +28,11 @@ If a question doesn't match any reference file in `.agents/skills/`, run `./bob`
 
 Route to the most specific available skill before considering a general fallback. In particular:
 
+- Hosted scheduling starts only with `/sch`, `/sch-run`, `/sch-pause`, or `/sch-resume`; route those
+  commands to `bob-scheduling`. Let the LLM interpret only the command remainder, then call the
+  command's typed JTBD tools. Never use native Codex, ChatGPT, Page, Space, OS cron, or another
+  external automation. When a stored prompt triggers, route the prompt to its normal domain skill
+  instead of `bob-scheduling`.
 - Visual creative requests, including LOW static replacement, campaign image refresh, named
   revisions, and publication of generated assets, use `bob-creates-it`.
 - `bob-wings-it` is only for a confirmed, novel, read-only Google Ads analysis that no existing
