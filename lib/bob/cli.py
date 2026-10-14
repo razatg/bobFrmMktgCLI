@@ -224,7 +224,10 @@ def build_parser() -> argparse.ArgumentParser:
     csr_parser = sub.add_parser("create-static-replacements",
         help="generate review-only static images from a confirmed account creative brief")
     csr_parser.add_argument("--manifest", required=True, help="selected static image source manifest")
-    csr_parser.add_argument("--brief", required=True, help="confirmed replacement brief JSON")
+    csr_parser.add_argument(
+        "--brief", required=True,
+        help="confirmed brief in private state (hosted: .bob/creative-briefs/<run-id>-<stage>.json; not wiki)",
+    )
     csr_parser.add_argument("--run-id", help="append a regeneration to an existing creative run")
     csr_parser.set_defaults(func=create_static_replacements)
 

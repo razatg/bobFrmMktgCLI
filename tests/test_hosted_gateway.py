@@ -155,6 +155,16 @@ class GatewayTests(unittest.TestCase):
         self.assertNotIn('plan.yaml',shown)
         blocked=sanitize_user_response('wiki/9998887777/secret.md',customer_id='1112223333')
         self.assertEqual(blocked,'[artifact unavailable]')
+        nested=sanitize_user_response(
+            '[Open review]( [[artifact:wiki/1112223333/creative-runs/run-1/index.md|Index]])',
+            customer_id='1112223333',
+        )
+        self.assertEqual(nested,'[[artifact:wiki/1112223333/creative-runs/run-1/index.md|Open review]]')
+        generic=sanitize_user_response(
+            '[[ARTIFACT: wiki/1112223333/creative-runs/run-1/index.md|Review]]',
+            customer_id='1112223333',
+        )
+        self.assertEqual(generic,'[[artifact:wiki/1112223333/creative-runs/run-1/index.md|Review]]')
         technical=sanitize_user_response(internal,technical=True)
         self.assertNotIn('/data/client',technical)
         self.assertIn('./bob fetch',technical)

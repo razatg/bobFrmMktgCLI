@@ -40,6 +40,31 @@ def _select_static_rows(rows: list[dict[str, Any]], args: argparse.Namespace, mi
         die("static image asset IDs not found in the selected inventory: " + ", ".join(sorted(asset_ids - found)))
     return [row for row in static_rows if str(row.get("asset_id", "")).strip() in asset_ids]
 
+
+def _generation_contract(selection: str) -> dict[str, str]:
+    """Describe the creative route without prescribing account-specific concepts."""
+    common = {
+        "source_visual_step": "inspect each local_path with the runtime's visual-input capability before prompt construction",
+        "upload_scope": "preview only; do not upload or replace Google Ads assets",
+    }
+    if selection == "low":
+        return {
+            **common,
+            "route": "low_edit",
+            "output_size_rule": "generate one slight replacement edit at each LOW source asset's native dimensions",
+            "qa_scope": "source-preserving edit: requested change present, source recognisable, exact dimensions, no Google Ads mutation",
+        }
+    return {
+        **common,
+        "route": "concept",
+        "grounding_rule": "require current DESIGN.md, current DESIGN_STRATEGY.md, and user intent before generation",
+        "grouping_rule": "group inspected sources into genuinely coherent creative families; repeated assets and placements are evidence, not generation jobs",
+        "output_size_rule": "generate one 1200x1200 master per agreed concept or creative family, not one replacement per source image",
+        "approval_rule": "present masters for review before generating ratio adaptations or any publish plan",
+        "shared_asset_rule": "record every placement, but do not expand publishing beyond the user-confirmed placement scope",
+        "qa_scope": "concept review: brief and design grounding, visual inspection, exact master dimensions, no Google Ads mutation",
+    }
+
 def suggest_static_variants(args: argparse.Namespace) -> None:
     """Prepare selected static images for source-guided review-only variants."""
     explicit_customer = getattr(args, "customer", None)
@@ -110,6 +135,7 @@ def suggest_static_variants(args: argparse.Namespace) -> None:
                      {"asset_ids": sorted(value.strip() for value in str(args.asset_ids).split(",") if value.strip())}
                      if selection == "assets" else {}),
         "workflow": "low_static_variant_preview" if selection == "low" else "static_creative_refresh",
+        "generation_route": "low_edit" if selection == "low" else "concept",
         "status": "prepared_candidates_only",
         "candidate_count": len(manifest_assets),
         "image_specs": STATIC_BANNER_SPECS,
@@ -117,13 +143,7 @@ def suggest_static_variants(args: argparse.Namespace) -> None:
             "design": str(design_dir / "DESIGN.md"),
             "strategy": str(design_dir / "DESIGN_STRATEGY.md"),
         },
-        "generation_contract": {
-            "source_visual_step": "inspect each local_path with the runtime's visual-input capability before prompt construction",
-            "hard_sla_step": "ask the user for hard SLA constraints before every regeneration",
-            "output_size_rule": "generate exactly one replacement variant at the source asset native dimensions",
-            "qa_scope": "spec-only: readable output, width match, height match, output path recorded, no Google Ads mutation",
-            "upload_scope": "preview only; do not upload or replace Google Ads assets",
-        },
+        "generation_contract": _generation_contract(selection),
         "assets_by_ratio": grouped_with_downloads,
         "assets": manifest_assets,
     }
@@ -134,7 +154,10 @@ def suggest_static_variants(args: argparse.Namespace) -> None:
     print(f"{selection} static image sources written: {manifest_path}")
     print(f"candidate images downloaded: {downloaded}/{len(manifest_assets)}")
     print(f"source URLs present: {with_url}/{len(manifest_assets)}")
-    print("next: use the bob-creates-it static replacement workflow with this manifest")
+    if selection == "low":
+        print("next: use the bob-creates-it LOW edit route with this manifest")
+    else:
+        print("next: use the bob-creates-it concept route; agree creative families before generating masters")
 
 
 def _image_file_info(path: Path) -> dict[str, Any]:

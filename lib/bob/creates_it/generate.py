@@ -924,6 +924,9 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
     (run_dir / "apply-plan.yaml").write_text(json.dumps(apply_plan, indent=2) + "\n")
     _update_account_index(wiki / "Index.md", run_id, run_manifest["candidates"])
     print(f"creative outputs ready: {len(generated)}")
-    print(f"wiki/{customer_id}/creative-runs/{run_id}/index.md")
+    print(
+        f"[[artifact:wiki/{customer_id}/creative-runs/{run_id}/index.md|"
+        "Open the full creative review]]"
+    )
     for item in generated:
         print(f"wiki/{customer_id}/creative-runs/{run_id}/outputs/{item['name']}")

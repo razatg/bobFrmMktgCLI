@@ -91,6 +91,16 @@ class CreatesItTests(unittest.TestCase):
         self.assertIn("creative-runs/run-test-001/index.md", (self.wiki / "Index.md").read_text())
         self.assertIn(output.name, (run / "index.md").read_text())
 
+    def test_generation_prints_one_canonical_run_artifact_marker(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            self._run(lambda *_: (png_bytes((80, 60)), "image/png"))
+        self.assertIn(
+            "[[artifact:wiki/1234567890/creative-runs/run-test-001/index.md|"
+            "Open the full creative review]]",
+            output.getvalue(),
+        )
+
     def test_brief_can_choose_approved_pro_model(self):
         brief = json.loads(self.brief.read_text())
         brief["model"] = "gemini-3-pro-image"
@@ -220,6 +230,21 @@ class CreatesItTests(unittest.TestCase):
             self.assertEqual(resolved, manifest.resolve())
             with self.assertRaises(SystemExit):
                 generate._safe_state_file(str(through_workspace_link), "replacement brief")
+
+    def test_private_state_symlink_is_trusted_for_replacement_brief(self):
+        state = self.root / "conversation-state"
+        workspace = self.root / "workspace"
+        private_brief = state / ".bob" / "creative-briefs" / "run-001-edit.json"
+        private_brief.parent.mkdir(parents=True)
+        private_brief.write_text('{"confirmed": true}')
+        workspace.mkdir()
+        (workspace / ".bob").symlink_to(state / ".bob", target_is_directory=True)
+        through_workspace_link = workspace / ".bob" / "creative-briefs" / "run-001-edit.json"
+        with patch.object(generate, "STATE_ROOT", state):
+            self.assertEqual(
+                generate._safe_state_file(str(through_workspace_link), "replacement brief"),
+                private_brief.resolve(),
+            )
 
     def test_missing_placement_allows_review_candidate_and_blocks_publish(self):
         source = json.loads(self.source_manifest.read_text())
@@ -446,6 +471,10 @@ class CreatesItTests(unittest.TestCase):
         prepared = json.loads(manifests[0].read_text())
         self.assertEqual(prepared["selection"], "campaign")
         self.assertEqual({item["asset_id"] for item in prepared["assets"]}, {"1", "2"})
+        self.assertEqual(prepared["generation_route"], "concept")
+        self.assertEqual(prepared["generation_contract"]["route"], "concept")
+        self.assertIn("one 1200x1200 master per agreed concept", prepared["generation_contract"]["output_size_rule"])
+        self.assertNotIn("native dimensions", prepared["generation_contract"]["output_size_rule"])
 
     def test_campaign_preparation_rejects_non_inventory_source_metadata(self):
         source_dir = self.root / "arbitrary-output-location"

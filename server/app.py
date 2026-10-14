@@ -30,7 +30,7 @@ CUSTOMER_ARTIFACT_SUFFIXES = {
     '.md': 'markdown', '.csv': 'csv', '.png': 'image', '.jpg': 'image',
     '.jpeg': 'image', '.webp': 'image',
 }
-_WIKI_TARGET = r'(?:wiki/\d{9,10}/[^\s)>]+|/(?:app|data|home|tmp)/[^\s)>]*/wiki/\d{9,10}/[^\s)>]+)'
+_WIKI_TARGET = r'(?:wiki/\d{9,10}/[^\s)>|\]]+|/(?:app|data|home|tmp)/[^\s)>|\]]*/wiki/\d{9,10}/[^\s)>|\]]+)'
 
 def _safe_artifact_marker(target, label='', customer_id=None):
     match = re.search(r'(?:^|/)wiki/(\d{9,10})/(.+)$', str(target).strip('<>'))
@@ -52,6 +52,22 @@ def sanitize_user_response(text, *, technical=False, customer_id=None):
     value = str(text or '').strip()
     if not value:
         return value
+    # Hosted chat has one artifact protocol. Normalize the two common model
+    # mistakes before scanning ordinary Markdown links and bare wiki paths:
+    # wrapping a canonical marker in Markdown, and using a generic uppercase
+    # ARTIFACT envelope. This keeps the frontend input deterministic.
+    value = re.sub(
+        rf'\[([^\]\n]+)\]\(\s*\[\[artifact:({_WIKI_TARGET})\|[^\]]+\]\]\s*\)',
+        lambda match: _safe_artifact_marker(match.group(2), match.group(1), customer_id),
+        value,
+        flags=re.I,
+    )
+    value = re.sub(
+        rf'\[\[ARTIFACT:\s*({_WIKI_TARGET})(?:\|([^\]]+))?\s*\]\]',
+        lambda match: _safe_artifact_marker(match.group(1), match.group(2) or '', customer_id),
+        value,
+        flags=re.I,
+    )
     value = re.sub(
         rf'\[([^\]\n]+)\]\((?:<)?({_WIKI_TARGET})(?:>)?\)',
         lambda match: _safe_artifact_marker(match.group(2), match.group(1), customer_id),
