@@ -2007,7 +2007,22 @@ def visible_artifact_path(path: Path) -> bool:
     if 'creative-runs' not in parts:
         return True
     run_index=parts.index('creative-runs')
-    return suffix in {'.png','.jpg','.jpeg','.webp'} and len(parts)>run_index+3 and parts[run_index+2]=='outputs'
+    if len(parts)==run_index+3 and parts[run_index+2]=='index.md':
+        return True
+    return (
+        suffix in {'.png','.jpg','.jpeg','.webp'}
+        and len(parts)>run_index+3
+        and parts[run_index+2] in {'outputs','references'}
+    )
+
+def listed_artifact_path(path: Path) -> bool:
+    """Keep creative media reachable from its run page without flooding navigation."""
+    if not visible_artifact_path(path):
+        return False
+    if 'creative-runs' not in path.parts:
+        return True
+    run_index=path.parts.index('creative-runs')
+    return len(path.parts)==run_index+3 and path.parts[run_index+2]=='index.md'
 
 def editable_design_artifact(path: Path) -> bool:
     return len(path.parts)>=2 and path.parts[-2]=='design' and path.name in {'DESIGN.md','DESIGN_STRATEGY.md'}
@@ -2055,7 +2070,7 @@ async def artifact_index(request: Request):
         for path in account_root.rglob('*'):
             kind = ARTIFACT_SUFFIXES.get(path.suffix.lower())
             relative_path=path.relative_to(root)
-            if path.is_symlink() or not path.is_file() or not kind or path.name.lower() in HIDDEN_ARTIFACT_NAMES or not visible_artifact_path(relative_path):
+            if path.is_symlink() or not path.is_file() or not kind or path.name.lower() in HIDDEN_ARTIFACT_NAMES or not listed_artifact_path(relative_path):
                 continue
             resolved = path.resolve()
             if account_root.resolve() not in resolved.parents:
@@ -2071,7 +2086,9 @@ async def artifact_index(request: Request):
             })
     return sorted(results, key=lambda item: (
         item['customer_id'],
-        0 if Path(item['path']).name.lower() == 'index.md' else 1,
+        0 if len(Path(item['path']).parts) == 2 and Path(item['path']).name.lower() == 'index.md'
+        else 1 if 'creative-runs' in Path(item['path']).parts and Path(item['path']).name.lower() == 'index.md'
+        else 2,
         item['path'].lower(),
     ))
 

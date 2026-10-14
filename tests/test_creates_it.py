@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from lib.bob.creates_it import generate
+from lib.bob.creates_it import adapt, generate
 from lib.bob.performance import aggregate as performance_aggregate
 from lib.bob.static_banners import variants
 from lib.bob.platform.core import render_query
@@ -75,7 +75,7 @@ class CreatesItTests(unittest.TestCase):
         calls = []
         def caller(api_key, model, prompt, source, ratio):
             calls.append((api_key, model, prompt, source, ratio))
-            return png_bytes((128, 128)), "image/png"
+            return png_bytes((160, 120)), "image/png"
 
         run = self._run(caller)
         output = next((run / "outputs").glob("*.png"))
@@ -88,7 +88,8 @@ class CreatesItTests(unittest.TestCase):
         self.assertEqual(calls[0][0:2], ("secret-key", "gemini-3.1-flash-image"))
         self.assertIn("Use less copy", calls[0][2])
         self.assertTrue((run / "references" / "source-asset-1.png").is_file())
-        self.assertIn(output.name, (self.wiki / "Index.md").read_text())
+        self.assertIn("creative-runs/run-test-001/index.md", (self.wiki / "Index.md").read_text())
+        self.assertIn(output.name, (run / "index.md").read_text())
 
     def test_brief_can_choose_approved_pro_model(self):
         brief = json.loads(self.brief.read_text())
@@ -153,6 +154,13 @@ class CreatesItTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             generate._extract_output_image({"interaction": {"output_text": "no image"}})
 
+    def test_generated_output_is_never_stretched_across_materially_different_ratios(self):
+        with self.assertRaises(ValueError):
+            adapt.normalize_generated_png(
+                png_bytes((100, 100)), self.root / "wrong-ratio.png", (1200, 628)
+            )
+        self.assertFalse((self.root / "wrong-ratio.png").exists())
+
     def test_gemini_source_inputs_accept_jpeg_png_and_webp_without_forcing_output_mime(self):
         class Response:
             def __enter__(self):
@@ -215,13 +223,14 @@ class CreatesItTests(unittest.TestCase):
 
     def test_missing_placement_allows_review_candidate_and_blocks_publish(self):
         source = json.loads(self.source_manifest.read_text())
-        source["selection"] = "assets"
+        source["selection"] = "low"
         source["assets"][0].pop("ad_group_id")
         source["assets"][0].pop("ad_id")
         self.source_manifest.write_text(json.dumps(source))
         self.brief.write_text(json.dumps({
             "customer_id": self.customer,
-            "selection": "assets",
+            "selection": "low",
+            "mode": "low_edit",
             "confirmed": True,
             "replacements": [{"asset_id": "asset-1", "prompt": "Localize the headline."}],
         }))
@@ -238,9 +247,11 @@ class CreatesItTests(unittest.TestCase):
         self.assertIn("cannot publish", output.getvalue())
         self.assertIn("asset-1", output.getvalue())
 
-    def test_campaign_refresh_uses_same_generator_and_preserves_each_ad_placement(self):
+    def test_campaign_refresh_generates_master_then_approved_adaptations(self):
         source = json.loads(self.source_manifest.read_text())
         source["selection"] = "campaign"
+        source["assets"][0]["width"] = 80
+        source["assets"][0]["height"] = 60
         source["assets"][0]["duplicate_placements"] = [
             {"campaign_id": "c1", "ad_group_id": "11", "ad_id": "101"},
             {"campaign_id": "c1", "ad_group_id": "22", "ad_id": "202"},
@@ -249,23 +260,91 @@ class CreatesItTests(unittest.TestCase):
         self.brief.write_text(json.dumps({
             "customer_id": self.customer,
             "selection": "campaign",
-            "goal": "Refresh every image in campaign c1",
+            "mode": "concept",
+            "stage": "masters",
+            "user_request": "Refresh every image in campaign c1",
             "confirmed": True,
-            "replacements": [{"asset_id": "asset-1", "prompt": "Simplify the layout."}],
+            "concepts": [{
+                "concept_id": "campaign-c1",
+                "source_asset_ids": ["asset-1"],
+                "instruction": "Simplify the layout.",
+            }],
         }))
         prompts = []
         def caller(_key, _model, prompt, _source, _ratio):
             prompts.append(prompt)
-            return png_bytes((80, 60)), "image/png"
+            return png_bytes((1400, 1400)), "image/png"
 
         run = self._run(caller)
         self.assertIn("Refresh every image in campaign c1", prompts[0])
         self.assertNotIn("LOW-performing", prompts[0])
         manifest = json.loads((run / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "masters_ready")
         self.assertEqual(manifest["selection"], "campaign")
+        self.assertEqual(json.loads((run / "apply-plan.yaml").read_text())["changes"], [])
+        master = manifest["candidates"][0]
+        with Image.open(run / "outputs" / master["name"]) as image:
+            self.assertEqual(image.size, (1200, 1200))
+        self.brief.write_text(json.dumps({
+            "customer_id": self.customer,
+            "selection": "campaign",
+            "mode": "concept",
+            "stage": "adaptations",
+            "user_request": "Use the approved master",
+            "confirmed": True,
+            "adaptations": [
+                {
+                    "master_name": master["name"],
+                    "formats": ["square", "vertical"],
+                    "method": "python",
+                },
+                {
+                    "master_name": master["name"],
+                    "formats": ["horizontal"],
+                    "method": "ai",
+                    "instruction": "Recompose the approved concept for a wide placement.",
+                },
+            ],
+        }))
+        adaptation_calls = []
+        self._run(lambda *_args: (adaptation_calls.append(_args) or png_bytes((1600, 900)), "image/png"))
+        self.assertEqual(len(adaptation_calls), 1)
+        manifest = json.loads((run / "manifest.json").read_text())
+        self.assertEqual(manifest["status"], "adaptations_ready")
+        self.assertEqual(
+            {item.get("format") for item in manifest["candidates"] if item.get("candidate_type") == "adaptation"},
+            {"horizontal", "vertical"},
+        )
+        horizontal = next(
+            item for item in manifest["candidates"] if item.get("format") == "horizontal"
+        )
+        with Image.open(run / "outputs" / horizontal["name"]) as image:
+            self.assertEqual(image.size, (1200, 628))
+        self.assertEqual(horizontal["qa"]["adaptation_method"], "ai_recomposition")
         changes = json.loads((run / "apply-plan.yaml").read_text())["changes"]
         self.assertEqual({(item["ad_group_id"], item["ad_id"]) for item in changes},
                          {("11", "101"), ("22", "202")})
+
+    def test_low_edit_does_not_require_design_documents(self):
+        (self.wiki / "design" / "DESIGN.md").unlink()
+        (self.wiki / "design" / "DESIGN_STRATEGY.md").unlink()
+        run = self._run(lambda *_: (png_bytes((160, 120)), "image/png"))
+        self.assertEqual(json.loads((run / "manifest.json").read_text())["status"], "ready_for_review")
+
+    def test_concept_requires_design_documents_and_user_expectation(self):
+        source = json.loads(self.source_manifest.read_text())
+        source["selection"] = "campaign"
+        self.source_manifest.write_text(json.dumps(source))
+        self.brief.write_text(json.dumps({
+            "customer_id": self.customer,
+            "selection": "campaign",
+            "mode": "concept",
+            "stage": "masters",
+            "confirmed": True,
+            "concepts": [{"concept_id": "one", "source_asset_ids": ["asset-1"]}],
+        }))
+        with self.assertRaises(SystemExit):
+            self._run(lambda *_: self.fail("provider must not be called"))
 
     def test_static_selection_uses_label_only_for_low_mode(self):
         rows = [

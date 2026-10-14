@@ -16,24 +16,94 @@ Missing ad placements do not block review-only generation. The generated candida
 
 If the configured Gemini request fails, report its error and stop generation. Do not silently switch to a different image provider.
 
-## Design and generate
+## LOW edit
 
-Before generation, check the selected account's editable `DESIGN.md` and `DESIGN_STRATEGY.md`. If either is missing or stale, stop the replacement flow and complete [design-guide.md](design-guide.md) first, using inspected evidence from that account; do not generate until both documents are available and current. If there is insufficient inspected evidence, explain the blocker rather than inventing design guidance. Codex inspects each selected source image and proposes a specific edit. Once the user agrees to the method, save a confirmed internal brief inside Bob's state root:
+Use this only with `selection: low`. Inspect the source and make the agreed slight modification while preserving its proposition, subjects, brand treatment, composition, and native dimensions. `DESIGN.md` and `DESIGN_STRATEGY.md` may inform the edit but do not block it.
+
+```json
+{
+  "customer_id": "1234567890",
+  "selection": "low",
+  "mode": "low_edit",
+  "stage": "edit",
+  "goal": "Retain the proposition and simplify the hierarchy",
+  "confirmed": true,
+  "replacements": [
+    {"asset_id": "123", "prompt": "Keep the image recognisable; reduce the supporting copy."}
+  ]
+}
+```
+
+## Generic concept loop
+
+Use this for campaign/ad-group refreshes, new creatives, and user-reference requests. The mandatory grounding is:
+
+- current account `DESIGN.md`;
+- current account `DESIGN_STRATEGY.md`;
+- user intent as text, an explicit reference image, or both.
+
+Campaign and ad-group names/IDs are optional context. Do not block without them. If either design document is missing or stale, stop and complete [design-guide.md](design-guide.md) first. Repeated placements do not create repeated generation jobs.
+
+Compile the agreed request into a confirmed master brief:
 
 ```json
 {
   "customer_id": "1234567890",
   "selection": "campaign",
-  "model": "gemini-3.1-flash-image",
-  "goal": "Refresh the selected campaign images with clearer visual hierarchy",
+  "mode": "concept",
+  "stage": "masters",
+  "user_request": "Refresh the current proposition with a cleaner visual treatment",
   "confirmed": true,
-  "replacements": [
-    {"asset_id": "123", "prompt": "Keep the product and required brand elements; simplify the headline area."}
+  "concepts": [
+    {
+      "concept_id": "railway-arrival",
+      "source_asset_ids": ["123", "456"],
+      "instruction": "Retain the arrival promise and transport context",
+      "campaign_context": "optional",
+      "ad_group_context": "optional"
+    }
   ]
 }
 ```
 
-Generate at most 20 sources per call with `./bob create-static-replacements --manifest <source-manifest> --brief <brief.json> --run-id <run-id>`. Omit `model` in the brief to use the catalog default; use the approved Pro model only for a brief that needs its strengths. For a larger agreed scope, use several calls with the same source manifest and run ID. Gemini creates review-only PNGs using the client's key; the generator checks integrity, size, dimensions, and duplicates. Codex must then visually inspect the outputs against the agreed brief. A weak result can be regenerated in the same run as `v2`, `v3`, etc. Do not describe technical QA as proof that the creative will perform better.
+Generate one 1200x1200 master per agreed concept. This is a concept approval surface, not a publishable placement. Ask for approval before creating other ratios.
+
+After approval, use the same command and run ID with an adaptation brief:
+
+```json
+{
+  "customer_id": "1234567890",
+  "selection": "campaign",
+  "mode": "concept",
+  "stage": "adaptations",
+  "user_request": "Use the approved master",
+  "confirmed": true,
+  "adaptations": [
+    {
+      "master_name": "master-railway-arrival-v1.png",
+      "formats": ["horizontal", "square", "vertical"],
+      "method": "python"
+    }
+  ]
+}
+```
+
+The deterministic `python` adapter preserves the complete master over an extended background and never stretches it. The supported outputs are horizontal 1200x628, square 1200x1200, and vertical 1200x1500. Visually inspect each result. If a ratio needs a genuine re-layout, reject the deterministic result and rerun that format with `method: ai` plus a specific adaptation instruction rather than presenting a technically valid but weak crop.
+
+## Generation contract
+
+The account design documents contain design evidence, not operational instructions. Apply these workflow rules when constructing the brief and reviewing its outputs:
+
+- Derive the creative theme from the user's request and references, enriched by campaign/ad-group context when available. Treat related concepts semantically; do not rely on advertiser-specific naming conventions or exact keyword matches.
+- Inspect the source image before writing its prompt. Preserve source elements by role unless the user changes them: product/service category, proposition, scene or use case, proof element, offer cue, human role, and brand treatment.
+- User-confirmed requirements are hard constraints. Source-role preservation and design-guide preferences are soft constraints beneath them.
+- Ask only about a material choice that cannot be resolved from the request, source evidence, or account guidance. Do not impose a fixed upload checklist.
+- Request only the agreed concepts, formats, and counts. Do not create extra ratios merely because Google Ads supports them.
+- Use adaptation-aware composition as soft guidance: leave useful background flexibility and keep critical elements legible, but do not force the model into a rigid central safe-area box.
+- Treat every generated file as review-only. If a required element cannot be generated faithfully, report the failure instead of silently replacing or inventing it.
+- Visually inspect every output against the source, brief, and design guidance. Technical file validation does not establish creative quality or likely performance.
+
+Run each stage with `./bob create-static-replacements --manifest <source-manifest> --brief <brief.json> --run-id <run-id>`. Omit `model` to use the catalog default; use the approved Pro model only when the brief needs it. Gemini creates review-only PNGs using the client's key; the generator checks integrity, size, dimensions, and duplicates. Codex must then visually inspect the outputs against the agreed brief. A weak result can be regenerated in the same run as `v2`, `v3`, etc. Do not describe technical QA as proof that the creative will perform better.
 
 ## Publish after a separate request
 
@@ -41,4 +111,4 @@ Generate at most 20 sources per call with `./bob create-static-replacements --ma
 
 ## User-facing artifacts
 
-Show generated files in `creative-runs/{run-id}/outputs/` and the account's editable design guidance when relevant. Keep briefs, source manifests, references, provider responses, and apply plans internal.
+Link one `creative-runs/{run-id}/index.md` artifact from the account index. That run page presents the selected source previews and current LOW replacements, masters, or adaptations as a gallery. Output images remain directly retrievable from the run page but do not appear as separate entries in Artifact navigation. Keep briefs, source manifests, provider responses, and apply plans internal.

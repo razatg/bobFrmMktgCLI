@@ -551,7 +551,7 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse((prepared / 'logs').exists())
         self.assertTrue((state_root / 'logs').is_symlink())
 
-    def test_customer_artifacts_expose_design_docs_and_generated_outputs_only(self):
+    def test_customer_artifacts_list_one_creative_run_and_keep_media_directly_viewable(self):
         admin_csrf = self.bootstrap()
         store = self.app.state.store
         client_id = store.one('SELECT id FROM client_instances')['id']
@@ -597,8 +597,8 @@ class GatewayTests(unittest.TestCase):
             paths = [artifact['path'] for artifact in index.json()]
             self.assertEqual(paths, [
                 '1112223333/Index.md',
+                '1112223333/creative-runs/run-001/index.md',
                 '1112223333/action-items/bid-budget.csv',
-                '1112223333/creative-runs/run-001/outputs/static-1-v1.png',
                 '1112223333/design/DESIGN.md',
                 '1112223333/design/DESIGN_STRATEGY.md',
             ])
@@ -613,8 +613,12 @@ class GatewayTests(unittest.TestCase):
                 hidden = self.client.get(f'/api/artifacts/1112223333/action-items/{internal_name}')
                 self.assertEqual(hidden.status_code, 404, hidden.text)
             self.assertEqual(self.client.get('/api/artifacts/1112223333/creative-runs/run-001/manifest.json').status_code,404)
-            self.assertEqual(self.client.get('/api/artifacts/1112223333/creative-runs/run-001/index.md').status_code,404)
-            self.assertEqual(self.client.get('/api/artifacts/1112223333/creative-runs/run-001/references/source.png').status_code,404)
+            run_page=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/index.md')
+            self.assertEqual(run_page.status_code,200,run_page.text)
+            self.assertEqual(run_page.json()['type'],'markdown')
+            reference=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/references/source.png')
+            self.assertEqual(reference.status_code,200,reference.text)
+            self.assertEqual(reference.json()['type'],'image')
             image=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/outputs/static-1-v1.png')
             self.assertEqual(image.json()['type'],'image')
             self.assertIn('?raw=1',image.json()['media_url'])
