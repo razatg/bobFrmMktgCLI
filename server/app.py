@@ -542,7 +542,7 @@ def prepare_conversation_runtime(workspace_id: str):
         target = ROOT / name
         if target.exists():
             _replace_runtime_copy(workspace / name, target)
-    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'AGENTS.md')
+    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'server' / 'hosted_agent_instructions.txt')
     agents_source = ROOT / '.agents'
     if agents_source.exists():
         _replace_runtime_copy(workspace / '.agents', agents_source)
