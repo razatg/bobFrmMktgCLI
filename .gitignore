@@ -44,6 +44,7 @@ wiki/
 # team via `./bob sync` (a shared folder), NOT the public repo. backlog.md was previously tracked
 # and is now untracked (git rm --cached) so user bug/feature quotes stay out of the public repo.
 logs/pull-log.jsonl
+logs/clients/
 logs/session-signals.jsonl
 logs/backlog.md
 

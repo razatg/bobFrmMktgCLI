@@ -25,13 +25,6 @@ def _lang_canonical(ag_name: str) -> str:
     return _LANG_CANONICAL.get(m.group(1).lower(), 'Other') if m else 'Other'
 
 
-def _ad_group_theme(ag_name: str) -> str:
-    """First-two-segment theme from ad group name: 'UseCase-Party', 'Transit-Bus', etc."""
-    name = re.sub(r'[-_][A-Z][a-z]{2,4}\d{2,4}_?$', '', ag_name).strip()
-    parts = re.split(r'[-_]+', name)
-    return '-'.join(parts[:2]) if len(parts) >= 2 else name
-
-
 def _asset_dimension(row: dict[str, Any], axis: str) -> int | None:
     keys = (
         f"image_{axis}",
@@ -253,70 +246,6 @@ def _group_static_banner_assets(assets: list[dict[str, Any]]) -> dict[str, list[
     return grouped
 
 
-def _build_default_static_banner_strategy(grouped_assets: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    themes: list[str] = []
-    for ratio in ("horizontal", "vertical", "square"):
-        for asset in grouped_assets.get(ratio, [])[:5]:
-            theme = _ad_group_theme(asset.get("ad_group_name", ""))
-            if theme and theme not in themes:
-                themes.append(theme)
-    theme_text = ", ".join(themes[:8]) if themes else "winning campaign/ad group contexts"
-    return {
-        "status": "data_only_pending_visual_review",
-        "raw_asset_count": sum(len(grouped_assets.get(ratio, [])) for ratio in grouped_assets),
-        "unique_image_count": sum(len(grouped_assets.get(ratio, [])) for ratio in grouped_assets),
-        "winning_patterns": [
-            f"Use the strongest observed campaign/ad group contexts as creative territories: {theme_text}.",
-            "Keep each banner focused on one use case, one benefit, and one direct action.",
-            "Prefer layouts that leave clear space for benefit copy and a short CTA.",
-        ],
-        "ratio_rules": {
-            "horizontal": "Use a wide composition with the core message on one side and the product or context on the other.",
-            "vertical": "Use stacked hierarchy: benefit first, product/context visual second, CTA last.",
-            "square": "Keep the visual simple and centered; avoid dense text because the format has less horizontal room.",
-        },
-        "message_hierarchy": [
-            "Primary use case, occasion, audience context, or need state.",
-            "Specific benefit such as speed, savings, convenience, capacity, trust, quality, access, or a trial offer.",
-            "Short CTA that works without surrounding copy.",
-        ],
-        "cta_rules": [
-            "Use one CTA per banner.",
-            "Keep CTA copy short enough to remain readable on mobile inventory.",
-            "Do not let coupon text overpower the actual product or service benefit.",
-        ],
-        "brand_and_product_rules": [
-            "Make the product or service signal visible without turning the banner into a logo-only ad.",
-            "Use campaign/ad group context to choose the product or service focus and use context.",
-        ],
-        "visual_style": [
-            "Prioritize legible contrast, simple foreground/background separation, and recognisable context.",
-            "Avoid generic lifestyle imagery that does not communicate the use occasion.",
-        ],
-        "visual_language": [
-            "Use one dominant reading path: claim first, proof second, action third.",
-            "Keep the message inside a high-contrast block when the background is busy.",
-            "Build separate compositions for horizontal, vertical, and square instead of resizing one master layout.",
-        ],
-        "brand_colors": {},
-        "typography_signals": {},
-        "component_patterns": [],
-        "brand_signals": [],
-        "token_confidence_notes": [],
-        "avoid": [
-            "Crowded text blocks.",
-            "Multiple competing offers.",
-            "Layouts that cannot adapt across horizontal, vertical, and square.",
-            "Generic visual claims not supported by the campaign/ad group context.",
-        ],
-        "future_generation_contract_notes": [
-            "Future generation must require campaign, ad group, and user brief before producing images.",
-            "Start from the guide and brief, then say exactly which element cannot be faithfully generated if something is missing.",
-            "Do not assume a fixed upload bundle; ask only for missing elements needed for fidelity or approval.",
-        ],
-    }
-
-
 def _write_static_banner_index_entry(index_path: Path, entry: str, section: str = "Design") -> None:
     index_path.parent.mkdir(parents=True, exist_ok=True)
     if index_path.exists():
@@ -342,6 +271,7 @@ def _write_static_banner_index_entry(index_path: Path, entry: str, section: str 
             continue
         if (
             "Static Banner Design" in line
+            or "Account Design Guidance" in line
             or ("[DESIGN.md]" in line and "[DESIGN_STRATEGY.md]" in line)
         ):
             if not inserted:
@@ -441,15 +371,117 @@ def _write_static_banner_manifest(run_dir: Path, payload: dict[str, Any]) -> Pat
     return manifest_path
 
 
-def _strategy_has_visual_evidence(strategy: dict[str, Any]) -> bool:
-    inspected = strategy.get("image_inspected_count")
-    if number(inspected) > 0:
-        return True
-    inspected = strategy.get("unique_image_count")
-    if number(inspected) > 0:
-        return True
-    observations = strategy.get("creative_observations") or strategy.get("per_creative_observations")
-    return isinstance(observations, list) and len(observations) > 0
+_STRATEGY_LIST_FIELDS = (
+    "winning_patterns",
+    "visual_language",
+    "component_patterns",
+    "brand_signals",
+    "token_confidence_notes",
+    "composition_rules",
+    "imagery_rules",
+    "message_hierarchy",
+    "copy_density_rules",
+    "safe_area_guidance",
+    "cta_rules",
+    "brand_and_product_rules",
+    "visual_style",
+    "avoid",
+    "future_generation_contract_notes",
+)
+_STRATEGY_DICT_FIELDS = ("brand_colors", "typography_signals", "ratio_rules")
+_OBSERVATION_FIELDS = (
+    "asset_id",
+    "visual_description",
+    "composition",
+    "hierarchy",
+    "typography",
+    "palette",
+    "product_treatment",
+    "logo_treatment",
+    "copy_density",
+    "safe_area",
+    "ratio_adaptation",
+    "message_cta",
+    "evidence_note",
+)
+
+
+def _observation_validation_errors(
+    observations: Any, expected_asset_ids: set[str]
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(observations, list) or not observations:
+        return ["creative_observations must be a non-empty list"]
+
+    observed_ids: list[str] = []
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, dict):
+            errors.append(f"creative_observations[{index}] must be an object")
+            continue
+        missing = [
+            field for field in _OBSERVATION_FIELDS
+            if not str(observation.get(field, "")).strip()
+        ]
+        if missing:
+            errors.append(
+                f"creative_observations[{index}] is missing: {', '.join(missing)}"
+            )
+        asset_id = str(observation.get("asset_id", "")).strip()
+        if asset_id:
+            observed_ids.append(asset_id)
+
+    if len(observed_ids) != len(set(observed_ids)):
+        errors.append("creative_observations must contain each asset_id once")
+    if set(observed_ids) != expected_asset_ids:
+        missing_ids = sorted(expected_asset_ids - set(observed_ids))
+        unexpected_ids = sorted(set(observed_ids) - expected_asset_ids)
+        if missing_ids:
+            errors.append(f"missing observations for asset IDs: {', '.join(missing_ids)}")
+        if unexpected_ids:
+            errors.append(f"unexpected observation asset IDs: {', '.join(unexpected_ids)}")
+    return errors
+
+
+def _strategy_field_errors(strategy: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    for field in _STRATEGY_LIST_FIELDS:
+        value = strategy.get(field)
+        if not isinstance(value, list) or not value or any(
+            not str(item).strip() for item in value
+        ):
+            errors.append(f"{field} must be a non-empty list of text")
+    for field in _STRATEGY_DICT_FIELDS:
+        value = strategy.get(field)
+        if not isinstance(value, dict) or not value:
+            errors.append(f"{field} must be a non-empty object")
+    if not isinstance(strategy.get("duplicate_groups"), list):
+        errors.append("duplicate_groups must be a list")
+    for field in ("raw_asset_count", "unique_image_count"):
+        if int(number(strategy.get(field))) <= 0:
+            errors.append(f"{field} must be a positive integer")
+    return errors
+
+
+def _strategy_validation_errors(
+    strategy: dict[str, Any], expected_asset_ids: set[str]
+) -> list[str]:
+    errors = []
+    if strategy.get("status") != "complete":
+        errors.append("status must be complete")
+    if not expected_asset_ids:
+        errors.append("no downloaded evidence images are available for inspection")
+    if int(number(strategy.get("image_inspected_count"))) != len(expected_asset_ids):
+        errors.append(
+            "image_inspected_count must equal the downloaded evidence image count"
+        )
+    errors.extend(
+        _observation_validation_errors(
+            strategy.get("creative_observations"), expected_asset_ids
+        )
+    )
+    errors.extend(_strategy_field_errors(strategy))
+    return errors
 
 
 def _append_markdown_section(lines: list[str], title: str, values: Any, fallback: str = "- Not provided.") -> None:
@@ -518,15 +550,6 @@ def _infer_design_name(customer_id: str) -> str:
     return f"{safe_id} Static Banner Design System"
 
 
-def _generic_design_content_rules() -> list[str]:
-    return [
-        "Lead with one short problem, benefit, or use-case trigger that reads in under two seconds.",
-        "Support the headline with one concrete proof element such as speed, offer, destination, or product mode.",
-        "Keep the primary proof visible in the image, not only in the copy.",
-        "Use no more than one headline, one proof cue, and one CTA in the same frame.",
-    ]
-
-
 def _write_static_banner_strategy_markdown(
     path: Path,
     customer_id: str,
@@ -565,7 +588,11 @@ def _write_static_banner_strategy_markdown(
         "",
         f"Unique visual families in scope: {unique_count}. Repeated placements are kept as evidence only.",
         "",
-        f"Use [DESIGN.md]({design_path.name}) as the generation-oriented design spec. This strategy file is the audit trail and evidence base.",
+        (
+            "This diagnostic contains selection evidence only; it is not a design specification."
+            if diagnostic
+            else f"Use [DESIGN.md]({design_path.name}) as the generation-oriented design spec. This strategy file is the audit trail and evidence base."
+        ),
         "",
         "## Image Specs",
         "| Format | Ratio | Recommended size | Minimum size | Max images | File rules |",
@@ -618,7 +645,7 @@ def _write_static_banner_strategy_markdown(
             for placement in asset.get("duplicate_placements", []):
                 lines.append(_format_repeated_placement_row(asset, placement, currency))
 
-    observations = strategy.get("creative_observations") or strategy.get("per_creative_observations")
+    observations = strategy.get("creative_observations")
     if observations:
         lines += [
             "",
@@ -631,34 +658,31 @@ def _write_static_banner_strategy_markdown(
                 continue
             asset = obs.get("asset") or obs.get("asset_id") or obs.get("asset_name") or "unknown"
             looks = obs.get("visual_description") or obs.get("what_it_looks_like") or ""
-            layout = obs.get("layout_notes") or obs.get("layout") or ""
-            message = obs.get("message_cta_notes") or obs.get("message") or obs.get("cta") or ""
-            rationale = obs.get("why_it_matters") or obs.get("performance_read") or ""
+            layout = obs.get("composition") or ""
+            message = obs.get("message_cta") or ""
+            rationale = obs.get("evidence_note") or ""
             safe = [str(v).replace("|", "\\|").replace("\n", " ") for v in (asset, looks, layout, message, rationale)]
             lines.append(f"| {safe[0]} | {safe[1]} | {safe[2]} | {safe[3]} | {safe[4]} |")
 
     _append_markdown_section(lines, "Winning Patterns", strategy.get("winning_patterns"), "- Not provided by strategist.")
     _append_markdown_section(lines, "Visual Language", strategy.get("visual_language"), "- Not provided by strategist.")
+    _append_markdown_section(lines, "Composition Rules", strategy.get("composition_rules"), "- Not provided by strategist.")
+    _append_markdown_section(lines, "Imagery Rules", strategy.get("imagery_rules"), "- Not provided by strategist.")
     _append_markdown_section(lines, "Ratio-Specific Layout Rules", strategy.get("ratio_rules"), "- Not provided by strategist.")
     _append_markdown_section(lines, "Message Hierarchy", strategy.get("message_hierarchy"), "- Not provided by strategist.")
+    _append_markdown_section(lines, "Copy Density Rules", strategy.get("copy_density_rules"), "- Not provided by strategist.")
+    _append_markdown_section(lines, "Safe-Area Guidance", strategy.get("safe_area_guidance"), "- Not provided by strategist.")
     _append_markdown_section(lines, "CTA Rules", strategy.get("cta_rules"), "- Not provided by strategist.")
     _append_markdown_section(lines, "Brand And Product Rules", strategy.get("brand_and_product_rules"), "- Not provided by strategist.")
     _append_markdown_section(lines, "Visual Style", strategy.get("visual_style"), "- Not provided by strategist.")
     _append_markdown_section(lines, "Avoid", strategy.get("avoid"), "- Not provided by strategist.")
 
-    lines += [
-        "",
-        "## Future Generation Contract",
-        "- Use `DESIGN.md` plus a campaign brief for future image generation. Do not use this strategy file as the primary prompt.",
-        "- Future generation must require campaign, ad group, and user brief/objective.",
-        "- The model should start from the guide and the brief, then say exactly which element it cannot faithfully generate if something is missing.",
-        "- Do not assume a fixed upload bundle.",
-        "- Ask only for the missing elements needed for fidelity or approval.",
-        "- Optional future inputs: ratios, count per ratio, language or locale, offer or coupon, must-use text, and must-avoid text.",
-        "- Future output expectations: exact Google dimensions, .jpg or .png, under 5MB, review files only.",
-    ]
-    for note in strategy.get("future_generation_contract_notes", []):
-        lines.append(f"- {note}")
+    _append_markdown_section(
+        lines,
+        "Future Generation Notes",
+        strategy.get("future_generation_contract_notes"),
+        "- Not provided by strategist.",
+    )
 
     if diagnostic or strategy.get("status") == "data_only_pending_visual_review":
         lines += [
@@ -707,24 +731,7 @@ def _write_static_banner_design_md(
                         frontmatter.append(f"    {subkey}: {subvalue}")
             else:
                 frontmatter.append(f"  {key}: \"{str(token)}\"")
-    frontmatter += [
-        "layout:",
-        "  readingPath: claim -> proof -> action",
-        "  density: promotional",
-        "  splitLayout: preferred for horizontal",
-        "components:",
-        "  primary:",
-        "    - headline block",
-        "    - proof container",
-        "    - CTA container",
-        "    - hero subject or product proof",
-        "content:",
-        "  maxClaims: 1",
-        "  proofElements: 1",
-        "  ctaElements: 1",
-        "---",
-        "",
-    ]
+    frontmatter += ["---", ""]
 
     lines: list[str] = [
         *frontmatter,
@@ -740,8 +747,6 @@ def _write_static_banner_design_md(
     if brand_signals:
         for item in brand_signals:
             lines.append(f"- {item}")
-    else:
-        lines.append("- Use the recurring logo lockup, hero product styling, and repeated shape language visible in the reviewed creatives as the advertiser brand anchor.")
 
     lines += [
         "",
@@ -750,10 +755,6 @@ def _write_static_banner_design_md(
     if visual_language:
         for item in visual_language:
             lines.append(f"- {item}")
-    else:
-        lines.append("- Build one dominant reading path: claim first, proof second, action third.")
-        lines.append("- Prefer high-contrast message containers when the background carries scene detail.")
-        lines.append("- Design each ratio intentionally instead of resizing one master layout.")
 
     lines += [
         "",
@@ -770,8 +771,6 @@ def _write_static_banner_design_md(
             if note:
                 line += f": {note}"
             lines.append(line)
-    else:
-        lines.append("- Brand color extraction was not provided by the strategist. Use the dominant advertiser colors visible in the reviewed creatives and document any uncertainty.")
 
     lines += [
         "",
@@ -780,8 +779,6 @@ def _write_static_banner_design_md(
     if token_confidence_notes:
         for item in token_confidence_notes:
             lines.append(f"- {item}")
-    else:
-        lines.append("- Treat exact token values as visual inferences unless approved brand assets are supplied.")
 
     lines += [
         "",
@@ -799,162 +796,37 @@ def _write_static_banner_design_md(
                 lines.append(f"- **{label}:** " + ", ".join(details))
             else:
                 lines.append(f"- **{label}:** {token}")
-    else:
-        lines += [
-            "- Headlines should read in under two seconds and carry the primary promise or friction point.",
-            "- Supporting proof should be shorter and more concrete than the headline.",
-            "- Use large, bold type for the main claim and simpler supporting type for badges, proof, or CTA labels.",
-            "- Decorative or casual type can appear as a supporting accent, not as the only readable layer.",
-        ]
 
-    lines += [
-        "",
-        "## Composition",
-        "- Protect one clear text zone rather than placing the main message across busy scene detail.",
-        "- In wide formats, prefer a split between message space and product or lifestyle proof.",
-        "- Use device frames, posters, signs, placards, or notification cards as optional message containers when they improve clarity.",
-        "- Keep the eye path deliberate: primary claim, secondary proof, then action.",
-        "",
-        "## Components",
-    ]
+    _append_markdown_section(lines, "Composition", strategy["composition_rules"])
+    lines += ["", "## Components"]
     if component_patterns:
         for item in component_patterns:
             lines.append(f"- {item}")
-    else:
-        lines += [
-            "- **Headline block:** carries the single main promise or problem statement.",
-            "- **Proof container:** badge, device screen, signboard, poster, or caption block that makes the benefit concrete.",
-            "- **CTA container:** button, badge, or imperative label when the concept needs an explicit action cue.",
-            "- **Hero proof:** product, person, scene trigger, or object that visually proves the use case.",
-        ]
 
-    lines += [
-        "",
-        "## Imagery",
-        "- Use contextual scenes that clearly explain why the ad exists: purchase moment, use occasion, audience need, location, urgency, event, routine, or another advertiser-specific context repeated in the winning set.",
-        "- Keep the foreground proof crisp and the supporting scene simpler or softer so the message remains dominant.",
-        "- Use human expression only when it reinforces the promise rather than adding noise.",
-        "- Avoid generic lifestyle imagery that does not create a reason to act.",
-        "",
-        "## Ratio Rules",
-    ]
+    _append_markdown_section(lines, "Imagery", strategy["imagery_rules"])
+    lines += ["", "## Ratio Rules"]
     if ratio_rules:
         for key in ("horizontal", "square", "vertical"):
             value = ratio_rules.get(key)
             if value:
                 lines.append(f"- **{key.title()}:** {value}")
-    else:
-        lines.append("- **Horizontal:** Use a split layout with one clear message zone and one proof zone.")
-        lines.append("- **Square:** Reduce the claim count and keep one promise plus one proof element.")
-        lines.append("- **Vertical:** Stack the reading path instead of cropping from wide layouts.")
 
-    lines += [
-        "",
-        "## Content Rules",
-    ]
-    for item in _generic_design_content_rules():
-        lines.append(f"- {item}")
+    _append_markdown_section(lines, "Message Hierarchy", strategy["message_hierarchy"])
+    _append_markdown_section(lines, "Copy Density", strategy["copy_density_rules"])
+    _append_markdown_section(lines, "Safe Areas", strategy["safe_area_guidance"])
 
-    lines += [
-        "",
-        "## Theme Grammar",
-        "- Convert campaign, ad group, and source-image context into a broad creative theme before writing the prompt.",
-        "- Treat close concepts as semantic neighbors rather than exact text matches; for example, coupon, sale, discount, and offer can map to value incentive; trial, sample, demo, and first use can map to first-experience proof.",
-        "- Use the theme to choose the problem, benefit, proof cue, and scene role; do not copy a winning creative only because it shares a keyword.",
-        "- Keep the advertiser's brand system and product proof consistent while adapting the use case to the LOW source asset.",
-        "",
-        "## Source Reference Rules",
-        "- For LOW replacement variants, inspect the source image before prompt construction and use it as the visual reference.",
-        "- Preserve source elements by role unless the user marks them as hard SLA: product or service category, scene context, proof container, offer cue, human or use-case cue, and brand treatment.",
-        "- Do not generate extra ratios; create only a same-size replacement for the flagged source asset.",
-        "- If the source and design guide conflict, keep user-approved hard SLA constraints first, then source role preservation, then design-guide preferences.",
-        "",
-        "## Prompt Assembly Contract",
-        "- Build future variant prompts from source image, LOW campaign/ad group metadata, native dimensions, theme, user-approved hard SLAs, soft preservation rules, and this design system.",
-        "- Ask the user for hard SLA constraints before every regeneration.",
-        "- Attach the LOW source image to the generation call whenever the task is a replacement variant.",
-        "- State that output is preview-only unless a separate upload or replacement workflow is explicitly approved.",
-        "",
-        "## Constraint Classes",
-        "- **Hard SLA:** user-confirmed requirements that must be preserved or reported as failed.",
-        "- **Soft Preserve:** source-image roles to keep similar without exact pixel preservation.",
-        "- **Design Guide:** reusable composition, hierarchy, brand, CTA, and readability rules from reviewed winners.",
-        "- **Inferred Tokens:** colors, typography, logo treatment, product styling, and component patterns inferred from reviewed creatives rather than approved source-of-truth brand files.",
-    ]
+    _append_markdown_section(lines, "CTA Rules", strategy["cta_rules"])
+    _append_markdown_section(
+        lines, "Brand And Product Rules", strategy["brand_and_product_rules"]
+    )
+    _append_markdown_section(lines, "Visual Style", strategy["visual_style"])
+    _append_markdown_section(lines, "Avoid", strategy["avoid"])
+    _append_markdown_section(
+        lines,
+        "Account-Specific Generation Notes",
+        strategy["future_generation_contract_notes"],
+    )
 
-    lines += [
-        "",
-        "## CTA Rules",
-    ]
-    cta_rules = _strategy_list(strategy, "cta_rules")
-    if cta_rules:
-        for item in cta_rules:
-            lines.append(f"- {item}")
-    else:
-        lines.append("- Use an explicit CTA only when the concept benefits from a direct action prompt.")
-        lines.append("- Keep the CTA secondary to the core benefit.")
-
-    lines += [
-        "",
-        "## Do's and Don'ts",
-    ]
-    for item in _strategy_list(strategy, "avoid"):
-        lines.append(f"- {item.rstrip('.')}.")
-    if not _strategy_list(strategy, "avoid"):
-        lines.append("- Don't crop one composition blindly across ratios.")
-        lines.append("- Don't let scene detail overpower the message.")
-    lines += [
-        "- Do keep the composition readable at feed size.",
-        "- Do adapt the same visual language across ratios without copying the exact placement of every element.",
-        "",
-        "## Fidelity Rules",
-        "- Start from this design system and the current campaign brief.",
-        "- If a required element cannot be faithfully generated, say exactly what is missing instead of guessing.",
-        "- Ask only for missing elements tied to fidelity, approval, or exactness.",
-        "- Do not assume a fixed upload checklist.",
-        "- Use reviewed creative evidence first for brand tokens; merge explicit brand assets or brand docs only when they are available.",
-    ]
-    for item in _strategy_list(strategy, "future_generation_contract_notes"):
-        lines.append(f"- {item}")
-
-    path.write_text("\n".join(lines) + "\n")
-
-
-def _write_static_banner_overview_markdown(
-    path: Path,
-    strategy_path: Path,
-    design_path: Path,
-    unique_count: int,
-    diagnostic: bool = False,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    date_str = today().isoformat()
-    lines = [
-        "---",
-        f"date: {date_str}",
-        "intent: static_banner_design",
-        "---",
-        "",
-        "← [Wiki Index](../Index.md)",
-        "",
-        f"# {'Static Banner Diagnostic' if diagnostic else 'Static Banner Design'}: {date_str}",
-        "",
-        "## Files",
-        f"- [Strategy]({strategy_path.name}) — evidence, repeated-placement context, and per-creative observations for {unique_count} unique visual families.",
-        f"- [DESIGN.md]({design_path.name}) — advertiser-specific thematic design-system spec for future source-guided generation.",
-        "",
-        "## How To Use",
-        "- Read the strategy file when you need to understand what won and where it repeated.",
-        "- Use `DESIGN.md` as the primary generation spec: theme grammar, source-reference rules, prompt assembly, constraint classes, and visual design rules.",
-        "- For LOW static variants, start from the flagged source image and campaign/ad group metadata; do not generate from `DESIGN.md` alone.",
-        "- Before each regeneration, ask the user for hard SLA constraints, then preserve source elements by role unless marked hard SLA.",
-        "- If the strategist has not visually reviewed images yet, treat both files as incomplete.",
-        "",
-        "## Variant Generation Contract",
-        "- Map metadata and source context into broad themes instead of exact keyword matches.",
-        "- Generate only same-size replacement previews for flagged LOW static image assets.",
-        "- Run spec-only QA on preview outputs; apply to Google Ads only through the separate approval-gated apply flow.",
-    ]
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -1055,7 +927,10 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
             "image_inspected_count": "int",
             "raw_asset_count": "int",
             "unique_image_count": "int",
-            "creative_observations": "list[dict]",
+            "creative_observations": {
+                "type": "list[dict]",
+                "required_fields": list(_OBSERVATION_FIELDS),
+            },
             "duplicate_groups": "list[dict]",
             "winning_patterns": "list[str]",
             "visual_language": "list[str]",
@@ -1064,8 +939,12 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
             "component_patterns": "list[str]",
             "brand_signals": "list[str]",
             "token_confidence_notes": "list[str]",
+            "composition_rules": "list[str]",
+            "imagery_rules": "list[str]",
             "ratio_rules": "dict[str, str]",
             "message_hierarchy": "list[str]",
+            "copy_density_rules": "list[str]",
+            "safe_area_guidance": "list[str]",
             "cta_rules": "list[str]",
             "brand_and_product_rules": "list[str]",
             "visual_style": "list[str]",
@@ -1079,15 +958,25 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
     if strategy_json:
         strategy_path = Path(strategy_json).expanduser()
         strategy = json.loads(strategy_path.read_text())
+        expected_asset_ids = {
+            str(asset.get("asset_id", "")).strip()
+            for asset in manifest_assets
+            if asset.get("download_status") == "downloaded" and asset.get("asset_id")
+        }
+        errors = _strategy_validation_errors(strategy, expected_asset_ids)
+        if errors:
+            die(
+                f"strategy JSON is incomplete: {strategy_path}: "
+                + "; ".join(errors)
+            )
         if strategy_path != strategy_output_path:
             strategy_output_path.write_text(json.dumps(strategy, indent=2, ensure_ascii=False) + "\n")
-        if not _strategy_has_visual_evidence(strategy):
-            die(
-                f"strategy JSON has no visual evidence: {strategy_path}. "
-                "Expected image_inspected_count > 0 or creative_observations."
-            )
     elif data_only_diagnostic:
-        strategy = _build_default_static_banner_strategy(grouped_with_downloads)
+        strategy = {
+            "status": "data_only_pending_visual_review",
+            "raw_asset_count": manifest_payload["raw_asset_count"],
+            "unique_image_count": manifest_payload["unique_image_count"],
+        }
     else:
         downloaded = sum(1 for asset in manifest_assets if asset.get("download_status") == "downloaded")
         with_url = sum(1 for asset in manifest_assets if asset.get("source_url"))
@@ -1122,15 +1011,20 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
         currency,
         diagnostic=data_only_diagnostic,
     )
+    if data_only_diagnostic:
+        print(f"banner diagnostic written:   {strategy_guide_path}")
+        print(f"strategist input written:    {strategy_input_path}")
+        return
     _write_static_banner_design_md(
         design_md_path,
         strategy,
         strategy_guide_path,
         customer_id,
     )
+    evidence_label = "BEST" if best_assets else "GOOD"
     entry = (
-        f"- [DESIGN.md](design/DESIGN.md) · [DESIGN_STRATEGY.md](design/DESIGN_STRATEGY.md) — "
-        f"account design guidance from {len(primary_assets)} unique {'BEST' if best_assets else 'GOOD'} visual families"
+        f"- [Account Design Guidance — {today().isoformat()}](design/DESIGN.md) — "
+        f"built from {len(primary_assets)} unique {evidence_label} visual families"
         + ("; GOOD fallback used" if not best_assets else "")
     )
     _write_static_banner_index_entry(wiki_base / "Index.md", entry, section="Design")

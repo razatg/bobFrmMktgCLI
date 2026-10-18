@@ -574,22 +574,8 @@ def prepare_conversation_runtime(workspace_id: str):
         _replace_runtime_copy(garf_workspace / 'queries', queries_source)
     _safe_link(garf_workspace / 'outputs', state_root / 'garf' / 'outputs')
     return workspace, state_root
-def runtime_google_config(store, user_id, client_instance_id, state_root: Path, account_id=None):
-    config=client_google_config(store, client_instance_id)
-    connection=store.one('SELECT * FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(user_id,client_instance_id))
-    path=state_root / '.bob' / 'runtime' / f'google-ads-{user_id}.yaml'
-    if not config or not connection:
-        path.unlink(missing_ok=True)
-        return None
-    developer=app.state.secrets.get(config['developer_token_ref'])
-    secret=app.state.secrets.get(config['oauth_client_secret_ref'])
-    refresh=app.state.secrets.get(connection['refresh_token_ref'])
-    path.parent.mkdir(parents=True,exist_ok=True)
-    lines=[f'developer_token: {json.dumps(developer)}',f'client_id: {json.dumps(config["oauth_client_id"])}',f'client_secret: {json.dumps(secret)}',f'refresh_token: {json.dumps(refresh)}','use_proto_plus: true']
-    if config['mcc_id']: lines.append(f'login_customer_id: {json.dumps(config["mcc_id"])}')
-    path.write_text('\n'.join(lines)+'\n')
-    try: path.chmod(0o600)
-    except OSError: pass
+def materialize_runtime_accounts(store, user_id, client_instance_id, state_root: Path, read_config_path: Path, account_id=None):
+    """Build account context independently from live Google authorization."""
     # Rebuild the CLI-facing account registry in the conversation-local state
     # root so one web conversation's account choice never mutates another's.
     user=store.one('SELECT role FROM users WHERE id=?',(user_id,))
@@ -607,7 +593,7 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
         'google_ads_customer_id': a['customer_id'],
         'account_name': a['account_name'],
         'active': bool(a['is_active']) and a['id'] == selected,
-        'google_ads_read_config_path': str(path),
+        'google_ads_read_config_path': str(read_config_path),
     } for i, a in enumerate(accounts)], indent=2) + '\n')
     try: registry.chmod(0o600)
     except OSError: pass
@@ -617,7 +603,7 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
         profile_path.write_text(json.dumps({
             'google_ads_customer_id': account['customer_id'],
             'account_name': account['account_name'],
-            'google_ads_read_config_path': str(path),
+            'google_ads_read_config_path': str(read_config_path),
             'primary_goal': account['primary_goal'],
             'currency': account['currency'],
             'campaign_goal_type': account['campaign_goal_type'],
@@ -629,6 +615,27 @@ def runtime_google_config(store, user_id, client_instance_id, state_root: Path, 
         }, indent=2) + '\n')
         try: profile_path.chmod(0o600)
         except OSError: pass
+    return selected
+
+def runtime_google_config(store, user_id, client_instance_id, state_root: Path, account_id=None):
+    config=client_google_config(store, client_instance_id)
+    connection=store.one('SELECT * FROM google_ads_connections WHERE user_id=? AND client_instance_id=? AND status="connected"',(user_id,client_instance_id))
+    path=state_root / '.bob' / 'runtime' / f'google-ads-{user_id}.yaml'
+    # Date resolution, saved-data analysis, and account-scoped instructions
+    # must work for a new user before they complete Google OAuth.
+    materialize_runtime_accounts(store,user_id,client_instance_id,state_root,path,account_id)
+    if not config or not connection:
+        path.unlink(missing_ok=True)
+        return None
+    developer=app.state.secrets.get(config['developer_token_ref'])
+    secret=app.state.secrets.get(config['oauth_client_secret_ref'])
+    refresh=app.state.secrets.get(connection['refresh_token_ref'])
+    path.parent.mkdir(parents=True,exist_ok=True)
+    lines=[f'developer_token: {json.dumps(developer)}',f'client_id: {json.dumps(config["oauth_client_id"])}',f'client_secret: {json.dumps(secret)}',f'refresh_token: {json.dumps(refresh)}','use_proto_plus: true']
+    if config['mcc_id']: lines.append(f'login_customer_id: {json.dumps(config["mcc_id"])}')
+    path.write_text('\n'.join(lines)+'\n')
+    try: path.chmod(0o600)
+    except OSError: pass
     return str(path)
 
 def runtime_creative_config(store, client_instance_id, state_root: Path):
@@ -666,7 +673,7 @@ def can_schedule_account(store, user, account_id):
                   (user['id'],account_id))
     return bool(row and row['can_schedule'])
 
-GOOGLE_SETUP_HANDOFF = "I can do that once you connect Bob to Google Ads. Say ‘Hey Bob, set me up’ and I’ll take you through it."
+GOOGLE_SETUP_HANDOFF = "You need to log in to your Google account before I can pull live data. Just say ‘Set me up again.’"
 GOOGLE_REAUTH_HANDOFF = "You need to log in to your Google account again. Just say ‘Set me up again.’"
 OAUTH_SUCCESS_MESSAGE = "You’re all set, mate. Your Google Ads account is connected. What would you like to check first?"
 
@@ -2024,6 +2031,12 @@ def visible_artifact_path(path: Path) -> bool:
         return True
     run_index=parts.index('creative-runs')
     if len(parts)==run_index+3 and parts[run_index+2]=='index.md':
+        return True
+    if (
+        suffix == '.md'
+        and len(parts) == run_index + 4
+        and parts[run_index + 2] == 'details'
+    ):
         return True
     return (
         suffix in {'.png','.jpg','.jpeg','.webp'}

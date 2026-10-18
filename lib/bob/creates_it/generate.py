@@ -23,10 +23,23 @@ GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/inte
 MAX_REPLACEMENTS = 20
 MAX_SOURCE_BYTES = 10_000_000
 MAX_OUTPUT_BYTES = 10_000_000
+VISUAL_REVIEW_CHECKS = (
+    "brief_fidelity",
+    "copy_accuracy",
+    "brand_fidelity",
+    "creative_transformation",
+    "composition",
+    "visual_integrity",
+    "design_guidance",
+)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _image_prompt(*parts: str) -> str:
+    return "\n\n".join(str(part).strip() for part in parts if str(part).strip())
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -250,6 +263,130 @@ def _next_adaptation_name(outputs: Path, concept_id: str, format_name: str) -> s
     return f"adapt-{safe_id}-{format_name}-v{max(versions, default=0) + 1}.png"
 
 
+def _generation_request(
+    model: str,
+    prompt: str,
+    sources: Path | list[Path],
+    aspect_ratio: str,
+) -> dict[str, Any]:
+    source_paths = sources if isinstance(sources, list) else [sources]
+    image_inputs = [
+        {
+            "type": "image",
+            "reference": path.name,
+            "mime_type": _mime_for(path),
+        }
+        for path in source_paths
+    ]
+    return {
+        "model": model,
+        "input": [*image_inputs, {"type": "text", "text": prompt}],
+        "response_format": {"type": "image", "aspect_ratio": aspect_ratio},
+    }
+
+
+def _candidate_label(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("concept_id")
+        or candidate.get("asset_id")
+        or candidate.get("format")
+        or "Creative output"
+    )
+
+
+def _visual_review_status(candidate: dict[str, Any]) -> str:
+    review = candidate.get("visual_review")
+    return str(review.get("status", "pending")) if isinstance(review, dict) else "pending"
+
+
+def _write_visual_review_detail(run_dir: Path, candidate: dict[str, Any]) -> None:
+    detail_page = candidate.get("detail_page")
+    if not detail_page:
+        return
+    path = run_dir / str(detail_page)
+    if not path.is_file():
+        return
+    text = re.sub(
+        r"\n<!-- visual-review:start -->.*?<!-- visual-review:end -->\n?",
+        "\n",
+        path.read_text(),
+        flags=re.DOTALL,
+    ).rstrip()
+    review = candidate.get("visual_review", {"status": "pending"})
+    block = (
+        "\n\n<!-- visual-review:start -->\n"
+        "## Visual review\n\n"
+        "```json\n"
+        f"{json.dumps(review, indent=2, ensure_ascii=False)}\n"
+        "```\n"
+        "<!-- visual-review:end -->\n"
+    )
+    path.write_text(text + block)
+
+
+def _write_candidate_details(run_dir: Path, candidates: list[dict[str, Any]]) -> None:
+    details = run_dir / "details"
+    details.mkdir(exist_ok=True)
+    for candidate in candidates:
+        detail_name = f"{Path(str(candidate['name'])).stem}.md"
+        detail_path = details / detail_name
+        label = _candidate_label(candidate)
+        source_names = candidate.get("source_references") or (
+            [candidate["source_reference"]] if candidate.get("source_reference") else []
+        )
+        lines = [
+            f"# {label}",
+            "",
+            "Review-only output; nothing has been published.",
+            "",
+        ]
+        for source_name in source_names:
+            lines += [
+                "## Source",
+                "",
+                f"![Source {label}](../references/{source_name})",
+                "",
+            ]
+        lines += [
+            "## Output",
+            "",
+            f"![Output {label}](../outputs/{candidate['name']})",
+            "",
+        ]
+        production = candidate.pop("_production_record", None)
+        request = candidate.pop("_generation_request", None)
+        if production:
+            lines += [
+                "## Production method",
+                "",
+                "```json",
+                json.dumps(production, indent=2, ensure_ascii=False),
+                "```",
+                "",
+            ]
+        if request:
+            lines += [
+                "## Generation request",
+                "",
+                "The API key and encoded image bytes are intentionally omitted.",
+                "",
+                "```json",
+                json.dumps(request, indent=2, ensure_ascii=False),
+                "```",
+                "",
+            ]
+        else:
+            lines += [
+                "## Generation request",
+                "",
+                "No AI prompt was used; the production method above records the deterministic tool/script.",
+                "",
+            ]
+        detail_path.write_text("\n".join(lines))
+        candidate["detail_page"] = str(detail_path.relative_to(run_dir))
+        _write_visual_review_detail(run_dir, candidate)
+
+
 def _write_run_index(path: Path, customer_id: str, candidates: list[dict[str, Any]]) -> None:
     lines = [
         f"# Creative review · {customer_id}",
@@ -257,7 +394,11 @@ def _write_run_index(path: Path, customer_id: str, candidates: list[dict[str, An
         "Review-only outputs; nothing has been published.",
         "",
     ]
-    visible = [item for item in candidates if item.get("review_status") != "superseded"]
+    visible = [
+        item for item in candidates
+        if item.get("review_status") != "superseded"
+        and _visual_review_status(item) == "passed"
+    ]
     masters = [item for item in visible if item.get("candidate_type") == "master"]
     low = [item for item in visible if item.get("candidate_type") == "low_replacement"]
     adaptations = [item for item in visible if item.get("candidate_type") == "adaptation"]
@@ -270,7 +411,7 @@ def _write_run_index(path: Path, customer_id: str, candidates: list[dict[str, An
             continue
         lines += [f"## {title}", ""]
         for item in items:
-            label = item.get("concept_id") or item.get("asset_id") or item["name"]
+            label = _candidate_label(item)
             source_names = item.get("source_references") or (
                 [item["source_reference"]] if item.get("source_reference") else []
             )
@@ -279,26 +420,49 @@ def _write_run_index(path: Path, customer_id: str, candidates: list[dict[str, An
             lines += [
                 f"### {label} · {item.get('format', 'output')}",
                 f"![{item['name']}](outputs/{item['name']})",
-                f"[{item['name']}](outputs/{item['name']}) · QA passed",
-                "",
             ]
+            if item.get("detail_page"):
+                method = str(item.get("production_method") or "unknown").replace("_", " ")
+                lines.append(
+                    f"Production: {method} · [View generation details]({item['detail_page']}) · "
+                    "Technical checks passed · Visual review passed"
+                )
+            else:
+                lines.append("Technical checks passed · Visual review passed")
+            lines.append("")
     path.write_text("\n".join(lines) + "\n")
 
 
-def _update_account_index(index_path: Path, run_id: str, candidates: list[dict[str, Any]]) -> None:
+def _index_label(value: str) -> str:
+    return re.sub(r"[\[\]\r\n]+", " ", value).strip()[:100] or "Creative Review"
+
+
+def _update_account_index(index_path: Path, manifest: dict[str, Any]) -> None:
     text = index_path.read_text() if index_path.exists() else "# Bob — Wiki Index\n"
-    heading = "## Static Replacements"
+    heading = "## Design"
     if heading not in text:
         text = text.rstrip() + f"\n\n{heading}\n"
+    run_id = str(manifest["run_id"])
     marker = f"<!-- creative-run:{run_id} -->"
-    active = sum(1 for item in candidates if item.get("review_status") != "superseded")
-    row = f"- [{run_id}](creative-runs/{run_id}/index.md) — {active} review output{'s' if active != 1 else ''}"
-    if marker not in text:
-        text = text.rstrip() + f"\n\n{marker}\n{row}\n"
-    else:
-        text = re.sub(rf"(?m)^- {re.escape(run_id)}:.*$", lambda _match: row, text)
+    active = sum(
+        1 for item in manifest["candidates"]
+        if item.get("review_status") != "superseded"
+        and _visual_review_status(item) == "passed"
+    )
+    title = _index_label(str(manifest.get("title") or manifest.get("goal") or "Creative Review"))
+    date = str(manifest.get("created_at") or "")[:10]
+    dated_title = f"{title} — {date}" if date else title
+    row = (
+        f"- [{dated_title}](creative-runs/{run_id}/index.md) — "
+        f"{active} review output{'s' if active != 1 else ''}; nothing published"
+    )
+    marker_block = re.compile(rf"(?m)^{re.escape(marker)}\n- .*\n?")
+    text = marker_block.sub("", text)
+    section = re.search(rf"(?m)^{re.escape(heading)}\s*$", text)
+    insert_at = section.end() if section else len(text)
+    text = text[:insert_at] + f"\n\n{marker}\n{row}" + text[insert_at:]
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(text)
+    index_path.write_text(text.rstrip() + "\n")
 
 
 def _candidate_placements(asset: dict[str, Any]) -> list[dict[str, str]]:
@@ -324,7 +488,7 @@ def _placements_publish_ready(placements: list[dict[str, str]]) -> bool:
 def _apply_changes(candidates: list[dict[str, Any]], outputs: Path) -> list[dict[str, str]]:
     changes = []
     for item in candidates:
-        if item.get("review_status") != "pending":
+        if item.get("review_status") != "pending" or _visual_review_status(item) != "passed":
             continue
         if item.get("candidate_type") == "master" and not item.get("approved_for_adaptation"):
             continue
@@ -359,13 +523,10 @@ def _apply_changes(candidates: list[dict[str, Any]], outputs: Path) -> list[dict
 def _generate_one(
     replacement: dict[str, Any],
     asset: dict[str, Any],
-    design: str,
-    strategy: str,
     provider: dict[str, str],
     references: Path,
     outputs: Path,
     caller: Callable[..., tuple[bytes, str]],
-    goal: str,
     model: str,
 ) -> dict[str, Any]:
     asset_id = str(asset.get("asset_id", ""))
@@ -381,15 +542,15 @@ def _generate_one(
     prompt = str(replacement.get("prompt", "")).strip()
     if not prompt:
         die(f"replacement brief is missing a prompt for asset {asset_id}")
-    full_prompt = (
-        "Create one review-only, lightly modified advertising image based on the supplied LOW source. "
-        f"Preserve its proposition, subjects, brand treatment, composition, and native {width}x{height} dimensions. "
-        "Do not add unrequested logos, claims, prices, offers, or legal copy.\n\n"
-        f"GOAL:\n{goal[:2000]}\n\nREQUEST:\n{prompt[:12000]}\n\nDESIGN SYSTEM:\n{design[:16000]}\n\n"
-        f"DESIGN STRATEGY:\n{strategy[:16000]}"
+    full_prompt = _image_prompt(
+        f"Create one review-only {width}x{height} ad from the supplied LOW reference. "
+        "Keep it recognisable and follow the requested change exactly. Do not invent copy, "
+        "claims, prices, offers, logos, or legal text.",
+        prompt,
     )
+    aspect_ratio = _aspect_ratio(width, height)
     image_bytes, returned_mime = caller(
-        provider["api_key"], model, full_prompt, reference, _aspect_ratio(width, height)
+        provider["api_key"], model, full_prompt, reference, aspect_ratio
     )
     output_name = _next_output_name(outputs, asset_id)
     output = outputs / output_name
@@ -408,8 +569,19 @@ def _generate_one(
         "placements": _candidate_placements(asset),
         "publish_ready": _placements_publish_ready(_candidate_placements(asset)),
         "qa": qa,
+        "visual_review": {"status": "pending"},
         "review_status": "pending",
         "published": False,
+        "production_method": "gemini_generation",
+        "_production_record": {
+            "method": "ai_generation",
+            "provider": "gemini",
+            "model": model,
+            "prompt_used": True,
+        },
+        "_generation_request": _generation_request(
+            model, full_prompt, reference, aspect_ratio
+        ),
     }
 
 
@@ -468,13 +640,10 @@ def _concept_placements(selected_assets: list[dict[str, Any]]) -> list[dict[str,
 def _generate_master(
     concept: dict[str, Any],
     assets: dict[str, dict[str, Any]],
-    design: str,
-    strategy: str,
     provider: dict[str, str],
     references: Path,
     outputs: Path,
     caller: Callable[..., tuple[bytes, str]],
-    user_request: str,
     model: str,
 ) -> dict[str, Any]:
     concept_id = _safe_label(str(concept.get("concept_id", "")), "")
@@ -484,24 +653,17 @@ def _generate_master(
         concept, assets, references
     )
     instruction = str(concept.get("instruction") or concept.get("prompt") or "").strip()
-    campaign_context = str(concept.get("campaign_context") or "").strip()
-    ad_group_context = str(concept.get("ad_group_context") or "").strip()
-    context = "\n".join(
-        value for value in (
-            f"Campaign context: {campaign_context}" if campaign_context else "",
-            f"Ad-group context: {ad_group_context}" if ad_group_context else "",
-        ) if value
-    ) or "No campaign or ad-group context was supplied; use the mandatory brief and references."
-    prompt = (
-        "Create one review-only 1:1 master advertising concept at 1200x1200. "
-        "Use the supplied references as visual evidence, not as a demand for pixel copying. "
-        "Keep important subjects, branding, copy, and legal elements legible, with flexible background "
-        "space that can support later aspect-ratio adaptation. Do not force every element into a rigid safe-area box. "
-        "Do not add unrequested logos, claims, prices, offers, or legal copy.\n\n"
-        f"USER EXPECTATION:\n{user_request[:12000]}\n\n"
-        f"CONCEPT INSTRUCTION:\n{instruction[:12000]}\n\n"
-        f"OPTIONAL ACCOUNT CONTEXT:\n{context[:4000]}\n\n"
-        f"DESIGN SYSTEM:\n{design[:16000]}\n\nDESIGN STRATEGY:\n{strategy[:16000]}"
+    if not instruction:
+        die(f"concept {concept_id} requires a concise generation instruction")
+    prompt = _image_prompt(
+        "Create one review-only 1200x1200 square ad using the supplied images for brand, product, "
+        "and factual reference. Follow only explicit hard constraints and exact approved copy "
+        "literally; treat other creative direction as an objective. Unless the instruction explicitly "
+        "requests a close adaptation, develop a materially new focal idea, composition, subject "
+        "arrangement, framing, and reading path rather than reusing a reference layout. Keep specified "
+        "copy legible and requested brand and product roles accurate. Do not invent copy, claims, "
+        "offers, logos, or legal text.",
+        instruction,
     )
     image_bytes, returned_mime = caller(
         provider["api_key"], model, prompt, source_paths, "1:1"
@@ -523,8 +685,19 @@ def _generate_master(
         "publish_ready": False,
         "approved_for_adaptation": False,
         "qa": qa,
+        "visual_review": {"status": "pending"},
         "review_status": "pending",
         "published": False,
+        "production_method": "gemini_generation",
+        "_production_record": {
+            "method": "ai_generation",
+            "provider": "gemini",
+            "model": model,
+            "prompt_used": True,
+        },
+        "_generation_request": _generation_request(
+            model, prompt, source_paths, "1:1"
+        ),
     }
 
 
@@ -559,9 +732,6 @@ def _adapt_master(
     master: dict[str, Any],
     assets: dict[str, dict[str, Any]],
     outputs: Path,
-    design: str,
-    strategy: str,
-    user_request: str,
     provider: dict[str, str] | None,
     model: str,
     caller: Callable[..., tuple[bytes, str]],
@@ -596,25 +766,53 @@ def _adapt_master(
         provider_mime = ""
         if method == "ai":
             target_width, target_height = TARGET_FORMATS[format_name]
-            prompt = (
+            prompt = _image_prompt(
                 f"Recompose the approved master as a {format_name} {target_width}x{target_height} advertising image. "
                 "Preserve its concept, proposition, subjects, branding, copy, and legal meaning. "
                 "Adapt the layout for the new ratio rather than stretching or blindly cropping it. "
-                "Do not add unrequested claims, offers, logos, or legal copy.\n\n"
-                f"USER EXPECTATION:\n{user_request[:12000]}\n\n"
-                f"ADAPTATION INSTRUCTION:\n{str(request.get('instruction') or '')[:12000]}\n\n"
-                f"DESIGN SYSTEM:\n{design[:16000]}\n\nDESIGN STRATEGY:\n{strategy[:16000]}"
+                "Do not add unrequested copy, claims, offers, logos, or legal text.",
+                str(request.get("instruction") or ""),
             )
             image_bytes, provider_mime = caller(
                 provider["api_key"], model, prompt, source, _aspect_ratio(target_width, target_height)
             )
             qa = _save_exact_png(image_bytes, output, target_width, target_height)
             qa["adaptation_method"] = "ai_recomposition"
+            generation_request = _generation_request(
+                model, prompt, source, _aspect_ratio(target_width, target_height)
+            )
+            production_method = "gemini_recomposition"
+            production_record = {
+                "method": "ai_recomposition",
+                "provider": "gemini",
+                "model": model,
+                "prompt_used": True,
+                "source": source.name,
+                "target": {
+                    "format": format_name,
+                    "width": target_width,
+                    "height": target_height,
+                },
+            }
         else:
             try:
                 qa = adapt_master_png(source, output, TARGET_FORMATS[format_name])
             except ValueError as exc:
                 die(str(exc))
+            generation_request = None
+            target_width, target_height = TARGET_FORMATS[format_name]
+            production_method = "python_adaptation"
+            production_record = {
+                "method": "deterministic_python_adaptation",
+                "tool": "adapt_master_png",
+                "prompt_used": False,
+                "source": source.name,
+                "target": {
+                    "format": format_name,
+                    "width": target_width,
+                    "height": target_height,
+                },
+            }
         created.append({
             "name": output_name,
             "candidate_type": "adaptation",
@@ -631,8 +829,12 @@ def _adapt_master(
                 _placements_publish_ready(item["placements"]) for item in targets
             ),
             "qa": qa,
+            "visual_review": {"status": "pending"},
             "review_status": "pending",
             "published": False,
+            "production_method": production_method,
+            "_production_record": production_record,
+            "_generation_request": generation_request,
         })
     return created
 
@@ -640,13 +842,10 @@ def _adapt_master(
 def _generate_low_stage(
     brief: dict[str, Any],
     assets: dict[str, dict[str, Any]],
-    design: str,
-    strategy: str,
     provider: dict[str, str],
     references: Path,
     outputs: Path,
     caller: Callable[..., tuple[bytes, str]],
-    goal: str,
     model: str,
 ) -> list[dict[str, Any]]:
     replacements = brief.get("replacements")
@@ -662,8 +861,8 @@ def _generate_low_stage(
         if asset_id not in assets:
             die(f"asset {asset_id} is not in the selected static source manifest")
         generated.append(_generate_one(
-            replacement, assets[asset_id], design, strategy, provider,
-            references, outputs, caller, goal or "Lightly improve this LOW image", model,
+            replacement, assets[asset_id], provider,
+            references, outputs, caller, model,
         ))
     return generated
 
@@ -671,13 +870,10 @@ def _generate_low_stage(
 def _generate_master_stage(
     brief: dict[str, Any],
     assets: dict[str, dict[str, Any]],
-    design: str,
-    strategy: str,
     provider: dict[str, str],
     references: Path,
     outputs: Path,
     caller: Callable[..., tuple[bytes, str]],
-    goal: str,
     model: str,
 ) -> list[dict[str, Any]]:
     concepts = brief.get("concepts")
@@ -690,8 +886,8 @@ def _generate_master_stage(
         die("concept brief must name each concept once")
     return [
         _generate_master(
-            concept, assets, design, strategy, provider, references,
-            outputs, caller, goal, model,
+            concept, assets, provider, references,
+            outputs, caller, model,
         )
         for concept in concepts
     ]
@@ -702,9 +898,6 @@ def _generate_adaptation_stage(
     run_manifest: dict[str, Any],
     assets: dict[str, dict[str, Any]],
     outputs: Path,
-    design: str,
-    strategy: str,
-    goal: str,
     provider: dict[str, str] | None,
     model: str,
     caller: Callable[..., tuple[bytes, str]],
@@ -723,14 +916,14 @@ def _generate_adaptation_stage(
                 if item.get("candidate_type") == "master"
                 and item.get("name") == master_name
                 and item.get("review_status") == "pending"
+                and _visual_review_status(item) == "passed"
             ),
             None,
         )
         if not master:
             die(f"pending master is not in this creative run: {master_name}")
         generated.extend(_adapt_master(
-            request, master, assets, outputs, design, strategy, goal,
-            provider, model, caller,
+            request, master, assets, outputs, provider, model, caller,
         ))
     return generated
 
@@ -759,7 +952,15 @@ def _blocked_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, str]
             item.get("candidate_type") in {"low_replacement", "adaptation"}
             or item.get("approved_for_adaptation")
         )
-        if item.get("review_status") != "pending" or not publish_surface or item.get("publish_ready"):
+        if item.get("review_status") != "pending" or not publish_surface:
+            continue
+        if _visual_review_status(item) != "passed":
+            blocked.append({
+                "asset_id": item.get("asset_id") or ",".join(item.get("source_asset_ids", [])),
+                "reason": "visual review must pass before publishing this candidate",
+            })
+            continue
+        if item.get("publish_ready"):
             continue
         blocked.append({
             "asset_id": item.get("asset_id") or ",".join(item.get("source_asset_ids", [])),
@@ -768,9 +969,116 @@ def _blocked_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, str]
     return blocked
 
 
+def _write_apply_plan(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    outputs: Path,
+) -> None:
+    plan = {
+        "customer_id": manifest["customer_id"],
+        "manifest": manifest["source_manifest"],
+        "changes": _apply_changes(manifest["candidates"], outputs),
+        "blocked_candidates": _blocked_candidates(manifest["candidates"]),
+        "applied": False,
+    }
+    (run_dir / "apply-plan.yaml").write_text(json.dumps(plan, indent=2) + "\n")
+
+
+def _validated_review(item: Any) -> tuple[str, dict[str, Any]]:
+    if not isinstance(item, dict):
+        die("each visual review must be a JSON object")
+    name = str(item.get("name", "")).strip()
+    checks = item.get("checks")
+    issues = item.get("issues")
+    if not name or not isinstance(checks, dict) or not isinstance(issues, list):
+        die("each visual review requires name, checks, and issues")
+    if set(checks) != set(VISUAL_REVIEW_CHECKS):
+        die("visual review checks must contain exactly: " + ", ".join(VISUAL_REVIEW_CHECKS))
+    normalized_checks = {key: str(checks[key]).lower() for key in VISUAL_REVIEW_CHECKS}
+    if any(value not in {"passed", "failed"} for value in normalized_checks.values()):
+        die("each visual review check must be passed or failed")
+    normalized_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
+    status = "failed" if "failed" in normalized_checks.values() else "passed"
+    if status == "failed" and not normalized_issues:
+        die("a failed visual review must explain at least one issue")
+    if status == "passed" and normalized_issues:
+        die("a passed visual review cannot contain unresolved issues")
+    return name, {
+        "status": status,
+        "checks": normalized_checks,
+        "issues": normalized_issues,
+        "reviewed_at": _now(),
+    }
+
+
+def _record_visual_reviews(args: Any) -> None:
+    customer_id = _selected_customer_id()
+    run_id = str(getattr(args, "run_id", "") or "")
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", run_id):
+        die("visual review requires a valid run ID")
+    review_path = _safe_state_file(str(args.visual_review), "visual review")
+    payload = _read_json(review_path, "visual review")
+    reviews = payload.get("reviews")
+    if not isinstance(reviews, list) or not reviews:
+        die("visual review must contain a non-empty reviews list")
+    run_dir = account_wiki_dir(customer_id) / "creative-runs" / run_id
+    manifest_path = run_dir / "manifest.json"
+    manifest = _read_json(manifest_path, "creative run manifest")
+    if manifest.get("customer_id") != customer_id:
+        die("creative run belongs to a different account")
+    pending = {
+        str(candidate.get("name")): candidate
+        for candidate in manifest.get("candidates", [])
+        if isinstance(candidate, dict)
+        and candidate.get("review_status") == "pending"
+        and _visual_review_status(candidate) == "pending"
+    }
+    validated = [_validated_review(item) for item in reviews]
+    names = [name for name, _review in validated]
+    if len(names) != len(set(names)):
+        die("visual review must name each candidate once")
+    if set(names) != set(pending):
+        missing = sorted(set(pending) - set(names))
+        unknown = sorted(set(names) - set(pending))
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unknown:
+            details.append("unknown " + ", ".join(unknown))
+        die("visual review must cover every pending output: " + "; ".join(details))
+    for name, review in validated:
+        pending[name]["visual_review"] = review
+        _write_visual_review_detail(run_dir, pending[name])
+    passed = [candidate for candidate in pending.values() if _visual_review_status(candidate) == "passed"]
+    if not passed:
+        manifest["status"] = "visual_review_failed"
+    elif all(candidate.get("candidate_type") == "master" for candidate in passed):
+        manifest["status"] = "masters_ready"
+    elif all(candidate.get("candidate_type") == "adaptation" for candidate in passed):
+        manifest["status"] = "adaptations_ready"
+    else:
+        manifest["status"] = "ready_for_review"
+    manifest["updated_at"] = _now()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    _write_run_index(run_dir / "index.md", customer_id, manifest["candidates"])
+    _write_apply_plan(run_dir, manifest, run_dir / "outputs")
+    print(f"visual review passed: {len(passed)}; failed: {len(pending) - len(passed)}")
+    if passed:
+        _update_account_index(account_wiki_dir(customer_id) / "Index.md", manifest)
+        print(
+            f"[[artifact:wiki/{customer_id}/creative-runs/{run_id}/index.md|"
+            "Open the full creative review]]"
+        )
+
+
 def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str]] = _call_gemini) -> None:
     """Generate LOW edits, generic masters, or approved master adaptations."""
+    if getattr(args, "visual_review", None):
+        _record_visual_reviews(args)
+        return
     customer_id = _selected_customer_id()
+    if not getattr(args, "brief", None) or not getattr(args, "manifest", None):
+        die("generation requires --manifest and --brief")
     brief_path = _safe_state_file(str(args.brief), "replacement brief")
     source_manifest_path = _safe_state_file(
         str(args.manifest), "static source manifest", allow_shared=True
@@ -812,8 +1120,6 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
     strategy_path = wiki / "design" / "DESIGN_STRATEGY.md"
     if mode == "concept" and (not design_path.is_file() or not strategy_path.is_file()):
         die("create the selected account's DESIGN.md and DESIGN_STRATEGY.md before generating concepts")
-    design = design_path.read_text() if design_path.is_file() else ""
-    strategy = strategy_path.read_text() if strategy_path.is_file() else ""
     run_id = str(getattr(args, "run_id", "") or brief.get("run_id") or uuid.uuid4().hex[:12])
     if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", run_id):
         die("run ID must contain only letters, numbers, underscores, or hyphens")
@@ -839,6 +1145,7 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
         "customer_id": customer_id,
         "status": "generating",
         "created_at": _now(),
+        "title": str(brief.get("title") or "").strip(),
         "source_manifest": str(source_manifest_path),
         "selection": selection,
         "mode": mode,
@@ -867,17 +1174,17 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
     try:
         if stage == "edit":
             generated = _generate_low_stage(
-                brief, assets, design, strategy, provider or {}, references,
-                outputs, caller, goal, model,
+                brief, assets, provider or {}, references,
+                outputs, caller, model,
             )
         elif stage == "masters":
             generated = _generate_master_stage(
-                brief, assets, design, strategy, provider or {}, references,
-                outputs, caller, goal, model,
+                brief, assets, provider or {}, references,
+                outputs, caller, model,
             )
         else:
             generated = _generate_adaptation_stage(
-                brief, run_manifest, assets, outputs, design, strategy, goal,
+                brief, run_manifest, assets, outputs,
                 provider, model, caller,
             )
     except BaseException:
@@ -900,33 +1207,19 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
         run_manifest["updated_at"] = _now()
         manifest_path.write_text(json.dumps(run_manifest, indent=2) + "\n")
         die("duplicate generated outputs detected; the run was not presented")
+    _write_candidate_details(run_dir, generated)
     _supersede_prior_candidates(run_manifest["candidates"], generated)
     run_manifest["candidates"].extend(generated)
     if model:
         run_manifest["models_used"] = list(
             dict.fromkeys([*run_manifest.get("models_used", []), model])
         )
-    run_manifest["status"] = {
-        "edit": "ready_for_review",
-        "masters": "masters_ready",
-        "adaptations": "adaptations_ready",
-    }[stage]
+    run_manifest["status"] = "visual_review_pending"
     run_manifest["updated_at"] = _now()
     manifest_path.write_text(json.dumps(run_manifest, indent=2) + "\n")
     _write_run_index(run_dir / "index.md", customer_id, run_manifest["candidates"])
-    apply_plan = {
-        "customer_id": customer_id,
-        "manifest": str(source_manifest_path),
-        "changes": _apply_changes(run_manifest["candidates"], outputs),
-        "blocked_candidates": _blocked_candidates(run_manifest["candidates"]),
-        "applied": False,
-    }
-    (run_dir / "apply-plan.yaml").write_text(json.dumps(apply_plan, indent=2) + "\n")
-    _update_account_index(wiki / "Index.md", run_id, run_manifest["candidates"])
+    _write_apply_plan(run_dir, run_manifest, outputs)
     print(f"creative outputs ready: {len(generated)}")
-    print(
-        f"[[artifact:wiki/{customer_id}/creative-runs/{run_id}/index.md|"
-        "Open the full creative review]]"
-    )
+    print(f"visual review required: {len(generated)}")
     for item in generated:
         print(f"wiki/{customer_id}/creative-runs/{run_id}/outputs/{item['name']}")

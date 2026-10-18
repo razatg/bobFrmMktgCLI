@@ -38,8 +38,9 @@ Route to the most specific available skill before considering a general fallback
 - `bob-wings-it` is only for a confirmed, novel, read-only Google Ads analysis that no existing
   skill or deterministic CLI workflow covers. Do not route creative replacement or generation to
   Wings It merely because the user asks which assets to change or wants replacement ideas.
-- If both a domain skill and a fallback appear relevant, use the domain skill. Its scope and stop
-  conditions take precedence for that workflow.
+- If a domain skill matches, it is exclusive: do not invoke `bob-wings-it` or its MCP tools for
+  that turn. Use Wings It only after the domain skill has established that no supported workflow
+  fits.
 
 ## Hosted workspace exceptions
 

@@ -62,14 +62,42 @@ class CreatesItTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, caller, run_id="run-test-001"):
+    def _review(self, run: Path, reviews: list[dict]) -> None:
+        review_path = self.root / "visual-review.json"
+        review_path.write_text(json.dumps({"reviews": reviews}))
+        args = SimpleNamespace(
+            manifest=None,
+            brief=None,
+            run_id=run.name,
+            visual_review=str(review_path),
+        )
+        env = {"BOB_SELECTED_CUSTOMER_ID": self.customer}
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(generate, "STATE_ROOT", self.root), \
+             patch.object(generate, "account_wiki_dir", lambda _: self.wiki):
+            generate.create_static_replacements(args)
+
+    def _run(self, caller, run_id="run-test-001", review=True):
         args = SimpleNamespace(manifest=str(self.source_manifest), brief=str(self.brief), run_id=run_id)
         env = {"BOB_SELECTED_CUSTOMER_ID": self.customer, "BOB_CREATIVE_PROVIDER_CONFIG": str(self.provider)}
         with patch.dict(os.environ, env, clear=False), \
              patch.object(generate, "STATE_ROOT", self.root), \
              patch.object(generate, "account_wiki_dir", lambda _: self.wiki):
             generate.create_static_replacements(args, caller=caller)
-        return self.wiki / "creative-runs" / run_id
+        run = self.wiki / "creative-runs" / run_id
+        if review:
+            manifest = json.loads((run / "manifest.json").read_text())
+            pending = [
+                item for item in manifest["candidates"]
+                if item.get("review_status") == "pending"
+                and item.get("visual_review", {}).get("status") == "pending"
+            ]
+            checks = {name: "passed" for name in generate.VISUAL_REVIEW_CHECKS}
+            self._review(run, [
+                {"name": item["name"], "checks": checks, "issues": []}
+                for item in pending
+            ])
+        return run
 
     def test_generation_is_account_scoped_exact_size_and_secret_free(self):
         calls = []
@@ -87,9 +115,36 @@ class CreatesItTests(unittest.TestCase):
         self.assertNotIn("secret-key", (run / "manifest.json").read_text())
         self.assertEqual(calls[0][0:2], ("secret-key", "gemini-3.1-flash-image"))
         self.assertIn("Use less copy", calls[0][2])
+        self.assertIn("Keep it recognisable", calls[0][2])
+        self.assertNotIn("materially new focal idea", calls[0][2])
+        self.assertNotIn("Use a clear hero", calls[0][2])
+        self.assertNotIn("Short copy wins", calls[0][2])
         self.assertTrue((run / "references" / "source-asset-1.png").is_file())
-        self.assertIn("creative-runs/run-test-001/index.md", (self.wiki / "Index.md").read_text())
+        account_index = (self.wiki / "Index.md").read_text()
+        self.assertIn("## Design", account_index)
+        self.assertIn("creative-runs/run-test-001/index.md", account_index)
+        self.assertIn("[Creative Review — ", account_index)
+        self.assertNotIn("[run-test-001]", account_index)
         self.assertIn(output.name, (run / "index.md").read_text())
+
+        detail = run / "details" / f"{output.stem}.md"
+        detail_text = detail.read_text()
+        request_section = detail_text.split("## Generation request", 1)[1]
+        request_text = request_section.split("```json\n", 1)[1].split("\n```", 1)[0]
+        request = json.loads(request_text)
+        self.assertEqual(request["model"], "gemini-3.1-flash-image")
+        self.assertEqual(request["input"][0], {
+            "type": "image",
+            "reference": "source-asset-1.png",
+            "mime_type": "image/png",
+        })
+        self.assertIn("Use less copy", request["input"][1]["text"])
+        self.assertNotIn("data", request["input"][0])
+        self.assertNotIn("secret-key", detail_text)
+        self.assertIn('"method": "ai_generation"', detail_text)
+        self.assertIn('"prompt_used": true', detail_text)
+        self.assertIn("Production: gemini generation", (run / "index.md").read_text())
+        self.assertIn("View generation details", (run / "index.md").read_text())
 
     def test_generation_prints_one_canonical_run_artifact_marker(self):
         output = StringIO()
@@ -100,6 +155,47 @@ class CreatesItTests(unittest.TestCase):
             "Open the full creative review]]",
             output.getvalue(),
         )
+
+    def test_visual_review_is_required_and_failed_output_is_not_presented(self):
+        run = self._run(
+            lambda *_: (png_bytes((80, 60)), "image/png"),
+            review=False,
+        )
+        manifest = json.loads((run / "manifest.json").read_text())
+        candidate = manifest["candidates"][0]
+        self.assertEqual(manifest["status"], "visual_review_pending")
+        self.assertEqual(candidate["visual_review"], {"status": "pending"})
+        self.assertFalse((self.wiki / "Index.md").exists())
+        self.assertNotIn(candidate["name"], (run / "index.md").read_text())
+        plan = json.loads((run / "apply-plan.yaml").read_text())
+        self.assertEqual(plan["changes"], [])
+        self.assertIn("visual review must pass", plan["blocked_candidates"][0]["reason"])
+
+        checks = {name: "passed" for name in generate.VISUAL_REVIEW_CHECKS}
+        checks["composition"] = "failed"
+        self._review(run, [{
+            "name": candidate["name"],
+            "checks": checks,
+            "issues": ["Legal copy touches the lower edge."],
+        }])
+        reviewed = json.loads((run / "manifest.json").read_text())
+        self.assertEqual(reviewed["status"], "visual_review_failed")
+        self.assertEqual(reviewed["candidates"][0]["visual_review"]["status"], "failed")
+        self.assertNotIn(candidate["name"], (run / "index.md").read_text())
+        self.assertFalse((self.wiki / "Index.md").exists())
+
+    def test_visual_review_rejects_incomplete_rubric(self):
+        run = self._run(
+            lambda *_: (png_bytes((80, 60)), "image/png"),
+            review=False,
+        )
+        manifest = json.loads((run / "manifest.json").read_text())
+        with self.assertRaises(SystemExit):
+            self._review(run, [{
+                "name": manifest["candidates"][0]["name"],
+                "checks": {"composition": "passed"},
+                "issues": [],
+            }])
 
     def test_brief_can_choose_approved_pro_model(self):
         brief = json.loads(self.brief.read_text())
@@ -301,8 +397,12 @@ class CreatesItTests(unittest.TestCase):
             return png_bytes((1400, 1400)), "image/png"
 
         run = self._run(caller)
-        self.assertIn("Refresh every image in campaign c1", prompts[0])
+        self.assertIn("Simplify the layout", prompts[0])
         self.assertNotIn("LOW-performing", prompts[0])
+        self.assertIn("materially new focal idea", prompts[0])
+        self.assertIn("rather than reusing a reference layout", prompts[0])
+        self.assertNotIn("Follow the instruction exactly", prompts[0])
+        self.assertIn("creative_transformation", generate.VISUAL_REVIEW_CHECKS)
         manifest = json.loads((run / "manifest.json").read_text())
         self.assertEqual(manifest["status"], "masters_ready")
         self.assertEqual(manifest["selection"], "campaign")
@@ -346,6 +446,17 @@ class CreatesItTests(unittest.TestCase):
         with Image.open(run / "outputs" / horizontal["name"]) as image:
             self.assertEqual(image.size, (1200, 628))
         self.assertEqual(horizontal["qa"]["adaptation_method"], "ai_recomposition")
+        vertical = next(
+            item for item in manifest["candidates"] if item.get("format") == "vertical"
+        )
+        horizontal_detail = (run / str(horizontal["detail_page"])).read_text()
+        vertical_detail = (run / str(vertical["detail_page"])).read_text()
+        self.assertIn('"method": "ai_recomposition"', horizontal_detail)
+        self.assertIn('"prompt_used": true', horizontal_detail)
+        self.assertIn('"method": "deterministic_python_adaptation"', vertical_detail)
+        self.assertIn('"tool": "adapt_master_png"', vertical_detail)
+        self.assertIn('"prompt_used": false', vertical_detail)
+        self.assertIn("No AI prompt was used", vertical_detail)
         changes = json.loads((run / "apply-plan.yaml").read_text())["changes"]
         self.assertEqual({(item["ad_group_id"], item["ad_id"]) for item in changes},
                          {("11", "101"), ("22", "202")})

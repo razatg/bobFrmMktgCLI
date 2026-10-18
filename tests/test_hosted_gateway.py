@@ -511,6 +511,25 @@ class GatewayTests(unittest.TestCase):
         self.client.post('/auth/login',json={'identifier':'renew@example.com','password':'renew-password'})
         self.assertFalse(self.client.get('/auth/session').json()['google_connected'])
 
+    def test_new_user_gets_selected_account_context_before_google_connection(self):
+        admin_csrf=self.bootstrap(); s=self.app.state.store
+        client_id=s.one('SELECT id FROM client_instances')['id']
+        s.run('''INSERT INTO client_accounts
+          (id,client_instance_id,customer_id,account_name,is_active,created_at)
+          VALUES (?,?,?,?,?,?)''',('hopr-account',client_id,'3906165648','Hopr',1,'2026-10-18T00:00:00+00:00'))
+        added=self.client.post(f'/api/admin/clients/{client_id}/users',headers={'X-CSRF-Token':admin_csrf},json={
+            'identifier':'new-hopr-user@example.com','password':'new-hopr-password'})
+        user_id=added.json()['user']['id']
+        self.client.post(f'/api/admin/users/{user_id}/accounts/hopr-account/grant',headers={'X-CSRF-Token':admin_csrf},json={'permission':'read'})
+        state_root=Path(self.tmp.name)/'new-user-runtime'
+        from server.app import runtime_google_config
+        self.assertIsNone(runtime_google_config(s,user_id,client_id,state_root,'hopr-account'))
+        registry=json.loads((state_root/'.bob'/'accounts.json').read_text())
+        self.assertEqual(registry,[{
+            'google_ads_customer_id':'3906165648','account_name':'Hopr','active':True,
+            'google_ads_read_config_path':str(state_root/'.bob'/'runtime'/f'google-ads-{user_id}.yaml'),
+        }])
+
     def test_admin_account_permission_grant_and_revoke(self):
         admin_csrf=self.bootstrap(); s=self.app.state.store
         client_id=s.one('SELECT id FROM client_instances')['id']
@@ -593,11 +612,12 @@ class GatewayTests(unittest.TestCase):
         (demand_root / 'design').mkdir()
         (demand_root / 'design' / 'DESIGN.md').write_text('# Design\n')
         (demand_root / 'design' / 'DESIGN_STRATEGY.md').write_text('# Strategy\n')
-        run=demand_root/'creative-runs'/'run-001'; (run/'outputs').mkdir(parents=True); (run/'references').mkdir()
+        run=demand_root/'creative-runs'/'run-001'; (run/'outputs').mkdir(parents=True); (run/'references').mkdir(); (run/'details').mkdir()
         (run/'outputs'/'static-1-v1.png').write_bytes(b'\x89PNG\r\n\x1a\noutput')
         (run/'references'/'source.png').write_bytes(b'\x89PNG\r\n\x1a\nsource')
         (run/'manifest.json').write_text('{}')
         (run/'index.md').write_text('# Internal run\n')
+        (run/'details'/'static-1-v1.md').write_text('# Generation details\n\nPrompt record\n')
         (supply_root / 'secret.md').write_text('# Supply only\n')
 
         with patch.object(app_module, 'STATE_ROOT', runtime_root):
@@ -626,6 +646,13 @@ class GatewayTests(unittest.TestCase):
             run_page=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/index.md')
             self.assertEqual(run_page.status_code,200,run_page.text)
             self.assertEqual(run_page.json()['type'],'markdown')
+            detail_page=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/details/static-1-v1.md')
+            self.assertEqual(detail_page.status_code,200,detail_page.text)
+            self.assertEqual(detail_page.json()['type'],'markdown')
+            self.assertIn('Prompt record',detail_page.json()['content'])
+            self.assertNotIn(
+                '1112223333/creative-runs/run-001/details/static-1-v1.md', paths
+            )
             reference=self.client.get('/api/artifacts/1112223333/creative-runs/run-001/references/source.png')
             self.assertEqual(reference.status_code,200,reference.text)
             self.assertEqual(reference.json()['type'],'image')
@@ -1171,7 +1198,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIsNotNone(response.json()['job_id'])
         import time; time.sleep(.1)
         messages=self.client.get(f"/api/conversations/{conversation['id']}").json()['messages']
-        self.assertIn('Say ‘Hey Bob, set me up’',messages[-1]['content'])
+        self.assertEqual(messages[-1]['content'],"You need to log in to your Google account before I can pull live data. Just say ‘Set me up again.’")
         job=self.client.get(f"/api/jobs/{response.json()['job_id']}").json()
         self.assertEqual(job['status'],'completed')
         events=s.all('SELECT payload FROM job_events WHERE job_id=?',(response.json()['job_id'],))
