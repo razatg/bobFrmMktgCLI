@@ -77,14 +77,19 @@ class CreatesItTests(unittest.TestCase):
              patch.object(generate, "account_wiki_dir", lambda _: self.wiki):
             generate.create_static_replacements(args)
 
-    def _run(self, caller, run_id="run-test-001", review=True):
-        args = SimpleNamespace(manifest=str(self.source_manifest), brief=str(self.brief), run_id=run_id)
+    def _run(self, caller, run_id="run-test-001", review=True, new_run=None):
+        run = self.wiki / "creative-runs" / run_id
+        if new_run is None:
+            new_run = not (run / "manifest.json").exists()
+        args = SimpleNamespace(
+            manifest=str(self.source_manifest), brief=str(self.brief),
+            run_id=run_id, new_run=new_run,
+        )
         env = {"BOB_SELECTED_CUSTOMER_ID": self.customer, "BOB_CREATIVE_PROVIDER_CONFIG": str(self.provider)}
         with patch.dict(os.environ, env, clear=False), \
              patch.object(generate, "STATE_ROOT", self.root), \
              patch.object(generate, "account_wiki_dir", lambda _: self.wiki):
             generate.create_static_replacements(args, caller=caller)
-        run = self.wiki / "creative-runs" / run_id
         if review:
             manifest = json.loads((run / "manifest.json").read_text())
             pending = [
@@ -115,14 +120,23 @@ class CreatesItTests(unittest.TestCase):
         self.assertNotIn("secret-key", (run / "manifest.json").read_text())
         self.assertEqual(calls[0][0:2], ("secret-key", "gemini-3.1-flash-image"))
         self.assertIn("Use less copy", calls[0][2])
-        self.assertIn("Keep it recognisable", calls[0][2])
+        self.assertIn("visibly distinct controlled evolution", calls[0][2])
+        self.assertIn("obvious at normal feed size", calls[0][2])
+        self.assertIn("do not reproduce the source layout or styling pixel-for-pixel", calls[0][2])
         self.assertNotIn("materially new focal idea", calls[0][2])
         self.assertNotIn("Use a clear hero", calls[0][2])
         self.assertNotIn("Short copy wins", calls[0][2])
         self.assertTrue((run / "references" / "source-asset-1.png").is_file())
         account_index = (self.wiki / "Index.md").read_text()
         self.assertIn("## Design", account_index)
+        self.assertIn("## Action Items", account_index)
         self.assertIn("creative-runs/run-test-001/index.md", account_index)
+        action_items = account_index.split("## Action Items", 1)[1].split("## Design", 1)[0]
+        design = account_index.split("## Design", 1)[1]
+        self.assertIn("creative-runs/run-test-001/index.md", action_items)
+        self.assertNotIn("creative-runs/run-test-001/index.md", design)
+        self.assertIn("[DESIGN.md](design/DESIGN.md)", design)
+        self.assertIn("[DESIGN_STRATEGY.md](design/DESIGN_STRATEGY.md)", design)
         self.assertIn("[Creative Review — ", account_index)
         self.assertNotIn("[run-test-001]", account_index)
         self.assertIn(output.name, (run / "index.md").read_text())
@@ -172,11 +186,11 @@ class CreatesItTests(unittest.TestCase):
         self.assertIn("visual review must pass", plan["blocked_candidates"][0]["reason"])
 
         checks = {name: "passed" for name in generate.VISUAL_REVIEW_CHECKS}
-        checks["composition"] = "failed"
+        checks["creative_transformation"] = "failed"
         self._review(run, [{
             "name": candidate["name"],
             "checks": checks,
-            "issues": ["Legal copy touches the lower edge."],
+            "issues": ["The requested LOW edit is not noticeable at normal feed size."],
         }])
         reviewed = json.loads((run / "manifest.json").read_text())
         self.assertEqual(reviewed["status"], "visual_review_failed")
@@ -232,6 +246,38 @@ class CreatesItTests(unittest.TestCase):
         apply_plan = json.loads((run / "apply-plan.yaml").read_text())
         self.assertEqual(len(apply_plan["changes"]), 1)
         self.assertTrue(apply_plan["changes"][0]["replacement_image"].endswith("static-asset-1-v2.png"))
+
+    def test_run_creation_and_continuation_are_explicit(self):
+        with self.assertRaises(SystemExit):
+            self._run(lambda *_: (png_bytes((80, 60)), "image/png"), new_run=False)
+        run = self._run(
+            lambda *_: (png_bytes((80, 60), (20, 30, 40)), "image/png"),
+            new_run=True,
+        )
+        with self.assertRaises(SystemExit):
+            self._run(
+                lambda *_: (png_bytes((80, 60), (50, 60, 70)), "image/png"),
+                new_run=True,
+            )
+        self.assertEqual(len(list((run / "outputs").glob("*.png"))), 1)
+
+    def test_account_index_moves_legacy_creative_rows_out_of_design(self):
+        self.wiki.joinpath("Index.md").write_text(
+            "# Bob — Wiki Index\n\n## Action Items\n\n## Design\n\n"
+            "<!-- creative-run:older-run -->\n"
+            "- [Older review](creative-runs/older-run/index.md) — 1 review output\n\n"
+            "- [Account Design Guidance — 2026-10-01](design/DESIGN.md) — old\n\n"
+            "## Backlog\n"
+        )
+        self._run(lambda *_: (png_bytes((80, 60)), "image/png"))
+        text = self.wiki.joinpath("Index.md").read_text()
+        action_items = text.split("## Action Items", 1)[1].split("## Design", 1)[0]
+        design = text.split("## Design", 1)[1].split("## Backlog", 1)[0]
+        self.assertIn("creative-runs/older-run/index.md", action_items)
+        self.assertIn("creative-runs/run-test-001/index.md", action_items)
+        self.assertNotIn("creative-runs/", design)
+        self.assertEqual(design.count("design/DESIGN.md"), 1)
+        self.assertEqual(design.count("design/DESIGN_STRATEGY.md"), 1)
 
     def test_regeneration_rejects_duplicate_of_prior_candidate(self):
         image = png_bytes((80, 60), (20, 30, 40))

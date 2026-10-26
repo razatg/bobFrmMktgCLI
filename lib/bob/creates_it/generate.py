@@ -437,11 +437,58 @@ def _index_label(value: str) -> str:
     return re.sub(r"[\[\]\r\n]+", " ", value).strip()[:100] or "Creative Review"
 
 
-def _update_account_index(index_path: Path, manifest: dict[str, Any]) -> None:
+def _ensure_index_section(text: str, heading: str) -> str:
+    if re.search(rf"(?m)^{re.escape(heading)}\s*$", text):
+        return text
+    backlog = re.search(r"(?m)^## Backlog\s*$", text)
+    if backlog:
+        return text[:backlog.start()] + f"{heading}\n\n" + text[backlog.start():]
+    return text.rstrip() + f"\n\n{heading}\n"
+
+
+def _insert_after_heading(text: str, heading: str, block: str) -> str:
+    section = re.search(rf"(?m)^{re.escape(heading)}\s*$", text)
+    insert_at = section.end() if section else len(text)
+    return text[:insert_at] + f"\n\n{block}" + text[insert_at:]
+
+
+def _normalize_account_index(index_path: Path, marker: str, row: str) -> str:
     text = index_path.read_text() if index_path.exists() else "# Bob — Wiki Index\n"
-    heading = "## Design"
-    if heading not in text:
-        text = text.rstrip() + f"\n\n{heading}\n"
+    text = _ensure_index_section(text, "## Action Items")
+    text = _ensure_index_section(text, "## Design")
+
+    creative_blocks: dict[str, str] = {}
+    block_pattern = re.compile(r"(?m)^(<!-- creative-run:([^>]+) -->)\n(- [^\n]*)\n?")
+    for match in block_pattern.finditer(text):
+        creative_blocks[match.group(2)] = f"{match.group(1)}\n{match.group(3)}"
+    creative_blocks[marker.removeprefix("<!-- creative-run:").removesuffix(" -->")] = (
+        f"{marker}\n{row}"
+    )
+    text = block_pattern.sub("", text)
+
+    design_row_pattern = re.compile(
+        r"(?m)^- .*?(?:Account Design Guidance|design/DESIGN\.md).*?$\n?"
+    )
+    text = design_row_pattern.sub("", text)
+    design = index_path.parent / "design" / "DESIGN.md"
+    strategy = index_path.parent / "design" / "DESIGN_STRATEGY.md"
+    if design.is_file() and strategy.is_file():
+        design_row = (
+            "- [DESIGN.md](design/DESIGN.md) · "
+            "[DESIGN_STRATEGY.md](design/DESIGN_STRATEGY.md) — account design guidance"
+        )
+        text = _insert_after_heading(text, "## Design", design_row)
+
+    if creative_blocks:
+        text = _insert_after_heading(
+            text,
+            "## Action Items",
+            "\n\n".join(creative_blocks.values()),
+        )
+    return text.rstrip() + "\n"
+
+
+def _update_account_index(index_path: Path, manifest: dict[str, Any]) -> None:
     run_id = str(manifest["run_id"])
     marker = f"<!-- creative-run:{run_id} -->"
     active = sum(
@@ -456,13 +503,8 @@ def _update_account_index(index_path: Path, manifest: dict[str, Any]) -> None:
         f"- [{dated_title}](creative-runs/{run_id}/index.md) — "
         f"{active} review output{'s' if active != 1 else ''}; nothing published"
     )
-    marker_block = re.compile(rf"(?m)^{re.escape(marker)}\n- .*\n?")
-    text = marker_block.sub("", text)
-    section = re.search(rf"(?m)^{re.escape(heading)}\s*$", text)
-    insert_at = section.end() if section else len(text)
-    text = text[:insert_at] + f"\n\n{marker}\n{row}" + text[insert_at:]
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(text.rstrip() + "\n")
+    index_path.write_text(_normalize_account_index(index_path, marker, row))
 
 
 def _candidate_placements(asset: dict[str, Any]) -> list[dict[str, str]]:
@@ -544,8 +586,10 @@ def _generate_one(
         die(f"replacement brief is missing a prompt for asset {asset_id}")
     full_prompt = _image_prompt(
         f"Create one review-only {width}x{height} ad from the supplied LOW reference. "
-        "Keep it recognisable and follow the requested change exactly. Do not invent copy, "
-        "claims, prices, offers, logos, or legal text.",
+        "Preserve its proposition, approved copy, branding, native dimensions, key subject, and "
+        "broad composition, but create a visibly distinct controlled evolution. The requested "
+        "improvement must be obvious at normal feed size; do not reproduce the source layout or "
+        "styling pixel-for-pixel. Do not invent copy, claims, prices, offers, logos, or legal text.",
         prompt,
     )
     aspect_ratio = _aspect_ratio(width, height)
@@ -1124,12 +1168,17 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
     if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", run_id):
         die("run ID must contain only letters, numbers, underscores, or hyphens")
     run_dir = wiki / "creative-runs" / run_id
+    manifest_path = run_dir / "manifest.json"
+    existing_manifest = _read_json(manifest_path, "creative run manifest") if manifest_path.exists() else None
+    new_run = bool(getattr(args, "new_run", False))
+    if existing_manifest and new_run:
+        die("creative run already exists; continue the task without --new-run")
+    if not existing_manifest and not new_run:
+        die("creative run does not exist; start the task with --new-run")
     references = run_dir / "references"
     outputs = run_dir / "outputs"
     references.mkdir(parents=True, exist_ok=True)
     outputs.mkdir(parents=True, exist_ok=True)
-    manifest_path = run_dir / "manifest.json"
-    existing_manifest = _read_json(manifest_path, "creative run manifest") if manifest_path.exists() else None
     provider: dict[str, str] | None = None
     model = ""
     adaptation_requests = brief.get("adaptations") if stage == "adaptations" else []

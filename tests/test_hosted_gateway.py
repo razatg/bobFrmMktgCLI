@@ -569,10 +569,9 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue((prepared / '.agents' / 'skills').is_dir())
         self.assertFalse((prepared / 'AGENTS.md').is_symlink())
         hosted_instructions=(prepared / 'AGENTS.md').read_text()
+        self.assertEqual(hosted_instructions, (app_module.ROOT / 'AGENTS.md').read_text())
         self.assertIn('Admin owns Google Ads application credentials',hosted_instructions)
-        self.assertIn('Never expose internal runtime',hosted_instructions)
-        self.assertNotIn('Agent Mode',hosted_instructions)
-        self.assertNotIn('agent-mode.json',hosted_instructions)
+        self.assertIn('Image-to-video is a `bob-creates-it` route',hosted_instructions)
         self.assertFalse((prepared / '.agents' / 'skills' / 'bob-accounts').exists())
         self.assertTrue((app_module.ROOT / '.agents' / 'skills' / 'bob-accounts').is_dir())
         self.assertFalse((prepared / 'garf' / 'queries').is_symlink())
@@ -673,6 +672,34 @@ class GatewayTests(unittest.TestCase):
             self.assertIn('# Supply only', supply.json()['content'])
             legacy = self.client.get('/api/wiki')
             self.assertIn('9998887777/secret.md', [page['path'] for page in legacy.json()])
+
+    def test_video_storyboard_run_is_editable_and_video_is_viewable(self):
+        csrf = self.bootstrap()
+        store = self.app.state.store
+        client_id = store.one('SELECT id FROM client_instances')['id']
+        store.run(
+            'INSERT INTO client_accounts (id,client_instance_id,customer_id,account_name,is_active,created_at) VALUES (?,?,?,?,?,?)',
+            ('video-account', client_id, '1234567890', 'Video account', 1, '2026-10-21T00:00:00+00:00'),
+        )
+        from server import app as app_module
+        runtime_root = Path(self.workspace)
+        run = runtime_root / 'wiki' / '1234567890' / 'creative-runs' / 'video-run-001'
+        (run / 'outputs').mkdir(parents=True)
+        (run / 'index.md').write_text('<!-- bob-video-storyboard -->\n# Video storyboard\n')
+        (run / 'outputs' / 'master-9x16-v1.mp4').write_bytes(b'video')
+        with patch.object(app_module, 'STATE_ROOT', runtime_root):
+            storyboard = self.client.get('/api/artifacts/1234567890/creative-runs/video-run-001/index.md')
+            self.assertEqual(storyboard.status_code, 200, storyboard.text)
+            self.assertTrue(storyboard.json()['editable'])
+            saved = self.client.put(
+                '/api/artifacts/1234567890/creative-runs/video-run-001/index.md',
+                headers={'X-CSRF-Token': csrf}, json={'content': '<!-- bob-video-storyboard -->\n# Revised\n'},
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            video = self.client.get('/api/artifacts/1234567890/creative-runs/video-run-001/outputs/master-9x16-v1.mp4')
+            self.assertEqual(video.status_code, 200, video.text)
+            self.assertEqual(video.json()['type'], 'video')
+            self.assertIn('?raw=1', video.json()['media_url'])
 
     def test_client_creative_config_is_masked_and_reaches_only_runtime_file(self):
         csrf=self.bootstrap(); store=self.app.state.store
@@ -843,8 +870,9 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('/events`', js)
         self.assertIn('/api/artifacts', js)
         self.assertIn('/static/app.js?v=39', html)
-        self.assertIn('Bob is working on your request…', js)
-        self.assertNotIn('Bob is checking the data…', js)
+        self.assertIn('Bob is moving mountains…', js)
+        self.assertIn("itemType==='agent_message'&&type==='item.completed'&&text", js)
+        self.assertIn('update.durable', js)
         self.assertIn('id="asset-upload"', html)
         self.assertIn('aria-label="Add attachment"', html)
         self.assertIn('data-upload-kind="image"', html)

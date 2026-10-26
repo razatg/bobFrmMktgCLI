@@ -28,7 +28,7 @@ def user_requested_technical_help(prompt):
 
 CUSTOMER_ARTIFACT_SUFFIXES = {
     '.md': 'markdown', '.csv': 'csv', '.png': 'image', '.jpg': 'image',
-    '.jpeg': 'image', '.webp': 'image',
+    '.jpeg': 'image', '.webp': 'image', '.mp4': 'video',
 }
 _WIKI_TARGET = r'(?:wiki/\d{9,10}/[^\s)>|\]]+|/(?:app|data|home|tmp)/[^\s)>|\]]*/wiki/\d{9,10}/[^\s)>|\]]+)'
 
@@ -542,7 +542,7 @@ def prepare_conversation_runtime(workspace_id: str):
         target = ROOT / name
         if target.exists():
             _replace_runtime_copy(workspace / name, target)
-    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'server' / 'hosted_agent_instructions.txt')
+    _replace_runtime_copy(workspace / 'AGENTS.md', ROOT / 'AGENTS.md')
     agents_source = ROOT / '.agents'
     if agents_source.exists():
         _replace_runtime_copy(workspace / '.agents', agents_source)
@@ -2039,7 +2039,7 @@ def visible_artifact_path(path: Path) -> bool:
     ):
         return True
     return (
-        suffix in {'.png','.jpg','.jpeg','.webp'}
+        suffix in {'.png','.jpg','.jpeg','.webp','.mp4'}
         and len(parts)>run_index+3
         and parts[run_index+2] in {'outputs','references'}
     )
@@ -2055,6 +2055,21 @@ def listed_artifact_path(path: Path) -> bool:
 
 def editable_design_artifact(path: Path) -> bool:
     return len(path.parts)>=2 and path.parts[-2]=='design' and path.name in {'DESIGN.md','DESIGN_STRATEGY.md'}
+
+def editable_video_storyboard(path: Path, target: Path) -> bool:
+    parts = path.parts
+    if 'creative-runs' not in parts or path.name != 'index.md':
+        return False
+    run_index = parts.index('creative-runs')
+    if len(parts) != run_index + 3:
+        return False
+    try:
+        return target.read_text(errors='replace').startswith('<!-- bob-video-storyboard -->')
+    except OSError:
+        return False
+
+def editable_artifact(path: Path, target: Path) -> bool:
+    return editable_design_artifact(path) or editable_video_storyboard(path, target)
 
 def permitted_artifact(store, user, path: str):
     normalized = path.strip('/')
@@ -2135,15 +2150,15 @@ async def artifact_page(path: str, request: Request):
             )
         return FileResponse(target, filename=target.name, media_type='application/octet-stream')
     if request.query_params.get('raw') == '1':
-        if kind!='image': raise HTTPException(400,'raw view is available only for images')
+        if kind not in {'image', 'video'}: raise HTTPException(400,'raw view is available only for images and videos')
         return FileResponse(target)
     return {
         'path': path,
         'title': artifact_title(target),
         'type': kind,
-        'content': '' if kind=='image' else user_facing_artifact_markdown(target) if kind=='markdown' else target.read_text(errors='replace'),
-        'media_url': f'/api/artifacts/{path}?raw=1' if kind=='image' else None,
-        'editable': editable_design_artifact(Path(path)),
+        'content': '' if kind in {'image', 'video'} else user_facing_artifact_markdown(target) if kind=='markdown' else target.read_text(errors='replace'),
+        'media_url': f'/api/artifacts/{path}?raw=1' if kind in {'image', 'video'} else None,
+        'editable': editable_artifact(Path(path), target),
         'account_name': account['account_name'],
         'customer_id': account['customer_id'],
         'updated_at': target.stat().st_mtime,
@@ -2152,11 +2167,11 @@ async def artifact_page(path: str, request: Request):
 @app.put('/api/artifacts/{path:path}')
 async def update_artifact(path: str, body: ArtifactContentIn, request: Request):
     user=await csrf(request); target,_=permitted_artifact(request.app.state.store,user,path)
-    if not editable_design_artifact(Path(path)):
+    if not editable_artifact(Path(path), target):
         raise HTTPException(403,'artifact is read-only')
     encoded=body.content.encode('utf-8')
     if len(encoded)>250_000:
-        raise HTTPException(413,'design document is too large')
+        raise HTTPException(413,'editable artifact is too large')
     target.write_bytes(encoded)
     return {'ok':True,'updated_at':target.stat().st_mtime}
 

@@ -7,5 +7,14 @@ image:
     - gemini-3-pro-image
 
 video:
-  enabled: false
-  planned_default: gemini-omni-1.1-flash
+  enabled: true
+  default: gemini-omni-1.1-flash
+  native_duration_seconds: 6
+  allowed:
+    - gemini-omni-1.1-flash
+
+music:
+  enabled: true
+  default: lyria-3-clip-preview
+  allowed:
+    - lyria-3-clip-preview

@@ -8,7 +8,7 @@ Treat aesthetic suggestions, rough copy, example scenes, and “something like t
 
 ## Creative distance by route
 
-- **LOW edit:** Preserve the source proposition and recognisable execution. Make only the agreed improvement unless the user asks for a broader redesign.
+- **LOW edit:** Preserve the source proposition, approved copy, brand identity, key subject, broad composition, and native dimensions. Make the agreed controlled improvement visibly distinct at normal feed size; a pixel-for-pixel restaging or an imperceptible polish is not a replacement.
 - **Ratio adaptation:** Preserve the approved concept, proposition, and visual identity, but recompose it for the new canvas rather than stretching or blindly cropping it.
 - **Fresh concept:** Preserve hard facts, brand identity, required product roles, and approved copy. Unless the user explicitly asks for a close adaptation, create a materially new focal idea, composition, subject arrangement, framing, and reading path.
 

@@ -2,14 +2,14 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 ARG CODEX_VERSION=0.147.0
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap nodejs npm \
+    && apt-get install -y --no-install-recommends bubblewrap ffmpeg nodejs npm \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && rm -rf /var/lib/apt/lists/* /root/.npm \
     && useradd --create-home --uid 10001 bob \
     && pip install --no-cache-dir uv==0.8.4
 WORKDIR /app
 COPY pyproject.toml uv.lock* ./
-RUN uv sync --no-dev --no-install-project
+RUN uv sync --no-dev --extra video --no-install-project
 COPY . .
 COPY docker/entrypoint.sh /usr/local/bin/bob-entrypoint
 RUN .venv/bin/python -c "from lib.datapull import _write_bob_launcher; _write_bob_launcher()" \

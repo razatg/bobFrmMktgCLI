@@ -34,6 +34,7 @@ EXPECTED_HANDLERS = {
     "suggest-static-variants": "suggest_static_variants",
     "static-variants-apply": "static_variants_apply",
     "create-static-replacements": "create_static_replacements",
+    "video-create": "create_video",
     "creative-copy-apply": "creative_copy_apply",
     "bid-budget-recommend": "bid_budget_recommend",
     "bid-budget-apply": "bid_budget_apply",

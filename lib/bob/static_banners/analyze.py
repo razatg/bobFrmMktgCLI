@@ -1023,7 +1023,9 @@ def suggest_static_banners(args: argparse.Namespace) -> None:
     )
     evidence_label = "BEST" if best_assets else "GOOD"
     entry = (
-        f"- [Account Design Guidance — {today().isoformat()}](design/DESIGN.md) — "
+        "- [DESIGN.md](design/DESIGN.md) · "
+        "[DESIGN_STRATEGY.md](design/DESIGN_STRATEGY.md) — "
+        f"account design guidance from {today().isoformat()}; "
         f"built from {len(primary_assets)} unique {evidence_label} visual families"
         + ("; GOOD fallback used" if not best_assets else "")
     )

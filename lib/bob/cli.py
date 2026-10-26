@@ -230,10 +230,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     csr_parser.add_argument("--run-id", help="append a regeneration to an existing creative run")
     csr_parser.add_argument(
+        "--new-run",
+        action="store_true",
+        help="create a new review artifact; omit for every continuation of an existing task",
+    )
+    csr_parser.add_argument(
         "--visual-review",
         help="validated seven-check visual review JSON for every pending output in --run-id",
     )
     csr_parser.set_defaults(func=create_static_replacements)
+
+    video_parser = sub.add_parser("video-create", help="create review-only image-to-video storyboard, masters, or adaptations")
+    video_parser.add_argument("--brief", help="private storyboard/video brief in Bob state")
+    video_parser.add_argument("--run-id", help="existing or new creative run ID")
+    video_parser.add_argument("--visual-review", help="private visual review JSON for every pending video output")
+    video_parser.set_defaults(func=create_video)
 
     cca_parser = sub.add_parser("creative-copy-apply",
         help="review and apply an approved copy plan: creates new text assets, pauses old ones")
@@ -362,6 +373,7 @@ ACTIONS
   suggest-static-banners        Build the quarterly static-banner design guide
   suggest-static-variants       Prepare LOW, campaign, or named static images
   create-static-replacements    Generate review-only static replacements
+  video-create                  Create review-only video storyboard and outputs
   static-variants-apply         Upload approved static variants to Google Ads
   creative-copy-apply           Push approved copy changes to Google Ads
 
