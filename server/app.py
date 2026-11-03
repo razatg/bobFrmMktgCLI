@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 from .auth import check_password, csrf, current_user, hash_code, hash_password, same_code
 from .agent_runner import AgentRunner, ExecutionPolicy, codex_usage, compact_codex_event, custom_analysis_marker, estimate_usage, redact_event_text, schedule_tool_marker
-from .assets import AssetValidationError, resolve_asset_path, store_upload
+from .assets import AssetValidationError, resolve_asset_path, store_generated_file, store_upload
 from .models import SecretStore, Store, new_id, now
 from .scheduling import ScheduleRepository, Scheduler, display_schedule
 
@@ -31,6 +31,8 @@ CUSTOMER_ARTIFACT_SUFFIXES = {
     '.jpeg': 'image', '.webp': 'image', '.mp4': 'video',
 }
 _WIKI_TARGET = r'(?:wiki/\d{9,10}/[^\s)>|\]]+|/(?:app|data|home|tmp)/[^\s)>|\]]*/wiki/\d{9,10}/[^\s)>|\]]+)'
+_CHAT_MEDIA_MARKER = re.compile(r'\[\[chat-media:([^|\]\r\n]+)\|[^\]\r\n]{1,240}\]\]')
+_SAFE_CHAT_MEDIA_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,179}')
 
 def _safe_artifact_marker(target, label='', customer_id=None):
     match = re.search(r'(?:^|/)wiki/(\d{9,10})/(.+)$', str(target).strip('<>'))
@@ -398,7 +400,7 @@ def schedule_command(value: str) -> str | None:
     command = str(value or '').lstrip().split(maxsplit=1)[0].casefold() if str(value or '').strip() else ''
     return SCHEDULE_COMMANDS.get(command)
 
-def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity='', schedule_action=None):
+def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity='', schedule_action=None, media_instruction=''):
     account_kt_path = f"wiki/{account_customer_id}/KT.md" if account_customer_id else 'wiki/<customer_id>/KT.md'
     kt_guidance = f"Selected-account terminology and scope: the account KT is at {account_kt_path}. Read it when the user refers to KT or when its account-specific meanings, metrics, campaign naming, or exclusions affect the request. KT campaign exclusions are authoritative for that run: omit those campaigns from recommendation, hold, skip, and customer-facing tables. Never infer a city-to-campaign mapping; ask for exact campaign identity when KT is ambiguous. Ask one focused clarification when ambiguity could change the metric, data pull, or recommendation; otherwise proceed with a brief stated assumption. If the user explicitly confirms a new term or meaning, add the exact clarification to the selected account KT.\n\n" if account_customer_id else ''
     schedule_mode = ''
@@ -420,7 +422,7 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
             "Hosted setup is Admin-owned: never ask the user for a Google Ads developer token, customer ID, MCC ID, account name, campaign type, currency, or account configuration. Never run local CLI onboarding. If Google authorization is missing, ask the user to say ‘Set me up again’; the gateway supplies the authorization link.\n\n"
             + schedule_mode + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
-            + continuity
+            + continuity + media_instruction
             + f"User message:\n{prompt}\n\nAUTHORITATIVE CURRENT ACCOUNT: {account_context or 'none'} ({account_customer_id or 'no customer ID'}). Use this account for every lookup, explanation, and recommendation in this turn. Do not reuse an account name from earlier conversation turns."
             )
 def prompt_for_selected_account(store, row, prompt):
@@ -1463,12 +1465,42 @@ def insert_user_message(store, conversation_id, content, assets):
             message_id,asset['id'],position))
     return message_id,created
 
-def insert_assistant_message(store, conversation_id, content):
+def insert_assistant_message(store, conversation_id, content, assets=()):
     message_id=new_id(); timestamp=now()
     store.run('''INSERT INTO messages (id,conversation_id,role,content,status,created_at)
       VALUES (?,?,?,?,?,?)''',(message_id,conversation_id,'assistant',content,'completed',timestamp))
+    for position,asset in enumerate(assets):
+        store.run('INSERT INTO message_attachments VALUES (?,?,?)',(
+            message_id,asset['id'],position))
     store.run('UPDATE conversations SET last_activity_at=? WHERE id=?',(timestamp,conversation_id))
     return message_id
+
+async def generated_chat_assets(store, text, workspace, row):
+    """Persist one safe, job-local media result as an assistant attachment."""
+    match=_CHAT_MEDIA_MARKER.search(text)
+    clean=_CHAT_MEDIA_MARKER.sub('',text).strip()
+    if not match:
+        return clean,[]
+    media_root=(workspace/'.chat-media').resolve()
+    name=match.group(1)
+    try:
+        if not _SAFE_CHAT_MEDIA_NAME.fullmatch(name):
+            raise ValueError
+        source=(media_root/name).resolve()
+        source.relative_to(media_root)
+        if source.is_symlink() or not source.is_file():
+            raise ValueError
+        asset_id=new_id()
+        stored=await store_generated_file(source,STATE_ROOT,row['client_instance_id'],asset_id,source.name)
+    except (AssetValidationError,OSError,ValueError):
+        return f'{clean}\n\nThe generated media could not be attached.',[]
+    store.run('''INSERT INTO client_assets
+      (id,client_instance_id,uploader_user_id,original_name,media_type,size_bytes,sha256,storage_relpath,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?)''',(
+        asset_id,row['client_instance_id'],row['user_id'],stored.original_name,stored.media_type,
+        stored.size_bytes,stored.sha256,stored.storage_relpath,now(),
+    ))
+    return clean,[store.one('SELECT * FROM client_assets WHERE id=?',(asset_id,))]
 
 def publish_conversation_event(app_instance, conversation_id, payload):
     for queue in tuple(app_instance.state.conversation_subscribers.get(conversation_id,set())):
@@ -1744,6 +1776,8 @@ async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
                     if schedule_tool:
                         handle_schedule_tool_completion(app_instance,jid,schedule_tool)
                 workspace, state_root = prepare_conversation_runtime(row['workspace_id'])
+                chat_media_root=workspace/'.chat-media'
+                chat_media_root.mkdir(parents=True,exist_ok=True)
                 attachment_context=materialize_message_assets(s,current['message_id'],workspace)
                 runtime_config=None if schedule_action else runtime_google_config(s,row['user_id'],row['client_instance_id'],state_root,row['account_id'])
                 creative_config=None if schedule_action else runtime_creative_config(s,row['client_instance_id'],state_root)
@@ -1768,12 +1802,18 @@ async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
                     environment['BOB_SELECTED_CUSTOMER_ID'] = selected_account['customer_id']
                     environment['BOB_SCHEDULE_ACCOUNT_ID'] = row['account_id']
                 policy=ExecutionPolicy(model=client_codex_model(s,row['client_instance_id']) or default_codex_model(),timeout_seconds=job_timeout_seconds(),environment=environment,job_id=jid,schedule_action=schedule_action)
+                media_instruction = '' if schedule_action else (
+                    f"CHAT MEDIA: If you create one user-facing PNG, JPEG, WebP, or MP4 that is not already "
+                    f"presented through an artifact, save the final file in {chat_media_root} and append "
+                    "[[chat-media:filename|caption]] to your final response. This marker is internal; never "
+                    "use it for JSON, prompts, metadata, or an existing artifact.\n\n"
+                )
                 internal_prompt=attachment_context+prompt_for_selected_account(s,row,prompt)
                 fresh_start = bool(row.get('fresh_start_pending'))
                 continuity = '' if schedule_action or fresh_start or row['agent_session_id'] else conversation_handoff(s,cid,current['message_id'],selected_account,environment['BOB_ACCOUNT_PERMISSION'])
                 prior_usage = previous_thread_usage(s,cid,jid) if row['agent_session_id'] and not schedule_action else None
                 agent_session_id = None if schedule_action else row['agent_session_id']
-                sid,final=await app_instance.state.runner.run(row['agent_backend'],agent_session_id,scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION'], google_connected, None if agent_session_id else row['client_instance_id'], selected_account['customer_id'] if selected_account else None, continuity, schedule_action),workspace,policy,emit,app_instance.state.cancel.get(jid))
+                sid,final=await app_instance.state.runner.run(row['agent_backend'],agent_session_id,scope_wrapped_prompt(internal_prompt, selected_account['account_name'] if selected_account else None, environment['BOB_ACCOUNT_PERMISSION'], google_connected, None if agent_session_id else row['client_instance_id'], selected_account['customer_id'] if selected_account else None, continuity, schedule_action, media_instruction),workspace,policy,emit,app_instance.state.cancel.get(jid))
                 if app_instance.state.cancel.get(jid) and app_instance.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'
@@ -1784,6 +1824,7 @@ async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
                     final = final[len(OFF_SCOPE_SENTINEL):].strip() or OFF_SCOPE_REPLY
                 if auth_required:
                     final = google_auth_handoff(s,row['user_id'],row['client_instance_id'])
+                final,generated_assets=await generated_chat_assets(s,final,workspace,row)
                 final = sanitize_user_response(
                     final,
                     technical=user_requested_technical_help(prompt),
@@ -1798,9 +1839,8 @@ async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
                 handoff = bool(threshold and estimates and lifetime >= threshold)
                 next_sid = row['agent_session_id'] if schedule_action else None if handoff else sid
                 next_lifetime = int(row.get('thread_input_tokens_estimate') or 0) if schedule_action else 0 if handoff else lifetime
-                assistant_message_id = new_id()
                 s.run('UPDATE conversations SET agent_session_id=?,thread_input_tokens_estimate=?,fresh_start_pending=0,last_activity_at=? WHERE id=?',(next_sid,next_lifetime,now(),cid))
-                s.run('INSERT INTO messages VALUES (?,?,?,?,?,?)',(assistant_message_id,cid,'assistant',final,'completed',now()))
+                assistant_message_id=insert_assistant_message(s,cid,final,generated_assets)
                 if estimates:
                     s.run('''UPDATE jobs SET status='completed',completed_at=?,input_tokens_estimate=?,cached_input_tokens_estimate=?,output_tokens_estimate=? WHERE id=?''',(now(),estimates['input_tokens'],estimates['cached_input_tokens'],estimates['output_tokens'],jid))
                 else:

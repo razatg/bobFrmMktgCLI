@@ -32,6 +32,22 @@ class FakeRunner:
         await emit({'type':'command','message':'fake bob command'})
         return (session_id or 'thread-one', f'Bob received: {user_prompt}')
 
+class ChatMediaRunner(FakeRunner):
+    def __init__(self, filename, payload):
+        self.filename=filename
+        self.payload=payload
+        self.calls=[]
+
+    async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
+        output=Path(workspace)/'.chat-media'/self.filename
+        output.parent.mkdir(parents=True,exist_ok=True)
+        output.write_bytes(self.payload)
+        await emit({'type':'thread.started','thread_id':session_id or 'media-thread'})
+        return session_id or 'media-thread', (
+            'Here it is again.\n\n'
+            f'[[chat-media:{self.filename}|Generated media]]'
+        )
+
 class FetchRunner(FakeRunner):
     async def run(self, backend, session_id, prompt, workspace, policy, emit, cancel_event=None):
         await emit({'type':'bob.error','code':'GOOGLE_AUTH_REQUIRED'})
@@ -217,6 +233,67 @@ class GatewayTests(unittest.TestCase):
         downloaded=self.client.get(asset['download_url'])
         self.assertEqual(downloaded.content,png)
         self.assertIn('campaign-reference.png',downloaded.headers['content-disposition'])
+
+    def test_generated_image_becomes_an_assistant_attachment(self):
+        csrf=self.bootstrap()
+        self.app.state.runner=ChatMediaRunner('master.png',b'\x89PNG\r\n\x1a\nimage-bytes')
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        sent=self.client.post(
+            f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},
+            json={'content':'Show the generated creative'},
+        )
+        self.assertEqual(sent.status_code,200,sent.text)
+        import time; time.sleep(.05)
+        messages=self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        reply=messages[-1]
+        self.assertEqual(reply['role'],'assistant')
+        self.assertNotIn('chat-media:',reply['content'])
+        self.assertEqual(len(reply['attachments']),1)
+        asset=reply['attachments'][0]
+        self.assertEqual(asset['media_type'],'image/png')
+        self.assertEqual(self.client.get(asset['download_url']).content,b'\x89PNG\r\n\x1a\nimage-bytes')
+        self.assertEqual(
+            self.client.get(f'/api/conversations/{conversation}').json()['messages'][-1]['attachments'],
+            [asset],
+        )
+
+    def test_generated_video_becomes_an_assistant_attachment(self):
+        csrf=self.bootstrap()
+        self.app.state.runner=ChatMediaRunner('master.mp4',b'\x00\x00\x00\x18ftypisomvideo-bytes')
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        sent=self.client.post(
+            f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},
+            json={'content':'Show the generated video'},
+        )
+        self.assertEqual(sent.status_code,200,sent.text)
+        import time; time.sleep(.05)
+        attachment=self.client.get(f'/api/conversations/{conversation}').json()['messages'][-1]['attachments'][0]
+        self.assertEqual(attachment['media_type'],'video/mp4')
+
+    def test_generated_media_rejects_an_unsafe_marker_path(self):
+        csrf=self.bootstrap()
+        self.app.state.runner=ChatMediaRunner('../outside.png',b'\x89PNG\r\n\x1a\nimage-bytes')
+        conversation=self.client.post('/api/conversations',headers={'X-CSRF-Token':csrf}).json()['id']
+        sent=self.client.post(
+            f'/api/conversations/{conversation}/messages',headers={'X-CSRF-Token':csrf},
+            json={'content':'Show the generated creative'},
+        )
+        self.assertEqual(sent.status_code,200,sent.text)
+        import time; time.sleep(.05)
+        reply=self.client.get(f'/api/conversations/{conversation}').json()['messages'][-1]
+        self.assertEqual(reply['attachments'],[])
+        self.assertNotIn('chat-media:',reply['content'])
+        self.assertIn('could not be attached',reply['content'])
+
+    def test_chat_bundle_renders_assistant_media_inline_without_autoplay(self):
+        js=Path('server/static/app.js').read_text()
+        css=Path('server/static/styles.css').read_text()
+        self.assertIn("role==='assistant'",js)
+        self.assertIn("video.controls=true",js)
+        self.assertIn("video.preload='metadata'",js)
+        self.assertNotIn('video.autoplay=true',js)
+        self.assertIn('.attachment-card.inline-image',css)
+        self.assertIn('.attachment-card.inline-video',css)
 
     def test_chat_upload_rejects_unsupported_content_and_cross_user_reuse(self):
         admin_csrf=self.bootstrap()
@@ -869,7 +946,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('scheduling_timezone', js)
         self.assertIn('/events`', js)
         self.assertIn('/api/artifacts', js)
-        self.assertIn('/static/app.js?v=39', html)
+        self.assertIn('/static/app.js?v=40', html)
         self.assertIn('Bob is moving mountains…', js)
         self.assertIn("itemType==='agent_message'&&type==='item.completed'&&text", js)
         self.assertIn('update.durable', js)
@@ -923,10 +1000,10 @@ class GatewayTests(unittest.TestCase):
 
     def test_browser_shell_and_app_bundle_always_revalidate(self):
         shell=self.client.get('/')
-        bundle=self.client.get('/static/app.js?v=39')
+        bundle=self.client.get('/static/app.js?v=40')
         self.assertEqual(shell.status_code,200,shell.text)
         self.assertEqual(bundle.status_code,200,bundle.text)
-        self.assertIn('/static/app.js?v=39',shell.text)
+        self.assertIn('/static/app.js?v=40',shell.text)
         self.assertEqual(shell.headers.get('cache-control'),'no-cache, must-revalidate')
         self.assertEqual(bundle.headers.get('cache-control'),'no-cache, must-revalidate')
 

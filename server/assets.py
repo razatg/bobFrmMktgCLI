@@ -114,3 +114,19 @@ async def store_upload(
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise
+
+
+async def store_generated_file(
+    source: Path,
+    state_root: Path,
+    client_id: str,
+    asset_id: str,
+    original_name: str,
+) -> StoredUpload:
+    """Store a completed, job-local media file through the normal validation path."""
+    async def chunks():
+        with source.open("rb") as handle:
+            while chunk := handle.read(64 * 1024):
+                yield chunk
+
+    return await store_upload(chunks(), state_root, client_id, asset_id, original_name)
