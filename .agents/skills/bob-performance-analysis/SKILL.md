@@ -13,6 +13,8 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
 ## Investigation contract
 
+Before presenting analysis, check the selected account, exact dates, evidence coverage and conversion maturity. Use calculated outputs to verify totals and ratios; compare the main explanation with plausible alternatives. If a tool fails, resolve the specific issue and rerun the relevant check. Explain missing evidence or unresolved uncertainty; a successful tool call alone does not establish the interpretation.
+
 Start with `./bob brief --focus performance` (or `all` when explanations cross domains). The gateway's selected account is authoritative. Rules and evidence maturity come from the brief; unavailable evidence is not an empty finding. Use `./bob search` for relevant knowledge and history.
 
 Recipes and fixed policies are baselines, not exclusive routes. Registered analysis operations may be used during ordinary investigations. Agree, hold or depart with evidence. Hard limits and explicit approval apply to everyone; no decision modes. Use current CLI help over legacy command examples.

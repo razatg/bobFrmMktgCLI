@@ -21,6 +21,8 @@ This is one loop with different source selectors and media adapters. LOW static 
 
 ## Static routes
 
+Verification is part of the creative task: inspect the rendered images or video frames and audio against the request, approved storyboard, timing, copy, continuity and sound guidance. Use media checks for technical properties; judge creative quality from the output. Correct recoverable issues in the same run and inspect the revised result. If a repair requires another paid generation, obtain the appropriate approval first. Explain any part you could not inspect; no universal deterministic creative-quality gate is assumed.
+
 - **LOW edit:** preserve the selected LOW image's proposition, approved copy, brand treatment, key subject, broad composition, and native dimensions, but produce a visibly distinct controlled evolution. The requested improvement must be obvious at normal feed size; do not accept or present a pixel-for-pixel restaging. Account design documents may inform this edit but do not block it.
 - **Generic concept:** campaign/ad-group refreshes, new creative, and user-reference requests require current account `DESIGN.md`, current `DESIGN_STRATEGY.md`, and user intent supplied as text, an explicit reference image, or both. Campaign and ad-group names/IDs are useful context, not mandatory inputs. Generate one square master per agreed concept or creative family, present those masters, and wait for approval before adapting them to other ratios.
 

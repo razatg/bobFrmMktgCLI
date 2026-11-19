@@ -82,7 +82,9 @@ Bob can search saved analyses, account notes and decision records for the select
 **Ask:** “Find our earlier analysis of this campaign and explain what has changed since then.”
 
 ### More checks before changes
-Answers now receive checks against their cited numerical evidence. Bid and budget proposals surface departures from usual account guidance, while current ad state, permissions, explicit exclusions and exact-proposal approval remain checked. Text proposals retain copy checks. Existing image and video workflows are integrated with decision tracking and their approval steps.
+Bob verifies work using the relevant skill and available evidence: calculated outputs for analysis, saved proposals for copy and budgets, and rendered images/video plus audio for creative review. It corrects recoverable tool failures and rechecks, and explains material uncertainty. There is no universal automatic answer gate. Technical execution checks and explicit approval remain enforced.
+
+Copy proposal saves return row-specific errors for missing text, character limits, punctuation and protected names. Bob fixes those rows and retries before presenting the saved draft. Successful saving does not certify creative quality or authorise publication.
 
 **Ask:** “Suggest replacement copy for the weakest text ads and show me the proposal for review.”
 

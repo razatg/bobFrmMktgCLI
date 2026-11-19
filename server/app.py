@@ -3,7 +3,6 @@ import asyncio, base64, hashlib, json, logging, os, re, secrets, shlex, shutil, 
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
-from lib.bob.answer_check import check_answer, validate_proposal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request as URLRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -424,7 +423,7 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
             + schedule_mode + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
             + continuity + media_instruction
-            + 'ANSWER CONTRACT: Return your final response as one JSON object with "answer" (user-facing Markdown), "account" (the authoritative customer ID, or empty when none), and "claims" (a list). Every numerical factual statement needs a claim with entity (identifier filter object), metric, period ([YYYY-MM-DD, YYYY-MM-DD]), value, decimals, and source (selected-account processed CSV relative to the state root). For a delta add baseline_source, baseline_period, and operation=delta or delta_percent. Do not invent evidence or claim verification. Keep claims outside the user-facing answer. Include a plans list for any proposed saved plan, each with path (account-scoped YAML relative to state root) and kind (bid_budget or copy). For numeric bid/budget proposals, use claims with kind=proposal, entity.campaign_id, metric=proposed_target_cpa or proposed_daily_budget, value, and source=the listed plan path; these are checked against the validated plan, not treated as observed performance. Never present a proposal as approved or validated before the corresponding checks pass.\n\n'
+            + 'Verify the claims and outputs that matter to this request using the relevant skill and available tools. Fix recoverable tool failures and recheck. State material uncertainty. Return user-facing Markdown directly; do not add a claims or plans JSON envelope. Never treat tool feedback as approval to execute a change.\n\n'
             + f"User message:\n{prompt}\n\nAUTHORITATIVE CURRENT ACCOUNT: {account_context or 'none'} ({account_customer_id or 'no customer ID'}). Use this account for every lookup, explanation, and recommendation in this turn. Do not reuse an account name from earlier conversation turns."
             )
 def prompt_for_selected_account(store, row, prompt):
@@ -1868,19 +1867,16 @@ async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
                 if app_instance.state.cancel.get(jid) and app_instance.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'
-                answer_profile_path = state_root / '.bob' / 'accounts' / str(selected_account['customer_id']) / 'profile.json' if selected_account else None
-                answer_profile = json.loads(answer_profile_path.read_text()) if answer_profile_path and answer_profile_path.exists() else {}
-                checked = await asyncio.wait_for(asyncio.to_thread(check_answer, final, state_root, selected_account['customer_id'] if selected_account else '',
-                                       answer_profile.get('primary_goal', 'in_app_conversions'),
-                                       tuple(answer_profile.get('goals', {}).get('excluded_entities', [])),
-                                       lambda reference: validate_proposal(reference, state_root, answer_profile, runtime_config)), timeout=30)
-                s.event(jid, 'answer_check', {'passed': not checked.warnings and not checked.blocked,
-                                             'blocked': checked.blocked, 'warnings': list(checked.warnings)})
-                if checked.blocked:
-                    raise ValueError('Answer held because its account or evidence scope could not be verified.')
-                final = checked.answer
-                if any('claim' in warning or 'numerical' in warning for warning in checked.warnings):
-                    final += '\n\nSome figures in this answer could not be verified. Review them before acting.'
+                # Accept normal text; unwrap envelopes from older resumed sessions.
+                candidate = final.strip()
+                if candidate.startswith('```json') and candidate.endswith('```'):
+                    candidate = candidate[7:-3].strip()
+                try:
+                    envelope = json.loads(candidate)
+                    if isinstance(envelope, dict) and isinstance(envelope.get('answer'), str):
+                        final = envelope['answer']
+                except (ValueError, TypeError):
+                    pass
                 if final.startswith(OFF_SCOPE_SENTINEL):
                     learned = load_learned_offscope()
                     learned.add(normalize_scope_prompt(prompt))

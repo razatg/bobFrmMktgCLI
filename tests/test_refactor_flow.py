@@ -6,7 +6,6 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from lib.bob.answer_check import check_answer
 from lib.bob.bid_budget.guards import CampaignState, plan_hash, validate_plan
 from lib.bob.creative_copy.rules import validate_copy
 from lib.bob.decisions import records
@@ -16,6 +15,47 @@ from lib.bob.search import search
 
 
 class EvidenceFlowTests(unittest.TestCase):
+    def test_copy_save_returns_row_errors_then_accepts_corrected_draft(self):
+        import argparse
+        import contextlib
+        import io
+        import yaml
+        from unittest.mock import patch
+        from lib.bob.creative_copy.apply import creative_copy_propose
+        wiki = self.root / 'wiki' / self.account
+        wiki.mkdir(parents=True)
+        original, target = wiki / 'baseline.yaml', wiki / 'draft.yaml'
+        original.write_text(yaml.safe_dump({'customer_id': self.account, 'changes': [], 'applied': False}))
+        target.write_text('previous draft')
+        changes = [{'ad_group_id': '10', 'ad_id': '20', 'asset_id': str(asset),
+                    'action': 'replace', 'field_type': 'HEADLINE', 'current_text': 'Old copy',
+                    'suggested_text': text, 'rationale': 'Evidence supports replacing this asset'}
+                   for asset, text in ((30, None), (31, 'x' * 31))]
+        args = argparse.Namespace(plan=str(original), output=str(target), changes_json=json.dumps(changes))
+        with patch('lib.bob.creative_copy.apply.load_profile', return_value={'google_ads_customer_id': self.account}), \
+             patch('lib.bob.creative_copy.apply.account_wiki_dir', return_value=wiki):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                creative_copy_propose(args)
+            self.assertEqual(stopped.exception.code, 2)
+            feedback = json.loads(output.getvalue())
+            self.assertFalse(feedback['saved'])
+            self.assertEqual([item['row'] for item in feedback['errors']], [1, 2])
+            self.assertEqual(feedback['errors'][1]['limit'], 30)
+            self.assertEqual(target.read_text(), 'previous draft')
+            for change in changes:
+                change['suggested_text'] = 'New copy'
+            args.changes_json = json.dumps(changes)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                creative_copy_propose(args)
+            self.assertTrue(json.loads(output.getvalue())['saved'])
+        saved = yaml.safe_load(target.read_text())
+        self.assertEqual([item['suggested_text'] for item in saved['changes']], ['New copy', 'New copy'])
+        self.assertTrue(saved['decision_required'])
+        self.assertFalse(saved['applied'])
+        self.assertNotIn('approved_hash', saved)
+
     def test_goals_carry_legacy_values_without_overriding_saved_preferences(self):
         from lib.bob.platform.goals import account_goals, with_goal_aliases
         profile = {'cac_ceiling': 75, 'bid_budget_change_pct': 5, 'bid_budget_cooldown_days': 3}
@@ -27,11 +67,6 @@ class EvidenceFlowTests(unittest.TestCase):
         goals['usual_approach']['cac_reference'] = None
         self.assertIsNone(account_goals(profile)['usual_approach']['cac_reference'])
 
-    def test_departure_warnings_are_visible_in_the_review_answer(self):
-        checked = check_answer(self.answer(answer='Review this proposal.', plans=[{'path': 'plan.yaml'}]),
-                               self.root, self.account, proposal_validator=lambda plan: [
-                                   {'allowed': True, 'warnings': ['change exceeds the usual adjustment']}])
-        self.assertIn('change exceeds the usual adjustment', checked.answer)
 
     def test_registered_proposals_preserve_baseline_and_require_decision_capture(self):
         import argparse
@@ -114,47 +149,6 @@ class EvidenceFlowTests(unittest.TestCase):
         self.path.write_text('customer_id,campaign_id,network,cost,installs,impressions,clicks,in_app_conversions\n'
                              f'{self.account},1,Search,100,5,1000,10,2\n'
                              f'{self.account},1,Display,300,15,3000,30,6\n')
-
-    def answer(self, **changes):
-        claim = {'entity': {'campaign_id': '1'}, 'metric': 'cpi',
-                 'period': ['2026-09-02', '2026-09-08'], 'value': 20, 'source': self.source}
-        envelope = {'account': self.account, 'answer': 'Campaign CPI is 20.', 'claims': [claim]}
-        envelope.update(changes)
-        return json.dumps(envelope)
-
-    def test_claim_recomputes_cpi_across_networks(self):
-        checked = check_answer(self.answer(), self.root, self.account)
-        self.assertFalse(checked.blocked)
-        self.assertEqual(checked.warnings, ())
-        self.assertEqual(checked.answer, 'Campaign CPI is 20.')
-
-    def test_wrong_unclaimed_and_wrong_period_figures_are_flagged(self):
-        for envelope in (self.answer(answer='Campaign CPI is 80.'),
-                         self.answer(claims=[]),
-                         self.answer(claims=[{'entity': {}, 'metric': 'cost', 'value': 400,
-                                              'source': self.source, 'period': ['2026-09-01', '2026-09-08']}])):
-            self.assertTrue(check_answer(envelope, self.root, self.account).warnings)
-
-    def test_foreign_account_and_foreign_rows_are_held(self):
-        self.assertTrue(check_answer(self.answer(account='999'), self.root, self.account).blocked)
-        self.path.write_text(self.path.read_text().replace(self.account, '999'))
-        self.assertTrue(check_answer(self.answer(), self.root, self.account).blocked)
-
-    def test_plain_text_is_compatible_but_not_falsely_verified(self):
-        self.assertEqual(check_answer('I recommend waiting.', self.root, self.account).warnings, ())
-        self.assertTrue(check_answer('CPI is 20.', self.root, self.account).warnings)
-
-    def test_source_escape_is_not_accepted(self):
-        envelope = json.loads(self.answer())
-        envelope['claims'][0]['source'] = '/etc/passwd'
-        self.assertTrue(check_answer(json.dumps(envelope), self.root, self.account).warnings)
-
-    def test_denied_proposal_is_not_shown_as_an_approval_table(self):
-        raw = self.answer(answer='Increase this budget.', plans=[{'path': 'plan.yaml', 'kind': 'bid_budget'}])
-        checked = check_answer(raw, self.root, self.account,
-                               proposal_validator=lambda plan: [{'allowed': False, 'reasons': ['step cap']}])
-        self.assertNotIn('Increase this budget.', checked.answer)
-        self.assertIn('did not pass validation', checked.answer)
 
     def record(self):
         return records.record(self.root, self.account, {

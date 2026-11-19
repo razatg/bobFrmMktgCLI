@@ -3,6 +3,8 @@
 Author: Rajat · Date: 2026-11-18
 Delivery plan: `rebuild-plan-changed.md`
 
+**19 November verification revision:** The universal deterministic answer gate and generic repair loop are removed from this design. Skills describe what Bob must inspect and which evidence/tools to use; Bob interprets findings, corrects recoverable errors and rechecks. Deterministic checks stay with precise domain properties and execution contracts. This supersedes all automatic answer-gate and mandatory claims-envelope requirements below; those sections retain the original proposal history.
+
 Status: final agreed refactor proposal, updated 2026-11-19. This describes the target, not completed implementation. The delivery plan tracks implementation and verification.
 
 **19 November Goals revision:** Marketing thresholds are guidance. Goals consolidates the acquisition cost reference, typical change size and preferred waiting period, carrying over existing values. Bob may depart with evidence, trade-offs, risk, expected outcome and a review window for explicit approval. This supersedes marketing “hard guard” wording in this proposal. Technical validity, account scope, explicit exclusions, permissions and exact-proposal execution approval remain enforced. See the delivery plan and release notes for implemented behavior.

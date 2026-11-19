@@ -21,6 +21,8 @@ Record consequential recommendations, immutable evidence and a prediction with `
 
 ## Saving final asset choices
 
+Before returning replacement suggestions, merge the generated text into the exact asset choices and save them with `creative-copy-propose`. Never list the original candidate plan as the final proposal while its `suggested_text` values are empty. Keep the exact current copy, entity IDs, field type and rationale from the evidence. The save command returns row errors for missing/oversized text, punctuation and configured protected names; correct those rows and retry. Read the saved proposal back and ensure the displayed replacements match it. Review meaning, factual offers and live GOOD/BEST peers using current evidence; saving is not proof of copy quality or live eligibility. Tool feedback does not authorise applying any changes.
+
 Use `./bob creative-copy-propose --plan <baseline> --changes-json '<final asset choices>' --output <account plan>` to add, drop or change supported replacement/pause choices with reasons. Record the prediction and link it with `./bob decision link <id> --plan <final plan>`. Apply retains live validation and explicit approval. GOOD/BEST peers are refreshed from live evidence; account protected names are preserved without guessing proper nouns from capitalization.
 
 ## Operating Rules

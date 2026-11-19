@@ -19,7 +19,7 @@ Universal contract for agents working on Bob Frm Mktg. Bob is a CLI-first Google
 - Aggregate additive inputs before deriving ratios. Cost, impressions, clicks, installs and conversions roll up across entities, networks and periods. Reach/Users and frequency never roll up beyond their source grain.
 - Do not infer classification or advertiser rules from current account naming patterns. Preserve platform-specific attribution and metric definitions.
 - No ad-hoc analysis scripts except the supported, account-scoped materialize/explore/verify workflow. Do not approximate unregistered dimensions or metrics.
-- Numerical answer claims must identify entity, metric, period, value and source. Hosted responses follow the gateway's answer envelope; claims stay outside the user-facing answer. Never assert that an unchecked result was verified.
+- Before presenting work, verify the claims and outputs that matter to the request using the relevant skill and available tools. Fix recoverable failures and recheck; state material uncertainty. Use executed evidence for numbers and do not claim that technical checks establish recommendation or creative quality. Return user-facing prose directly, without a claims JSON envelope. There is no automatic answer gate.
 
 ## Decisions and actions
 

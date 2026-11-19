@@ -30,24 +30,39 @@ def creative_copy_propose(args: argparse.Namespace) -> None:
     if str(plan.get('customer_id', '')).replace('-', '') != account or plan.get('applied'):
         die('creative baseline must be unapplied and belong to the selected account')
     changes = json.loads(args.changes_json)
+    errors = []
     allowed = {'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'ad_id', 'asset_id',
                'field_type', 'current_text', 'suggested_text', 'action', 'rationale'}
     if not isinstance(changes, list) or len(changes) > 1000:
         die('changes must be a bounded list')
-    for change in changes:
+    for index, change in enumerate(changes, 1):
         if not isinstance(change, dict) or set(change) - allowed or not change.get('rationale'):
             die('creative choices need supported fields and an evidence-backed rationale')
         if change.get('action') not in {'replace', 'pause'} or not change.get('current_text'):
             die('creative choices require a supported action and the exact current text')
         if any(not str(change.get(field, '')).isdigit() for field in ('ad_group_id', 'ad_id', 'asset_id')):
             die('creative choices require exact ad group, ad and asset IDs')
+        if change['action'] == 'replace':
+            text = str(change.get('suggested_text') or '')
+            protected = tuple(name for name in profile.get('goals', {}).get('protected_names', [])
+                              if name.casefold() in change['current_text'].casefold())
+            reasons = validate_copy(text, str(change.get('field_type', '')), protected_terms=protected)
+            if reasons:
+                errors.append({'row': index, 'asset_id': change['asset_id'], 'field': change.get('field_type'),
+                               'text': text, 'characters': len(text),
+                               'limit': {'HEADLINE': 30, 'DESCRIPTION': 90}.get(change.get('field_type')),
+                               'reasons': list(reasons)})
+    if errors:
+        print(json.dumps({'saved': False, 'errors': errors}))
+        raise SystemExit(2)
     plan.setdefault('baseline_changes', copy.deepcopy(plan.get('changes', [])))
     plan.update(changes=changes, decision_required=True, applied=False)
     for key in ('groups', 'approved_hash', 'apply_results', 'applied_at', 'applied_by', 'decision_id'):
         plan.pop(key, None)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(plan, sort_keys=False, allow_unicode=True))
-    print(f'Proposal saved for decision recording, live validation and explicit approval: {target}')
+    print(json.dumps({'saved': True, 'proposal': str(target),
+                      'status': 'Draft saved; live checks and explicit approval still required.'}))
 
 
 def creative_copy_apply(args: argparse.Namespace) -> None:

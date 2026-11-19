@@ -3,6 +3,8 @@
 Author: Rajat · Date: 2026-11-18
 Architecture: `architecture-proposal-changed.md`
 
+**19 November verification revision (supersedes automatic-answer-check steps below):** Remove the universal answer checker and gateway repair loop. Bob verifies work through task-specific skill guidance and tool feedback, corrects recoverable failures and rechecks, and explains uncertainty. Existing domain/execution checks remain enforced. The copy-save command returns row errors before saving an invalid proposal. Historical answer-check checklist items and numerical-check test counts below describe the earlier implementation, not the current acceptance criteria. Current regression verification: **275 tests passed**, including copy-save failure/correction, direct prose and legacy-envelope handling, and existing approval/execution protections. Python compilation and diff checks passed. Agent judgement still requires live staging acceptance.
+
 Status: final agreed refactor delivery proposal, updated 2026-11-19. Checkboxes indicate verified implementation only; the proposal itself does not mean the refactor has shipped.
 
 **19 November revision:** Goals now owns marketing reference values. Existing CAC, change-size and cooldown values carry over into `usual_approach`; older profile fields are compatibility aliases. Marketing values guide the baseline rather than vetoing a final proposal. Departures require rationale, forecast and explicit approval, and surface review notes. This supersedes the CAC/cooldown/step-cap “hard limits” wording below. Account scope, explicit campaign exclusions, valid values, permissions, approval hashes and duplicate/ambiguous-execution protections remain enforced.

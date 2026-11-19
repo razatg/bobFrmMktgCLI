@@ -13,6 +13,8 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
 ## Investigation contract
 
+Before presenting a proposal, verify its saved values against current account evidence and goals. Explain the trade-offs, risk, prediction and review window. Run the existing bid-budget validation command, inspect its findings and correct/recheck recoverable failures. Read the saved final plan before displaying it; show warnings about departures. Do not execute a change as part of verification or interpret a tool result as approval.
+
 Start with `./bob brief --focus bids` (or `all` when explanations cross domains). The gateway's selected account is authoritative. Rules and evidence maturity come from the brief; unavailable evidence is not an empty finding. Use `./bob search` for relevant knowledge and history.
 
 Recipes and saved Goals are baselines, not exclusive routes or marketing vetoes. Goals are included automatically in the brief; the user need not mention them. Acquisition cost references, usual change size and preferred wait periods guide judgement. Depart with executed evidence, a trade-off/risk explanation, expected outcome and review window. Set rationale and forecast on each departing proposal and record the decision. Account scope, explicit exclusions, valid values, permissions and exact-proposal approval remain enforced. Use current CLI help over legacy examples.

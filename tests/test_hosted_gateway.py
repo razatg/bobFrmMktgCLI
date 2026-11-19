@@ -145,39 +145,36 @@ class SchedulingRunner(FakeRunner):
         return (session_id or 'schedule-thread', final)
 
 class GatewayTests(unittest.TestCase):
-    def test_answer_check_runs_before_display_and_holds_foreign_account(self):
-        import asyncio
-        from unittest.mock import AsyncMock
-        csrf = self.bootstrap()
-        conversation = self.client.post('/api/conversations', headers={'X-CSRF-Token': csrf}).json()['id']
-        self.app.state.runner.run = AsyncMock(return_value=('test-thread', json.dumps({
-            'account': '', 'answer': 'CPI is 999.', 'claims': []})))
-        sent = self.client.post(f'/api/conversations/{conversation}/messages', headers={'X-CSRF-Token': csrf},
-                                json={'content': 'Review campaign performance'})
+    def test_answers_are_agent_verified_without_a_gateway_gate_or_retry(self):
         import time
-        for _ in range(100):
-            job = self.client.get('/api/jobs/' + sent.json()['job_id']).json()
-            if job['status'] not in ('queued', 'running'):
-                break
-            time.sleep(.01)
-        self.assertEqual(job['status'], 'completed')
-        messages = self.client.get(f'/api/conversations/{conversation}').json()['messages']
-        self.assertIn('could not be verified', messages[-1]['content'])
-        self.assertNotIn('"claims"', messages[-1]['content'])
-        event = self.app.state.store.one("SELECT payload FROM job_events WHERE job_id=? AND event_type='answer_check'", (job['id'],))
-        self.assertFalse(json.loads(event['payload'])['passed'])
-        self.app.state.runner.run = AsyncMock(return_value=('test-thread', json.dumps({
-            'account': '9999999999', 'answer': 'Foreign account answer', 'claims': []})))
-        sent = self.client.post(f'/api/conversations/{conversation}/messages', headers={'X-CSRF-Token': csrf},
-                                json={'content': 'Review campaign performance again'})
-        for _ in range(100):
-            job = self.client.get('/api/jobs/' + sent.json()['job_id']).json()
-            if job['status'] not in ('queued', 'running'):
-                break
-            time.sleep(.01)
-        self.assertEqual(job['status'], 'failed')
-        messages = self.client.get(f'/api/conversations/{conversation}').json()['messages']
-        self.assertFalse(any(message['content'] == 'Foreign account answer' for message in messages))
+        from unittest.mock import AsyncMock
+        from server.app import scope_wrapped_prompt
+        csrf = self.bootstrap()
+        for raw, expected in (
+            ('Here is a draft video concept with three scenes.', 'Here is a draft video concept with three scenes.'),
+            (json.dumps({'answer': 'Draft copy for review.', 'claims': [],
+                         'plans': [{'path': 'not-saved.yaml', 'kind': 'copy'}]}), 'Draft copy for review.'),
+            ('```json\n' + json.dumps({'answer': 'CPI is 999.', 'claims': []}) + '\n```', 'CPI is 999.'),
+        ):
+            with self.subTest(raw=raw):
+                conversation = self.client.post('/api/conversations', headers={'X-CSRF-Token': csrf}).json()['id']
+                self.app.state.runner.run = AsyncMock(return_value=('test-thread', raw))
+                sent = self.client.post(f'/api/conversations/{conversation}/messages',
+                    headers={'X-CSRF-Token': csrf}, json={'content': 'Review the campaign draft'})
+                for _ in range(100):
+                    job = self.client.get('/api/jobs/' + sent.json()['job_id']).json()
+                    if job['status'] not in ('queued', 'running'):
+                        break
+                    time.sleep(.01)
+                self.assertEqual(job['status'], 'completed')
+                messages = self.client.get(f'/api/conversations/{conversation}').json()['messages']
+                self.assertEqual(messages[-1]['content'], expected)
+                self.assertEqual(self.app.state.runner.run.await_count, 1)
+                self.assertIsNone(self.app.state.store.one(
+                    "SELECT payload FROM job_events WHERE job_id=? AND event_type='answer_check'", (job['id'],)))
+        prompt = scope_wrapped_prompt('Review the draft')
+        self.assertNotIn('ANSWER CONTRACT', prompt)
+        self.assertIn('Fix recoverable tool failures', prompt)
 
     def test_goals_survive_hosted_profile_regeneration(self):
         from server.app import materialize_runtime_accounts
