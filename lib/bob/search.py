@@ -39,15 +39,28 @@ def search(root: Path, account: str, query: str, *, kind: str = "", since: str =
         connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(path UNINDEXED, kind UNINDEXED, date UNINDEXED, body)")
         # Refresh on read too: captures manual KT edits and sync, not only CLI writes.
         connection.execute("DELETE FROM documents")
-        wiki = (root / "wiki" / account).resolve()
-        for path in sorted(wiki.rglob("*.md")):
-            if not path.resolve().is_relative_to(wiki) or path.stat().st_size > 1_000_000:
+        wiki = root / "wiki" / account
+        for path in sorted(wiki.rglob("*")):
+            if path.suffix.lower() not in {'.md', '.yaml', '.yml'} or not path.is_file():
                 continue
-            category = "kt" if path.name.casefold() == "kt.md" else "action" if "action-items" in path.parts else "analysis"
+            if not path.resolve().is_relative_to(wiki.resolve()) or path.stat().st_size > 1_000_000:
+                continue
+            body = path.read_text()
+            proposal = path.suffix.lower() in {'.yaml', '.yml'}
+            if proposal:
+                try:
+                    plan = yaml.safe_load(body)
+                except yaml.YAMLError:
+                    continue
+                if not isinstance(plan, dict) or not isinstance(plan.get('changes'), list):
+                    continue
+                if str(plan.get('customer_id', '')).replace('-', '') != account.replace('-', ''):
+                    continue
+            category = "kt" if path.name.casefold() == "kt.md" else "action" if proposal or "action-items" in path.parts else "analysis"
             import datetime as dt
             stamp = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc).date().isoformat()
             connection.execute("INSERT INTO documents VALUES (?,?,?,?)",
-                               (str(path.relative_to(root)), category, stamp, path.read_text()))
+                               (str(path.relative_to(root)), category, stamp, path.name + '\n' + body))
         with database(root, account) as journal:
             for row in journal.execute("SELECT id,created_at,record FROM decisions"):
                 connection.execute("INSERT INTO documents VALUES (?,?,?,?)",

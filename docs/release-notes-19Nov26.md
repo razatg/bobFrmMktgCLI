@@ -9,6 +9,8 @@ This update gives Bob more context for recommendations and a lasting record of d
 ### Reuse earlier work
 Ask “What happened last week?” or “Show me that creative proposal again.” Bob first searches saved account reports and artifacts, checks that their dates and evidence match, and links suitable existing work. It fills gaps or refreshes stale evidence when needed. You do not need to ask Bob to search first.
 
+Saved bid and budget proposals are searchable too. Ask “Continue the T3 proposal.” Bob should recover and inspect the saved proposal before suggesting a rebuild. You do not need to supply or save an approval hash; Bob recalculates it from the exact plan. Your explicit approval is still required before changes are applied.
+
 ### Recommendations without an extra live check
 Asking which bids or budgets to change no longer triggers an execution-validation request to Google Ads. Saved marketing targets and preferred waiting periods inform the recommendation. Bob checks current campaign settings when applying the exact proposal you approve; an execution timeout does not invalidate the earlier analysis.
 

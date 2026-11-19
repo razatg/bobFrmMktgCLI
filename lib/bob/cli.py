@@ -298,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     rd_parser = sub.add_parser("resolve-dates", help="resolve a period expression to concrete date ranges")
     rd_parser.add_argument(
         "--period", required=True,
-        help="period name: yesterday, yesterday-vs-sdlw, last-week, last-complete-week, wow, mom, mtd, 3week-rolling, bid-budget-weeks, partial-wow",
+        help="ISO date (YYYY-MM-DD) or period name: yesterday, yesterday-vs-sdlw, last-week, last-complete-week, wow, mom, mtd, 3week-rolling, bid-budget-weeks, partial-wow",
     )
     rd_parser.add_argument(
         "--n", type=int, default=3,

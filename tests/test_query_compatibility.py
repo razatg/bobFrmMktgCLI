@@ -20,6 +20,21 @@ from lib.bob.performance.adhoc import (
 
 
 class QueryCompatibilityTests(unittest.TestCase):
+    def test_literal_date_works_through_cli_and_registered_resolver(self):
+        from lib.bob.platform.dates import resolve_period_dates
+        from lib.bob.mcp.server import bob_resolve_dates
+        day = dt.date(2026, 11, 18)
+        self.assertEqual(resolve_period_dates('2026-11-18'), [(day, day)])
+        args = build_parser().parse_args(['resolve-dates', '--period', '2026-11-18'])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            args.func(args)
+        self.assertIn('2026-11-18', output.getvalue())
+        self.assertEqual(bob_resolve_dates(period='2026-11-18')['windows'],
+                         [{'from': '2026-11-18', 'to': '2026-11-18'}])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            resolve_period_dates('2026-02-30')
+
     def test_cli_primary_conversion_handoff_preserves_metric_meaning(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, output = Path(tmp) / 'source.csv', Path(tmp) / 'output.csv'

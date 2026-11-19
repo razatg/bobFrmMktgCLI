@@ -70,6 +70,12 @@ def bid_budget_week_windows(reference: dt.date | None = None) -> list[tuple[dt.d
 
 
 def resolve_period_dates(period: str) -> list[tuple[dt.date, dt.date]]:
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', period.strip()):
+        try:
+            day = dt.date.fromisoformat(period.strip())
+        except ValueError:
+            die('invalid calendar date; use YYYY-MM-DD')
+        return [(day, day)]
     period = normalize_period_name(period)
     yesterday = today() - dt.timedelta(days=1)
     if period == "yesterday":

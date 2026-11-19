@@ -2,7 +2,7 @@
 
 ## Workflow
 
-1. Run `bid-budget-recommend` to generate the plan.
+1. Recover a matching saved proposal first. Run `bid-budget-recommend` only for a new or explicitly rebuilt proposal.
 2. Show the plan to the user for review.
 3. Record/link the decision, get the saved draft's hash with `bid-budget-validate` (offline), and obtain approval for that exact proposal.
 4. Only after explicit approval ("make it live", "apply it", "go ahead") — run `bid-budget-apply`. It reads current campaign settings before executing. If that read times out, no mutation is sent; report the execution blocker without withdrawing the earlier recommendation.
@@ -16,7 +16,9 @@
 
 Output files:
 - `data/processed/bid-budget-recs/{customer}_{YYYY-MM-DD}.csv`
-- `wiki/action-items/bid-budget-{YYYY-MM-DD}.yaml`
+- `wiki/{customer_id}/action-items/bid-budget-{YYYY-MM-DD}.yaml`
+
+For an existing proposal, search with `./bob search "<proposal or campaign identifier>" --kind action`, read the matching YAML and inspect scope, decision and execution receipts. Missing hash output does not require rebuilding: `./bob bid-budget-validate --plan <saved-plan>` recalculates it offline. Confirm that explicit approval covers that exact saved proposal; a matching hash alone is not consent. If the plan is missing or ambiguous, resolve that before execution. Do not ask for a special phrase to continue.
 
 ## Step 2 — Present to User
 
@@ -35,7 +37,7 @@ State the holds and skips with reasons. Bob should call out the 1-2 campaigns th
 ## Step 3 — Apply (Only After Explicit Approval)
 
 ```bash
-./bob bid-budget-apply --approval-hash APPROVED_HASH --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml
+./bob bid-budget-apply --approval-hash APPROVED_HASH --plan wiki/{customer_id}/action-items/bid-budget-YYYY-MM-DD.yaml
 ```
 
 The command:
@@ -49,7 +51,7 @@ The command:
 
 - Bob must show the plan table before any `bid-budget-apply` call — no silent applies.
 - If the user says "undo" or "revert" after applying, Bob cannot reverse via API. Tell the user to log into Google Ads directly.
-- If the YAML is missing, ask the user for the correct path rather than guessing.
+- If the YAML cannot be recovered through selected-account search or an existing artifact link, explain the missing evidence and ask for the plan or offer a rebuild for review. Never assume a missing hash means a missing plan.
 
 ## Dependencies
 

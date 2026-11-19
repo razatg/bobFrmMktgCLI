@@ -434,8 +434,8 @@ def resolve_range(args: argparse.Namespace) -> tuple[dt.date, dt.date]:
 def cmd_resolve_dates(args: argparse.Namespace) -> None:
     """Print concrete date ranges for a named period so the agent can construct fetch commands."""
     import calendar as _cal
-    period = normalize_period_name(args.period)
-    if period == "partial_wow":
+    period = args.period.strip()
+    if normalize_period_name(period) == "partial_wow":
         n = args.n if args.n else 3
         period = f"partial_wow_{n}"
 

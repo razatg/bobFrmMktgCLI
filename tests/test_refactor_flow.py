@@ -381,6 +381,62 @@ class EvidenceFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'not found'):
             records.get(self.root, '999', decision['decision_id'])
 
+    def test_search_recovers_saved_proposal_and_recalculates_missing_hash_offline(self):
+        import contextlib
+        import io
+        import yaml
+        from unittest.mock import patch
+        from lib.bob.cli import build_parser
+        directory = self.root / 'wiki' / self.account / 'action-items'
+        directory.mkdir(parents=True)
+        plan = {'customer_id': self.account, 'decision_id': 'recorded-decision',
+                'changes': [{'campaign_id': '19', 'action': 'increase_bid', 'proposed_target_cpa': 110}],
+                'applied': False, 'apply_results': [{'campaign_id': '18', 'status': 'applied'}]}
+        path = directory / 'T3-final.yaml'
+        path.write_text(yaml.safe_dump(plan))
+        original = path.read_bytes()
+        expected = plan_hash(plan)
+        found = search(self.root, self.account, '-T3-', kind='action')
+        self.assertEqual([row['path'] for row in found], [str(path.relative_to(self.root))])
+        args = build_parser().parse_args(['bid-budget-validate', '--plan', str(self.root / found[0]['path'])])
+        output = io.StringIO()
+        with patch('lib.bob.bid_budget.load_profile', return_value={'google_ads_customer_id': self.account}), \
+             patch('lib.bob.bid_budget._runtime_write_config_path', side_effect=AssertionError('must stay offline')), \
+             contextlib.redirect_stdout(output):
+            args.func(args)
+        self.assertEqual(json.loads(output.getvalue())['plan_hash'], expected)
+        self.assertFalse(json.loads(output.getvalue())['live_checked'])
+        self.assertEqual(path.read_bytes(), original)
+        plan['changes'][0]['proposed_target_cpa'] = 120
+        self.assertNotEqual(plan_hash(plan), expected)
+
+    def test_search_handles_hosted_shared_wiki_links(self):
+        shared = self.root / 'shared' / 'wiki' / self.account
+        shared.mkdir(parents=True)
+        (shared / 'report.md').write_text('Unique report evidence')
+        (shared / 'T3-final.yml').write_text(f'customer_id: "{self.account}"\nchanges: []\n')
+        state = self.root / 'conversation-state'
+        state.mkdir()
+        (state / 'wiki').symlink_to(shared.parent, target_is_directory=True)
+        found = search(state, self.account, 'T3', kind='action')
+        self.assertEqual(found[0]['path'], f'wiki/{self.account}/T3-final.yml')
+        self.assertTrue((state / found[0]['path']).is_file())
+        self.assertEqual(search(state, self.account, 'Unique')[0]['path'], f'wiki/{self.account}/report.md')
+
+    def test_proposal_search_excludes_foreign_malformed_and_external_files(self):
+        directory = self.root / 'wiki' / self.account / 'action-items'
+        directory.mkdir(parents=True)
+        (directory / 'T3-foreign.yaml').write_text('customer_id: "999"\nchanges: []\n')
+        (directory / 'T3-invalid.yaml').write_text('changes: [')
+        (directory / 'T3-not-a-plan.yaml').write_text('message: notes\n')
+        foreign = self.root / 'wiki' / '999'
+        foreign.mkdir()
+        (foreign / 'T3.md').write_text('T3 foreign account')
+        escaped = self.root / 'T3-outside.yaml'
+        escaped.write_text(f'customer_id: "{self.account}"\nchanges: []\n')
+        (directory / 'T3-external.yaml').symlink_to(escaped)
+        self.assertEqual(search(self.root, self.account, 'T3'), [])
+
     def test_review_uses_recorded_direction_maturity_and_summed_inputs(self):
         decision = self.record()
         records.update(self.root, self.account, decision['decision_id'], 'execution',

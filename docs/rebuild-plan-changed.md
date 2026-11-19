@@ -3,6 +3,15 @@
 Author: Rajat · Date: 2026-11-18
 Architecture: `architecture-proposal-changed.md`
 
+**19 November saved-proposal recovery follow-up:**
+
+- [x] Index selected-account YAML/YML proposals and filenames in `bob search`, alongside existing Markdown and decisions. Exclude foreign-account plans, malformed YAML and file links outside the account wiki.
+- [x] Preserve workspace-relative artifact paths when hosted wiki storage is linked outside conversation state.
+- [x] Recover and inspect the existing proposal and receipts before rebuilding. Recalculate a missing hash offline; do not require a new baseline, new trend table or special user phrase to recover it. Explicit approval must still cover the exact proposal.
+- [x] Accept literal `YYYY-MM-DD` dates through CLI and registered date resolution; retain named periods and exact-window checks for genuinely new bid/budget analyses.
+- [x] Focused recovery tests pass, including missing-hash recovery without credentials or proposal edits, shared wiki links, account isolation and invalid calendar dates. The actual launcher resolves `2026-11-18` successfully.
+- [x] Full regression suite: **294 tests passed**. Compilation and diff checks passed. No live Ads changes performed.
+
 **19 November query compatibility follow-up:**
 
 - [x] Register existing primary-conversion and context aggregations in the CLI; calculate and advertise only metrics with available inputs. Keep primary CPA distinct from install/in-app CPA.
