@@ -16,6 +16,54 @@ from .suggest import *
 from .rules import validate_copy
 
 
+def _merge_proposal_choices(plan: dict, choices: list[dict]) -> list[dict]:
+    """Accept existing agent suggestions or complete candidate rows, retaining evidence."""
+    import copy
+    baseline = plan.get('changes', [])
+    result = []
+    editable = {'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'ad_id', 'asset_id',
+                'field_type', 'current_text', 'suggested_text', 'action', 'rationale'}
+    identity = ('ad_group_id', 'ad_id', 'asset_id', 'field_type')
+    for choice in choices:
+        if not isinstance(choice, dict):
+            die('each creative choice must be an object')
+        if 'id' in choice or 'text' in choice:
+            if set(choice) - {'id', 'text', 'rationale'} or 'id' not in choice or 'text' not in choice:
+                die('suggestions require id and text, with optional rationale')
+            matches = [row for index, row in enumerate(baseline, 1)
+                       if str(row.get('group_id') if plan.get('groups') else index) == str(choice['id'])]
+            if not matches:
+                die(f"suggestion ID {choice['id']} is absent from the candidate plan")
+            for row in matches:
+                item = copy.deepcopy(row)
+                item.update(suggested_text=choice['text'], action='replace',
+                            rationale=choice.get('rationale') or row.get('rationale') or 'Selected by the baseline performance review')
+                result.append(item)
+        else:
+            matches = [row for row in baseline if all(str(row.get(key, '')) == str(choice.get(key, '')) for key in identity)]
+            if len(matches) > 1:
+                die('candidate identity is ambiguous; regenerate the candidate plan')
+            base = matches[0] if matches else {}
+            unexpected = set(choice) - editable - set(base)
+            if unexpected:
+                die('unsupported creative fields: ' + ', '.join(sorted(unexpected)))
+            if base and choice.get('current_text', base['current_text']) != base['current_text']:
+                die('current copy differs from the candidate evidence')
+            item = copy.deepcopy(base)
+            item.update(choice)
+            if base:
+                item.setdefault('rationale', 'Selected by the baseline performance review')
+            result.append(item)
+    identities = [tuple(str(row.get(key, '')) for key in identity) for row in result]
+    if len(set(identities)) != len(identities):
+        die('duplicate creative choices; each target may appear only once')
+    for index, row in enumerate(result, 1):
+        if row.get('apply_status') == 'applied':
+            die('an already-applied asset cannot be proposed again')
+        row['change_index'] = index
+    return result
+
+
 def creative_copy_propose(args: argparse.Namespace) -> None:
     """Save final asset choices without requiring an agent to hand-edit a mutation file."""
     import copy
@@ -29,15 +77,16 @@ def creative_copy_propose(args: argparse.Namespace) -> None:
     plan = yaml.safe_load(original.read_text())
     if str(plan.get('customer_id', '')).replace('-', '') != account or plan.get('applied'):
         die('creative baseline must be unapplied and belong to the selected account')
+    if plan.get('apply_results') or plan.get('applied_at') or plan.get('last_apply_at'):
+        die('execution has started; preserve receipts and reconcile or retry the existing plan')
     changes = json.loads(args.changes_json)
     errors = []
-    allowed = {'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'ad_id', 'asset_id',
-               'field_type', 'current_text', 'suggested_text', 'action', 'rationale'}
     if not isinstance(changes, list) or len(changes) > 1000:
         die('changes must be a bounded list')
+    changes = _merge_proposal_choices(plan, changes)
     for index, change in enumerate(changes, 1):
-        if not isinstance(change, dict) or set(change) - allowed or not change.get('rationale'):
-            die('creative choices need supported fields and an evidence-backed rationale')
+        if not change.get('rationale'):
+            die(f'creative choice #{index} requires an evidence-backed rationale')
         if change.get('action') not in {'replace', 'pause'} or not change.get('current_text'):
             die('creative choices require a supported action and the exact current text')
         if any(not str(change.get(field, '')).isdigit() for field in ('ad_group_id', 'ad_id', 'asset_id')):

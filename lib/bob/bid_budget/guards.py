@@ -14,7 +14,7 @@ class CampaignState:
     enabled: bool
     target_cpa: float
     daily_budget: float
-    installs: float
+    installs: float | None
     actual_cpa: float | None
     last_change: dt.date | None
     budget_id: str
@@ -71,21 +71,21 @@ def _change_verdict(change: dict, state: CampaignState | None, profile: dict,
         reasons.append("campaign is not enabled")
     ceiling = float(profile.get("cac_ceiling", 200))
     cpa = state.actual_cpa if state.actual_cpa is not None else state.target_cpa
-    volume_ok, cac_ok, cooldown_ok = eligibility(state.installs, cpa, state.last_change,
+    volume_ok, cac_ok, cooldown_ok = eligibility(state.installs or 0, cpa, state.last_change,
         on_date=on_date, ceiling=ceiling, cooldown_days=int(profile.get("bid_budget_cooldown_days", 14)))
     warnings = []
-    if not volume_ok:
+    if state.installs is not None and not volume_ok:
         warnings.append("limited recent install volume")
     approach = profile['goals']['usual_approach']
-    if not cac_ok and approach.get('cac_reference') is not None:
+    if state.actual_cpa is not None and not cac_ok and approach.get('cac_reference') is not None:
         warnings.append("acquisition cost exceeds the reference or evidence is unavailable")
-    if not cooldown_ok and approach.get('preferred_wait_days') is not None:
+    if state.last_change is not None and not cooldown_ok and approach.get('preferred_wait_days') is not None:
         warnings.append("change is sooner than the preferred waiting period")
     cap = float(profile.get("bid_budget_change_pct", 10))
     for field, current in (("target_cpa", state.target_cpa), ("daily_budget", state.daily_budget)):
         proposed = change.get(f"proposed_{field}")
         needed = field == "target_cpa" or "budget" in action
-        if not needed and proposed is None:
+        if not needed:
             continue
         error = step_error(proposed, current, cap)
         if error:
@@ -134,49 +134,16 @@ def validate_plan(plan: dict, profile: dict, live: dict[str, CampaignState], *,
 
 
 def read_live_state(client, account: str, on_date: dt.date, cooldown_days: int) -> dict[str, CampaignState]:
-    """Read current settings plus mature recent performance and recent edits."""
+    """Read execution-critical settings only; performance/history belong to analysis.
+
+    Date/lookback arguments remain accepted for existing callers.
+    """
     service = client.get_service("GoogleAdsService")
-    end = on_date - dt.timedelta(days=3)
-    start = end - dt.timedelta(days=6)
-    query = f'''SELECT campaign.id, campaign.status, campaign.target_cpa.target_cpa_micros,
-      campaign_budget.id, campaign_budget.amount_micros, metrics.cost_micros,
-      metrics.biddable_app_install_conversions, metrics.biddable_app_post_install_conversions
-      FROM campaign WHERE segments.date BETWEEN '{start}' AND '{end}' '''
-    states: dict[str, CampaignState] = {}
-    for row in service.search(customer_id=account, query=query, timeout=15):
-        cost = row.metrics.cost_micros / 1e6
-        conv = row.metrics.biddable_app_post_install_conversions
-        states[str(row.campaign.id)] = CampaignState(
-            str(row.campaign.id), row.campaign.status.name == "ENABLED",
-            row.campaign.target_cpa.target_cpa_micros / 1e6,
-            row.campaign_budget.amount_micros / 1e6,
-            row.metrics.biddable_app_install_conversions, cost / conv if conv else None,
-            None, str(row.campaign_budget.id))
-    # Google change-event lookback is bounded. Longer cooldowns must not silently pass.
-    cooldown_days = min(28, max(0, cooldown_days))
-    since = on_date - dt.timedelta(days=max(1, cooldown_days))
-    events = service.search(customer_id=account, query=f'''SELECT change_event.campaign,
-      change_event.change_date_time, change_event.change_resource_type, change_event.change_resource_name
-      FROM change_event WHERE change_event.change_date_time >= '{since}'
-      AND change_event.change_date_time <= '{on_date} 23:59:59' LIMIT 10000''', timeout=15)
-    from dataclasses import replace
-    count = 0
-    for row in events:
-        count += 1
-        event = row.change_event
-        if event.change_resource_type.name not in {"CAMPAIGN", "CAMPAIGN_BUDGET"}:
-            continue
-        cid = event.campaign.rsplit("/", 1)[-1]
-        affected = [cid]
-        if event.change_resource_type.name == "CAMPAIGN_BUDGET":
-            budget_id = event.change_resource_name.rsplit("/", 1)[-1]
-            affected = [key for key, state in states.items() if state.budget_id == budget_id]
-        for cid in affected:
-            if cid not in states:
-                continue
-            changed = dt.date.fromisoformat(event.change_date_time[:10])
-            prior = states[cid].last_change
-            states[cid] = replace(states[cid], last_change=max(prior, changed) if prior else changed)
-    if count >= 10000:
-        raise ValueError("live change history truncated; cannot establish cooldown")
-    return states
+    query = """SELECT campaign.id, campaign.status, campaign.target_cpa.target_cpa_micros,
+      campaign_budget.id, campaign_budget.amount_micros
+      FROM campaign WHERE campaign.status != 'REMOVED' """
+    return {str(row.campaign.id): CampaignState(
+        str(row.campaign.id), row.campaign.status.name == "ENABLED",
+        row.campaign.target_cpa.target_cpa_micros / 1e6,
+        row.campaign_budget.amount_micros / 1e6, None, None, None, str(row.campaign_budget.id))
+        for row in service.search(customer_id=account, query=query, timeout=15)}

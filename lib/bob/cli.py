@@ -94,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
             "campaign_network_period",
             "campaign_reach_period",
             "adgroup_network_period",
+            "campaign_primary_conversion_period",
+            "adgroup_primary_conversion_period",
+            "bid_budget_inputs",
+            "change_history",
             "creative_period",
             "campaign_weekly_trend",
         ],
@@ -278,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     bb_apply_parser.add_argument("--approval-hash", help="explicitly approved proposal hash from bid-budget-validate")
     bb_apply_parser.set_defaults(func=bid_budget_apply)
 
-    bb_validate_parser = sub.add_parser("bid-budget-validate", help="live final-plan checks and hash for approval")
+    bb_validate_parser = sub.add_parser("bid-budget-validate", help="offline draft check and approval hash; no Google Ads requests")
     bb_validate_parser.add_argument("--plan", required=True)
     bb_validate_parser.set_defaults(func=bid_budget_validate)
     bb_propose_parser = sub.add_parser('bid-budget-propose', help='save an evidence-backed departure from a baseline; no Ads writes')
@@ -392,7 +396,7 @@ ANALYSIS
 ACTIONS
   bid-budget-recommend          Generate a bid/budget plan from weekly trend
   bid-budget-apply              Apply an approved plan to Google Ads
-  bid-budget-validate           Check the actual final plan and get its approval hash
+  bid-budget-validate           Check the saved draft and get its approval hash offline
   bid-budget-propose            Save a discretionary proposal without applying it
   bid-budget-retrospective      Evaluate W+1/W+2 outcomes of an applied plan
   suggest-creative-copy         Build copy plan + prompt for LOW text assets
@@ -452,7 +456,6 @@ def main(argv: list[str] | None = None) -> int:
     if argv[0].startswith("video-"):
         _install_capability("video")
     elif argv[0] in {
-        "bid-budget-validate",
         "bid-budget-apply",
         "static-variants-apply",
         "creative-copy-apply",

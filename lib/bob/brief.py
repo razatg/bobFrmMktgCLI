@@ -35,8 +35,6 @@ def build_brief(*, focus: str = "all", period: str = "wow", offline: bool = Fals
               "sections": {}, "next_looks": catalog(), "fetches": 0}
     kt = core.account_wiki_dir(account) / "KT.md"
     rules = kt.read_text() if kt.exists() else ""
-    if len(rules) > 16000:
-        raise ValueError("account rules exceed brief budget; curate KT before making recommendations")
     result["account_rules"] = rules
     datasets = ["campaign_network_period"]
     if focus in {"all", "bids"}:

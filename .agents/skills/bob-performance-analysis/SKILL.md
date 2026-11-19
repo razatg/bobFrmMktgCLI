@@ -15,11 +15,11 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
 Before presenting analysis, check the selected account, exact dates, evidence coverage and conversion maturity. Use calculated outputs to verify totals and ratios; compare the main explanation with plausible alternatives. If a tool fails, resolve the specific issue and rerun the relevant check. Explain missing evidence or unresolved uncertainty; a successful tool call alone does not establish the interpretation.
 
-Start with `./bob brief --focus performance` (or `all` when explanations cross domains). The gateway's selected account is authoritative. Rules and evidence maturity come from the brief; unavailable evidence is not an empty finding. Use `./bob search` for relevant knowledge and history.
+Resolve the requested dates and search for an existing selected-account analysis/artifact first. Inspect its period, source coverage, freshness and applicable account rules; reuse and link it when it answers the question. For a new investigation or missing sections, use `./bob brief --focus performance` (or `all` when explanations cross domains), preferring saved evidence. The gateway's selected account is authoritative; unavailable evidence is not an empty finding.
 
 Recipes and fixed policies are baselines, not exclusive routes. Registered analysis operations may be used during ordinary investigations. Agree, hold or depart with evidence. Hard limits and explicit approval apply to everyone; no decision modes. Use current CLI help over legacy command examples.
 
-Record consequential recommendations, immutable evidence and a prediction with `./bob decision record` before execution; put its `decision_id` on the plan. Bid changes require `bid-budget-validate` before approval and `--approval-hash` at apply, which rechecks live state. Review the recorded prediction with `./bob decision review` after the observation window and conversion maturity. Do not infer outcomes from action names.
+Record consequential recommendations, immutable evidence and a prediction with `./bob decision record` before execution; put its `decision_id` on the plan. For bid changes, `bid-budget-validate` returns a draft hash offline; apply requires the exact approved hash and reads current settings. Do not run execution checks to answer an analysis or copy question. Review the recorded prediction with `./bob decision review` after the observation window and conversion maturity. Do not infer outcomes from action names.
 
 ## Operating Rules
 

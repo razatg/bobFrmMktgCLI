@@ -402,7 +402,7 @@ def schedule_command(value: str) -> str | None:
 
 def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity='', schedule_action=None, media_instruction=''):
     account_kt_path = f"wiki/{account_customer_id}/KT.md" if account_customer_id else 'wiki/<customer_id>/KT.md'
-    kt_guidance = "Selected-account rules and terminology: start with ./bob brief; its account_rules are authoritative. Use ./bob search for additional account knowledge and prior decisions. Do not load the whole wiki. Ask when a material account meaning is ambiguous. Respect explicit campaign exclusions.\n\n" if account_customer_id else ''
+    kt_guidance = "First search for an existing selected-account artifact/report with ./bob search, resolve the requested period and inspect matching report/source dates, coverage and current account rules. Reuse and link matching current work; do not regenerate merely because the user asks again. For a new investigation or missing evidence, use ./bob brief; its account_rules are authoritative. Do not load the whole wiki. Ask when a material account meaning is ambiguous. Respect explicit campaign exclusions.\n\n" if account_customer_id else ''
     schedule_mode = ''
     if schedule_action:
         action = {'sch':'create a weekly scheduled job', 'sch-run':'run an existing scheduled job now',
@@ -1176,11 +1176,11 @@ async def update_client_account(client_id: str, account_id: str, body: AccountUp
     if not account: raise HTTPException(404,'account not found')
     if len(customer_id)!=10: raise HTTPException(400,'customer ID must contain 10 digits')
     if s.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=? AND id<>?',(client_id,customer_id,account_id)): raise HTTPException(409,'account customer ID already exists')
-    name=body.account_name.strip() or customer_id
     supplied = body.model_fields_set
     merged = dict(account)
     merged.update(body.model_dump(exclude_unset=True))
     body = AccountUpdateIn(**{key: merged[key] for key in AccountUpdateIn.model_fields})
+    name=body.account_name.strip() or customer_id
     settings=account_settings(body)
     from lib.bob.platform.goals import account_goals, APPROACH_FIELDS
     goals = account_goals(dict(account, goals=json.loads(account['goals_json'])))

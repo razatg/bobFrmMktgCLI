@@ -6,8 +6,9 @@ Universal contract for agents working on Bob Frm Mktg. Bob is a CLI-first Google
 
 - Use `./bob` for the registered command map and `./bob <command> --help` for flags. Never invent commands. After setup, do not call `python3 lib/datapull.py` directly.
 - Choose skills by their frontmatter descriptions. Load the relevant recipe and only the references needed. Recipes and fixed policies are starting points, not exclusive routes or mandatory answers.
-- Start performance investigations with `./bob brief` for the selected account. Use `--focus` to bound work and `--offline` for snapshot-only analysis. Missing evidence is unavailable, not evidence of no problem.
-- Use `./bob skills search "<situation>"` to find recipes and `./bob search "<query>"` for account knowledge and prior decisions. Brief always carries account KT; do not load the whole wiki into context.
+- Before starting new work, check for an existing selected-account artifact/report that answers the request. Resolve the requested period, use `./bob search "<query>"`, inspect the matching artifact and its evidence dates/coverage, then reuse and link it when current and sufficient. A relative phrase such as “last week” must match the resolved dates. Refresh only missing/stale evidence or when requested; do not regenerate an artifact merely because a new question arrived.
+- For a new performance investigation or gaps in an existing report, use `./bob brief` for the selected account. Use `--focus` to bound work and `--offline` when saved data suffices. Missing evidence is unavailable, not evidence of no problem.
+- Use `./bob skills search "<situation>"` to find recipes and `./bob search "<query>"` for account knowledge and prior decisions. Brief carries account KT; inspect current applicable account rules when reusing a report. Do not load the whole wiki into context.
 - Normal investigations may compose registered analysis operations across performance, bids, budgets, creative evidence and change history. Wings It is an investigation recipe, not a last-resort permission gate.
 - Follow explicit user goals and priorities. Compare the baseline with alternative explanations; agree, hold or depart with evidence. There are no strict/advisory account modes.
 
@@ -26,8 +27,8 @@ Universal contract for agents working on Bob Frm Mktg. Bob is a CLI-first Google
 - Before a consequential recommendation is executed, record its evidence, goals, baseline, alternatives, prediction and review criteria with `./bob decision record`. Record holds and rejected/overridden recommendations too. Cited evidence is copied immutably.
 - Retain existing plan formats; link plans to the decision with `decision_id`. Execution receipts remain authoritative for actual outcomes.
 - Goals are loaded automatically through the brief. Acquisition costs, usual adjustment size, budget targets and preferred waiting periods are guidance, not marketing vetoes. Explain departures with evidence, trade-offs, risk, expected outcome and a review window; record them with the decision. If priorities are missing and the choice matters, ask.
-- Validate the final proposal before approval and at apply against live state. Account scope, explicit exclusions, permissions, valid values, duplicate prevention and exact-proposal approval remain enforced.
-- `bid-budget-validate` returns verdicts and the proposal hash. Apply only the exact explicitly approved plan, with that hash. Never interpret a recommendation request as permission to mutate Ads.
+- Review the saved final proposal before approval. Recheck current settings immediately before applying an approved change. Recommendations do not require execution-oriented live checks. Account scope, explicit exclusions, permissions, valid values, duplicate prevention and exact-proposal approval remain enforced.
+- `bid-budget-validate` checks the saved draft and returns its hash offline; it does not certify live eligibility. Apply only the exact explicitly approved plan, with that hash; apply reads current settings itself. Never interpret a recommendation request as permission to mutate Ads.
 - Do not resend successful operations or retry an unknown mutation outcome without reconciling live state. Describe partial failures accurately.
 - Review recorded predictions with `./bob decision review` after the observation window and conversion maturity. Verdicts are supported, contradicted or inconclusive; temporal association is not proof of causation. Do not infer an expected result from an action name.
 

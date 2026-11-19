@@ -12,10 +12,6 @@ def validate_copy(text: str, field: str, *, protected_terms: tuple[str, ...] = (
         return ("unsupported text field",)
     if not text.strip() or len(text) > limits[field]:
         errors.append("copy is empty or exceeds the character limit")
-    if field == "DESCRIPTION" and not text.rstrip().endswith((".", "!")):
-        errors.append("description must end with punctuation")
-    if text.count("!") > 1:
-        errors.append("copy contains more than one exclamation mark")
     if any(term.casefold() not in text.casefold() for term in protected_terms):
         errors.append("copy omitted a protected name")
     canonical = lambda value: " ".join(unicodedata.normalize("NFKC", value).casefold().split())

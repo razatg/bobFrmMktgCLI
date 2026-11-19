@@ -26,15 +26,9 @@ Always state the exact date windows used. Flag if a period is incomplete (e.g. M
 Bootstrap pre-fetches WoW, MoM, and MTD. Check what's available, then aggregate:
 
 ```bash
-# See which raw files exist
-ls garf/outputs/raw/account_network_period/
-
-# Aggregate all available account_network_period raw files
-./bob aggregate --grain account_network_period
-# Output lands in data/processed/account-network/
-
-# See processed outputs — date pairs in filenames identify each window
-ls data/processed/account-network/
+./bob data-manifest --query account_network_period --from <start> --to <end>
+# Repeat for each resolved comparison window; aggregate only the exact dates.
+./bob aggregate --grain account_network_period --from <start> --to <end>
 ```
 
 To re-fetch a specific period on demand:

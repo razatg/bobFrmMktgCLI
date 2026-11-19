@@ -12,40 +12,37 @@ Use for questions asking what caused performance to improve or deteriorate.
 - `account_network_period` slices for both comparison periods (Tier 1)
 - `campaign_network_period` slices for both comparison periods (Tier 2a)
 - `change_history` raw output for the same date window (Tier 2b — no extra fetch needed)
-- `adgroup_network_period` slices on demand for top deviating campaigns (Tier 3)
+- `adgroup_primary_conversion_period` slices on demand for top deviating campaigns (Tier 3)
 
 ## CLI Commands
 
 **Tier 1 — Account × Network (aggregated from bootstrap raw files):**
 ```bash
-ls garf/outputs/raw/account_network_period/
-./bob aggregate --grain account_network_period
-ls data/processed/account-network/
+./bob data-manifest --query account_network_period --from <start> --to <end>
+./bob aggregate --grain account_network_period --from <start> --to <end>
 ```
 
 **Tier 2a — Campaign × Network:**
 ```bash
-ls garf/outputs/raw/campaign_network_period/
-./bob aggregate --grain campaign_network_period
-ls data/processed/campaign-network/
+./bob data-manifest --query campaign_network_period --from <start> --to <end>
+./bob aggregate --grain campaign_network_period --from <start> --to <end>
 ```
 
 **Tier 2b — Change history correlation (no new fetch — reuse bootstrap output):**
 ```bash
-# Find the change history file
-ls garf/outputs/raw/change_history/
+./bob data-manifest --query change_history --from <start> --to <end>
 
 # Filter for a campaign and date window (read CSV and filter by campaign_id and changed_at date)
 # changed_at format: YYYY-MM-DD HH:MM:SS — compare first 10 chars to date range
 # campaign_id column matches the campaign IDs from Tier 2a output
 ```
 
-**Tier 3 — Ad Group × Network (on demand, not in bootstrap — fetch fresh):**
+**Tier 3 — Ad Group × Network (on demand; reuse complete local coverage first):**
 ```bash
-./bob fetch --query adgroup_network_period --from <start> --to <end>
-ls garf/outputs/raw/adgroup_network_period/
-./bob aggregate --grain adgroup_network_period
-ls data/processed/adgroup-network/
+./bob data-manifest --query adgroup_primary_conversion_period --from <start> --to <end>
+# Fetch only missing evidence, including --reason and --question.
+./bob fetch --query adgroup_primary_conversion_period --from <start> --to <end> --reason "ad-group drill-down" --question "<user question>"
+./bob aggregate --grain adgroup_primary_conversion_period --from <start> --to <end>
 ```
 
 ## Diagnosis Order
@@ -66,7 +63,7 @@ From Tier 2a: rank campaigns by absolute delta in primary goal and cost. Separat
 - Efficiency drivers: CTI % / conversion_rate % changed, impressions stable.
 
 **Step 4 — Ad group drill-down (Tier 3).**
-Trigger when: a single campaign accounts for > 30% of total delta OR user explicitly asks "which ad group". Fetch `adgroup_network_period` for the same date window and those campaign(s). Show which ad groups within the campaign drove the movement.
+Trigger when: a single campaign accounts for > 30% of total delta OR user explicitly asks "which ad group". Prepare `adgroup_primary_conversion_period` for the same date window and inspect those campaign(s). This supplies impressions, clicks, cost and primary conversions by ad group/network. Primary conversions are not separate installs or in-app conversions: label them explicitly and do not attribute an install/in-app delta using a different conversion definition.
 
 **Step 5 — Change history overlay.**
 For every campaign identified in Steps 3–4, call `correlate_change_history()` for the comparison period. Surface any bid, budget, conversion action, status, or asset changes that overlap in time and entity. State the change and its proximity to the performance shift. Do not assert causality from timing alone — say "change coincides with shift" not "change caused shift".

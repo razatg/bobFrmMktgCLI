@@ -26,15 +26,9 @@ Use for questions like:
 Bootstrap pre-fetches these. Check what's available, then aggregate:
 
 ```bash
-# See which raw files exist
-ls garf/outputs/raw/account_network_period/
-
-# Aggregate all available account_network_period raw files
-./bob aggregate --grain account_network_period
-# Output lands in data/processed/account-network/
-
-# See processed outputs — pick the yesterday and SDLW files by date in filename
-ls data/processed/account-network/
+./bob data-manifest --query account_network_period --from <start> --to <end>
+# Repeat for yesterday and SDLW using their resolved exact dates.
+./bob aggregate --grain account_network_period --from <start> --to <end>
 ```
 
 To re-fetch if missing:

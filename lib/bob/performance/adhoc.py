@@ -23,8 +23,15 @@ MAX_SECONDS = 60.0
 BASE_METRICS = ("impressions", "clicks", "cost", "installs", "in_app_conversions")
 DERIVED_METRICS = (
     "goal_conversions", "cpm", "frequency", "ctr_percent", "cpc",
-    "cti_percent", "conversion_rate_percent", "cpa", "cpi",
+    "cti_percent", "conversion_rate_percent", "cpa", "cpi", "primary_cpa",
 )
+METRIC_INPUTS = {
+    'goal_conversions': ('goal',), 'cpm': ('cost', 'impressions'),
+    'frequency': ('impressions', 'reach'), 'ctr_percent': ('clicks', 'impressions'),
+    'cpc': ('cost', 'clicks'), 'cti_percent': ('installs', 'clicks'),
+    'conversion_rate_percent': ('goal', 'clicks'), 'cpa': ('cost', 'goal'),
+    'cpi': ('cost', 'installs'), 'primary_cpa': ('cost', 'primary_conversions'),
+}
 ALLOWED_JOIN_KEYS = {
     ("customer_id",),
     ("campaign_id",),
@@ -133,7 +140,10 @@ def catalog() -> dict[str, object]:
                 "additive_metrics": list(spec.additive_metrics),
                 "non_additive_metrics": list(spec.numeric_fields),
                 "derived_metrics": [
-                    metric for metric in DERIVED_METRICS if spec.additive_metrics and (metric != "frequency" or spec.allows_reach)
+                    metric for metric in DERIVED_METRICS
+                    if set(METRIC_INPUTS[metric]).issubset(
+                        set(spec.additive_metrics) | set(spec.numeric_fields) |
+                        ({'goal'} if {'installs', 'in_app_conversions'}.issubset(spec.additive_metrics) else set()))
                 ],
                 "reach_restriction": (
                     "reach and frequency remain at campaign grain" if spec.allows_reach else "unavailable"
@@ -275,8 +285,6 @@ def _group_sum(
     grouped: dict[tuple[Scalar, ...], Row] = {}
     for row in rows:
         key = tuple(row[column] for column in keys)
-        if any(value in (None, "") for value in key):
-            raise AnalysisError("join keys must not be missing")
         target = grouped.setdefault(key, {column: row[column] for column in keys})
         for metric in metrics:
             target[metric] = number(target.get(metric)) + number(row.get(metric))
@@ -297,6 +305,8 @@ def _join(tables: dict[str, list[Row]], operation: dict[str, object]) -> tuple[l
     left, right = tables[left_name], tables[right_name]
     _require_columns(left, keys)
     _require_columns(right, keys)
+    if any(row[column] in (None, '') for row in left + right for column in keys):
+        raise AnalysisError('join keys must not be missing')
     right_index: dict[tuple[Scalar, ...], Row] = {}
     for row in right:
         key = tuple(row[column] for column in keys)
@@ -332,13 +342,17 @@ def _derive_standard_metric(
         raise AnalysisError(f"unknown derived metrics: {', '.join(invalid)}")
     if "frequency" in metrics and rows and "reach" not in rows[0]:
         raise AnalysisError("frequency is unavailable without campaign-grain reach")
-    _require_columns(rows, list(BASE_METRICS))
+    goal = 'installs' if primary_goal == 'installs' else 'in_app_conversions'
+    required = {goal if field == 'goal' else field for metric in metrics for field in METRIC_INPUTS[metric]}
+    _require_columns(rows, sorted(required))
     output: list[Row] = []
     for row in rows:
         values = {metric: number(row.get(metric)) for metric in BASE_METRICS}
         if "reach" in row:
             values["reach"] = number(row.get("reach"))
         derived = derive_metrics(values, primary_goal)
+        conversions = number(row.get('primary_conversions'))
+        derived['primary_cpa'] = 'NA' if not conversions else str(number(row.get('cost')) / conversions)
         updated = dict(row)
         for metric in metrics:
             value = derived[metric]

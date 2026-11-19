@@ -4,7 +4,8 @@
 
 1. Run `bid-budget-recommend` to generate the plan.
 2. Show the plan to the user for review.
-3. Only after explicit approval ("make it live", "apply it", "go ahead") — run `bid-budget-apply`.
+3. Record/link the decision, get the saved draft's hash with `bid-budget-validate` (offline), and obtain approval for that exact proposal.
+4. Only after explicit approval ("make it live", "apply it", "go ahead") — run `bid-budget-apply`. It reads current campaign settings before executing. If that read times out, no mutation is sent; report the execution blocker without withdrawing the earlier recommendation.
 
 ## Step 1 — Generate Plan
 

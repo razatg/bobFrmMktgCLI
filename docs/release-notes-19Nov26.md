@@ -6,6 +6,16 @@ This update gives Bob more context for recommendations and a lasting record of d
 
 ## What’s new and how to use it
 
+### Reuse earlier work
+Ask “What happened last week?” or “Show me that creative proposal again.” Bob first searches saved account reports and artifacts, checks that their dates and evidence match, and links suitable existing work. It fills gaps or refreshes stale evidence when needed. You do not need to ask Bob to search first.
+
+### Recommendations without an extra live check
+Asking which bids or budgets to change no longer triggers an execution-validation request to Google Ads. Saved marketing targets and preferred waiting periods inform the recommendation. Bob checks current campaign settings when applying the exact proposal you approve; an execution timeout does not invalidate the earlier analysis.
+
+Creative proposals also retain the existing suggestion format. If you approve 26 out of 32 candidates, Bob can save those exact 26 with their supporting evidence for review and execution.
+
+Descriptions without a full stop can still be saved and applied; Bob reviews punctuation as a writing choice. Reporting also reuses complete saved date ranges, keeps primary conversions distinct from installs, and requests whole-period reach rather than adding weekly unique users. Older long-period reach reports may need rebuilding before reuse.
+
 ### Recommendations with more context
 Bob can bring together performance, creative results, recent changes, account goals and earlier decisions before recommending a next step. It can investigate beyond the usual recommendation when the evidence supports it, or recommend waiting.
 

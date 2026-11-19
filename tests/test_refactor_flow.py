@@ -15,6 +15,215 @@ from lib.bob.search import search
 
 
 class EvidenceFlowTests(unittest.TestCase):
+    def test_recommendation_stays_offline_and_does_not_skip_on_reference_or_wait(self):
+        import argparse
+        import contextlib
+        import io
+        import yaml
+        from unittest.mock import patch
+        from lib.bob.bid_budget import bid_budget_recommend
+        trend = {'customer_id': self.account, 'campaign_id': '1', 'campaign_name': 'Campaign',
+                 'campaign_status': 'ENABLED', 'current_iso_week': '47', 'prior1_iso_week': '46', 'prior2_iso_week': '45'}
+        for week, cost in ((47, 330), (46, 400), (45, 400)):
+            trend.update({f'w{week}_cost': cost, f'w{week}_installs': 1000,
+                          f'w{week}_impressions': 1000, f'w{week}_in_app_conversions': 1})
+        history = self.root / 'history.csv'
+        history.touch()
+        budget = self.root / 'budget.csv'
+        inputs = [{'customer_id': self.account, 'campaign_id': '1', 'daily_budget': 100,
+                   'target_cpa': 100, 'campaign_budget_id': '2', 'cost': 100}]
+        def read(path):
+            if Path(path) == self.path:
+                return [trend]
+            if Path(path) == budget:
+                return inputs
+            return [{'campaign_id': '1', 'change_resource_type': 'CAMPAIGN', 'operation': 'UPDATE', 'changed_at': '2026-11-16'}]
+        final = self.root / 'recommendation.yaml'
+        with patch('lib.bob.bid_budget.load_profile', return_value={'google_ads_customer_id': self.account}), \
+             patch('lib.bob.bid_budget.bid_budget_trend_path', return_value=(self.path, [])), \
+             patch('lib.bob.bid_budget.validate_bid_budget_trend_rows'), \
+             patch('lib.bob.bid_budget.read_csv', side_effect=read), \
+             patch('lib.bob.bid_budget.find_newest_raw_for_customer', return_value=history), \
+             patch('lib.bob.bid_budget.today', return_value=dt.date(2026, 11, 19)), \
+             patch('lib.bob.bid_budget.guards.read_live_state', side_effect=AssertionError('recommendation must not query live execution state')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            bid_budget_recommend(argparse.Namespace(goal=None, cac_ceiling=None, change_pct=None,
+                trend=str(self.path), bid_budget=str(budget), output=str(self.root/'recommendation.csv'),
+                yaml_output=str(final), dry_run=False))
+        saved = yaml.safe_load(final.read_text())
+        self.assertEqual(len(saved['changes']), 1)
+        self.assertEqual(saved['skipped'], [])
+        self.assertIn('Review guidance:', saved['changes'][0]['rationale'])
+        self.assertFalse(saved['changes'][0]['cooldown_ok'])
+        self.assertFalse(saved['changes'][0]['cac_guard_passed'])
+
+    def test_grouping_allows_blank_categories_but_join_requires_identity(self):
+        from lib.bob.performance.adhoc import _group_sum, _join, AnalysisError
+        rows = [{'network': '', 'cost': 10}, {'network': '', 'cost': 20}]
+        grouped, _ = _group_sum({'source': rows}, {'input': 'source', 'group_by': ['network'], 'metrics': ['cost']}, {'cost'})
+        self.assertEqual(grouped, [{'network': '', 'cost': 30}])
+        with self.assertRaisesRegex(AnalysisError, 'join keys'):
+            _join({'left': [{'campaign_id': ''}], 'right': [{'campaign_id': ''}]},
+                  {'left': 'left', 'right': 'right', 'on': ['campaign_id']})
+
+    def test_context_aggregation_accepts_explicit_input_with_no_input_paths(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest.mock import patch
+        from lib.bob.performance.aggregate import _agg_context
+        source = self.root / 'events.csv'
+        source.write_text('campaign_id,changed_at\n1,2026-11-19\n')
+        with patch('lib.bob.performance.aggregate.account_processed_dir', return_value=self.root/'context'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            _agg_context(argparse.Namespace(customer=self.account, grain='change_history', input=str(source),
+                input_paths=None, from_date='2026-11-19', to='2026-11-19'), {})
+        self.assertIn('2026-11-19', next((self.root/'context').glob('*.csv')).read_text())
+
+    def test_generated_copy_accepts_agent_subset_and_complete_rows_through_mock_apply(self):
+        import argparse
+        import contextlib
+        import io
+        import yaml
+        from unittest.mock import patch
+        from lib.bob.creative_copy.suggest import suggest_creative_copy
+        from lib.bob.creative_copy.apply import creative_copy_propose
+        from tests.test_core import TestCreativeCopyApply
+        wiki = self.root / 'wiki' / self.account
+        rows = []
+        for i in range(1, 34):
+            rows.append({'customer_id': self.account, 'campaign_id': '1', 'campaign_name': 'Campaign',
+                'ad_group_id': str(100 + i), 'ad_group_name': 'Group', 'asset_id': str(300 + i),
+                'asset_view_resource_name': f'customers/{self.account}/adGroupAdAssetViews/{100+i}~{200+i}~{300+i}~HEADLINE',
+                'asset_type': 'TEXT', 'field_type': 'HEADLINE', 'asset_text': f'Old copy {i}',
+                'performance_label': 'LOW' if i <= 32 else 'GOOD', 'impressions': 100000,
+                'clicks': 100 if i <= 32 else 10000, 'installs': 1 if i <= 32 else 1000,
+                'cost': 10000, 'ctr_percent': .1 if i <= 32 else 10,
+                'cti_percent': 1 if i <= 32 else 10, 'cpc': 100 if i <= 32 else 1})
+        profile = {'google_ads_customer_id': self.account}
+        with patch('lib.bob.creative_copy.suggest.load_profile', return_value=profile), \
+             patch('lib.bob.creative_copy.suggest._creative_processed_paths', return_value=[self.path]), \
+             patch('lib.bob.creative_copy.suggest.read_csv', return_value=rows), contextlib.redirect_stdout(io.StringIO()):
+            suggest_creative_copy(argparse.Namespace(output_dir=str(wiki), batch_size=25, min_impressions=None))
+        original = next(wiki.glob('*.yaml'))
+        original_bytes = original.read_bytes()
+        candidates = yaml.safe_load(original_bytes)['changes']
+        self.assertEqual(len(candidates), 32)
+        final = wiki / 'selected.yaml'
+        for shape in ('agent', 'complete'):
+            if shape == 'agent':
+                choices = [{'id': i, 'text': f'New copy {i}'} for i in range(7, 33)]
+            else:
+                choices = [dict(row, suggested_text=f'New copy {i}') for i, row in enumerate(candidates, 1) if i >= 7]
+            with patch('lib.bob.creative_copy.apply.load_profile', return_value=profile), \
+                 patch('lib.bob.creative_copy.apply.account_wiki_dir', return_value=wiki), contextlib.redirect_stdout(io.StringIO()):
+                creative_copy_propose(argparse.Namespace(plan=str(original), output=str(final), changes_json=json.dumps(choices)))
+            saved = yaml.safe_load(final.read_text())
+            self.assertEqual(len(saved['changes']), 26)
+            self.assertEqual([row['asset_id'] for row in saved['changes']], [row['asset_id'] for row in candidates[6:]])
+            self.assertEqual(saved['changes'][0]['ctr_percent'], candidates[6]['ctr_percent'])
+            self.assertEqual(saved['changes'][0]['suggested_text'], 'New copy 7')
+            self.assertEqual(original.read_bytes(), original_bytes)
+        saved['decision_id'] = self.record()['decision_id']
+        adapter = TestCreativeCopyApply()
+        self.addCleanup(adapter.doCleanups)
+        live = [adapter._row(100+i, 200+i, [f'Old copy {i}'], ['Existing description.']) for i in range(1, 34)]
+        with patch('lib.bob.creative_copy.apply.STATE_ROOT', self.root):
+            applied_path, _, client, error = adapter._run(saved, [], live)
+        self.assertIsNone(error)
+        self.assertTrue(yaml.safe_load(applied_path.read_text())['applied'])
+        requests = client.google_ads_service.mutate_calls
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests[-1].mutate_operations), 26)
+
+    def test_writers_preserve_execution_receipts_and_accept_generated_bid_rows(self):
+        import argparse
+        import contextlib
+        import io
+        import yaml
+        from unittest.mock import patch
+        from lib.bob.bid_budget import bid_budget_propose
+        from lib.bob.creative_copy.apply import creative_copy_propose
+        wiki = self.root / 'wiki' / self.account
+        wiki.mkdir(parents=True)
+        source, target = wiki / 'baseline.yaml', wiki / 'final.yaml'
+        bid = {'campaign_id': '1', 'campaign_name': 'Campaign', 'field': 'target_cpa',
+               'current_target_cpa': 100, 'proposed_target_cpa': 110, 'proposed_daily_budget': None,
+               'action': 'increase_bid', 'rationale': 'Evidence supports scale', 'forecast': 'Review volume in a week',
+               'w0_cpi': 20, 'cooldown_ok': True}
+        plan = {'customer_id': self.account, 'changes': [bid], 'applied': False}
+        source.write_text(yaml.safe_dump(plan))
+        args = argparse.Namespace(plan=str(source), output=str(target), changes_json=json.dumps([bid]))
+        with patch('lib.bob.bid_budget.load_profile', return_value={'google_ads_customer_id': self.account}), \
+             patch('lib.bob.bid_budget.account_wiki_dir', return_value=wiki), contextlib.redirect_stdout(io.StringIO()):
+            bid_budget_propose(args)
+        self.assertEqual(yaml.safe_load(target.read_text())['changes'][0]['w0_cpi'], 20)
+        plan['apply_results'] = [{'campaign_id': '1', 'status': 'ok'}]
+        source.write_text(yaml.safe_dump(plan))
+        previous = target.read_bytes()
+        for module, writer in [('lib.bob.bid_budget', bid_budget_propose), ('lib.bob.creative_copy.apply', creative_copy_propose)]:
+            with patch(module + '.load_profile', return_value={'google_ads_customer_id': self.account}), \
+                 patch(module + '.account_wiki_dir', return_value=wiki), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                writer(args)
+            self.assertEqual(target.read_bytes(), previous)
+
+    def test_offline_bid_hash_needs_no_credentials_and_live_state_reads_only_settings(self):
+        import argparse
+        import contextlib
+        import io
+        import yaml
+        from types import SimpleNamespace as NS
+        from unittest.mock import Mock, patch
+        from lib.bob.bid_budget import bid_budget_validate
+        from lib.bob.bid_budget.guards import read_live_state
+        plan = {'customer_id': self.account, 'changes': [], 'applied': False}
+        path = self.root / 'draft.yaml'
+        path.write_text(yaml.safe_dump(plan))
+        output = io.StringIO()
+        with patch('lib.bob.bid_budget.load_profile', return_value={'google_ads_customer_id': self.account}), \
+             patch('lib.bob.bid_budget._runtime_write_config_path', side_effect=AssertionError('must stay offline')), \
+             contextlib.redirect_stdout(output):
+            bid_budget_validate(argparse.Namespace(plan=str(path)))
+        result = json.loads(output.getvalue())
+        self.assertFalse(result['live_checked'])
+        self.assertEqual(result['plan_hash'], plan_hash(plan))
+        service = Mock()
+        service.search.return_value = [NS(campaign=NS(id=1, status=NS(name='ENABLED'), target_cpa=NS(target_cpa_micros=100000000)),
+                                          campaign_budget=NS(id=2, amount_micros=1000000000))]
+        states = read_live_state(NS(get_service=lambda name: service), self.account, dt.date(2026, 11, 19), 14)
+        self.assertEqual(states['1'].target_cpa, 100)
+        self.assertIsNone(states['1'].installs)
+        self.assertEqual(service.search.call_count, 1)
+        query = service.search.call_args.kwargs['query']
+        self.assertNotIn('metrics.', query)
+        self.assertNotIn('change_event', query)
+        self.assertNotIn('segments.date', query)
+
+    def test_approved_bid_apply_stops_before_mutation_when_current_settings_time_out(self):
+        import argparse
+        import contextlib
+        import io
+        import sys
+        import yaml
+        from unittest.mock import Mock, patch
+        from lib.bob.bid_budget import bid_budget_apply
+        from tests.test_core import TestCreativeCopyApply
+        plan = {'customer_id': self.account, 'changes': [{'campaign_id': '1', 'action': 'increase_bid',
+                                                        'proposed_target_cpa': 110}], 'applied': False}
+        path = self.root / 'approved.yaml'
+        path.write_text(yaml.safe_dump(plan))
+        before = path.read_bytes()
+        client = Mock()
+        with patch.dict(sys.modules, TestCreativeCopyApply()._modules(client)), \
+             patch('lib.bob.bid_budget._require_write_permission'), \
+             patch('lib.bob.bid_budget._runtime_write_config_path', return_value=self.root/'credentials.yaml'), \
+             patch('lib.bob.bid_budget.load_profile', return_value={'google_ads_customer_id': self.account}), \
+             patch('lib.bob.bid_budget.guards.read_live_state', side_effect=TimeoutError('current settings timed out')), \
+             contextlib.redirect_stdout(io.StringIO()), self.assertRaises(TimeoutError):
+            bid_budget_apply(argparse.Namespace(plan=str(path), approval_hash=plan_hash(plan)))
+        client.get_service.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
     def test_copy_save_returns_row_errors_then_accepts_corrected_draft(self):
         import argparse
         import contextlib
@@ -112,6 +321,9 @@ class EvidenceFlowTests(unittest.TestCase):
             if dataset == 'change_history':
                 raise AnalysisError('missing events')
             return prepared, {'source': str(self.path)}
+        kt = self.root / 'wiki' / self.account / 'KT.md'
+        kt.parent.mkdir(parents=True)
+        kt.write_text('Account guidance.\n' * 1100)
         with patch('lib.bob.brief.selected_account', return_value=(self.account, {'primary_goal': 'installs'})), \
              patch('lib.bob.brief._prepare', side_effect=prepare), \
              patch('lib.bob.platform.core.STATE_ROOT', self.root):
@@ -119,6 +331,7 @@ class EvidenceFlowTests(unittest.TestCase):
         self.assertEqual(result['sections']['campaign_network_period:current']['status'], 'available')
         self.assertEqual(result['sections']['change_history:current']['status'], 'unavailable')
         self.assertEqual(result['fetches'], 0)
+        self.assertEqual(result['account_rules'], kt.read_text())
         self.assertEqual(float(result['sections']['campaign_network_period:current']['account_totals'][0]['cpi']), 20)
 
     def test_mcp_decision_persists_transformed_result_and_its_inputs(self):
@@ -282,9 +495,9 @@ class FinalPlanTests(unittest.TestCase):
         self.plan['changes'][0]['proposed_target_cpa'] = 105
         self.assertNotEqual(plan_hash(self.plan), approved)
 
-    def test_copy_names_punctuation_and_peer_duplicates(self):
-        self.assertTrue(validate_copy('Try the app', 'DESCRIPTION'))
-        self.assertTrue(validate_copy('Try it!!', 'HEADLINE'))
+    def test_copy_names_and_duplicates_are_checked_but_style_is_advisory(self):
+        self.assertEqual(validate_copy('Try the app', 'DESCRIPTION'), ())
+        self.assertEqual(validate_copy('Try it!!', 'HEADLINE'), ())
         self.assertTrue(validate_copy('Explore a new place.', 'DESCRIPTION', protected_terms=('Landmark',)))
         self.assertTrue(validate_copy(' TRY IT ', 'HEADLINE', existing_good=('Try it',)))
         self.assertEqual(validate_copy('Try the app.', 'DESCRIPTION'), ())

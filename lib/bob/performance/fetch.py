@@ -173,6 +173,9 @@ def fetch(args: argparse.Namespace) -> None:
     Asset-specific creative queries intentionally use the configured total lookback
     window as one server-filtered request; they are not daily-segmented or split.
     """
+    if args.query == 'adgroup_network_period':
+        die('adgroup_network_period is retired for new fetches; use adgroup_primary_conversion_period. '
+            'Its primary_conversions are not separate installs or in-app conversions. Saved historical files remain readable.')
     if args.query in CREATIVE_ASSET_QUERIES.values():
         profile = load_profile(required=not bool(args.account))
         if not args.from_date and not args.to and not args.days:
@@ -184,6 +187,12 @@ def fetch(args: argparse.Namespace) -> None:
         return
 
     start, end = resolve_range(args)
+    if not getattr(args, 'force', False):
+        profile = load_profile(required=not bool(args.account))
+        account = args.account or profile.get('google_ads_customer_id')
+        if find_raw_file_for_period(args.query, start, end, account):
+            _fetch_one(args)
+            return
     windows = split_date_range(start, end)
     if len(windows) == 1:
         _fetch_one(args)

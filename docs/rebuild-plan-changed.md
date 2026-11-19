@@ -3,6 +3,25 @@
 Author: Rajat · Date: 2026-11-18
 Architecture: `architecture-proposal-changed.md`
 
+**19 November query compatibility follow-up:**
+
+- [x] Register existing primary-conversion and context aggregations in the CLI; calculate and advertise only metrics with available inputs. Keep primary CPA distinct from install/in-app CPA.
+- [x] Retire new fetches of the incompatible ad-group app-conversion query, preserving the old aggregation route for historical files. Update recipes to the supported query and explain the conversion-definition difference.
+- [x] Reuse complete exact-period raw files before looking for weekly chunks. Fetch campaign reach for the whole period, reject chunk summation, and rebuild long-period legacy reach caches without whole-period provenance. Apply the same provenance check to dataset preparation.
+- [x] Keep punctuation preferences in writing guidance; remove punctuation-only save/apply vetoes that rejected previously accepted copy.
+- [x] Compare with pre-refactor commit `a7de598`: all 77 original core tests pass against current code, retaining their expected outputs. Creative test transport/profile fixtures were adapted for added reads. The isolated original suite ran 247 tests with one existing client-fixture hygiene failure; it was not a fully green baseline.
+- [x] Final local verification: **290 tests passed**, including CLI handoff, compatible derived metrics, complete-range cache reuse, whole-period reach and rejection of unsafe reach caches. Compilation and diff checks passed.
+- [ ] Read-only staging verification of the supported queries against Google Ads. Local/mock verification does not establish provider compatibility.
+
+**19 November compatibility audit (supersedes live-validation and brief-first wording below):**
+
+- [x] Search saved selected-account artifacts before new analysis; inspect resolved dates, evidence coverage and current account rules. Reuse and link sufficient work. Brief fills gaps or starts new investigations. Updated the hosted prompt, AGENTS and relevant recipes.
+- [x] Make `bid-budget-validate` an offline saved-draft check/hash. Recommendations require no execution-oriented live validation. Apply reads current campaign settings in one query; performance and change-history fetches are no longer prerequisites to execution validation. Exact approval and execution protections remain.
+- [x] Treat acquisition-cost, volume and preferred-wait references as recommendation guidance rather than automatic skips.
+- [x] Preserve generated copy/bid proposal formats and supporting evidence. Verify the existing compact copy suggestions can select and apply exactly 26 of 32 candidates through a mocked Ads client. Reject rewriting plans with execution receipts.
+- [x] Fix blank-category grouping versus missing join identities, explicit-input context aggregation, long account KT, and partial account updates preserving names.
+- [x] Regression verification: **282 tests passed**, compilation and diff checks passed. Tests include offline validation without credentials and a live-settings timeout stopping apply before mutation. No live Ads mutations or paid creative generation were performed; staging acceptance remains open.
+
 **19 November verification revision (supersedes automatic-answer-check steps below):** Remove the universal answer checker and gateway repair loop. Bob verifies work through task-specific skill guidance and tool feedback, corrects recoverable failures and rechecks, and explains uncertainty. Existing domain/execution checks remain enforced. The copy-save command returns row errors before saving an invalid proposal. Historical answer-check checklist items and numerical-check test counts below describe the earlier implementation, not the current acceptance criteria. Current regression verification: **275 tests passed**, including copy-save failure/correction, direct prose and legacy-envelope handling, and existing approval/execution protections. Python compilation and diff checks passed. Agent judgement still requires live staging acceptance.
 
 Status: final agreed refactor delivery proposal, updated 2026-11-19. Checkboxes indicate verified implementation only; the proposal itself does not mean the refactor has shipped.

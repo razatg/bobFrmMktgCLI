@@ -13,13 +13,15 @@ Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
 ## Investigation contract
 
-Before presenting a proposal, verify its saved values against current account evidence and goals. Explain the trade-offs, risk, prediction and review window. Run the existing bid-budget validation command, inspect its findings and correct/recheck recoverable failures. Read the saved final plan before displaying it; show warnings about departures. Do not execute a change as part of verification or interpret a tool result as approval.
+Before presenting a proposal, verify its saved values against available account evidence and goals. Explain the trade-offs, risk, prediction and review window. Read the saved final plan before displaying it; show warnings about departures. Do not run execution-oriented live checks to produce recommendations. Do not execute a change as part of verification or interpret a tool result as approval.
 
-Start with `./bob brief --focus bids` (or `all` when explanations cross domains). The gateway's selected account is authoritative. Rules and evidence maturity come from the brief; unavailable evidence is not an empty finding. Use `./bob search` for relevant knowledge and history.
+Do not run live proposal validation merely to answer which changes to consider. Diagnose from available performance, goals, utilisation, recent changes and uncertainty first. The baseline's holds/skips are not your final judgement: investigate alternatives and explain whether its reasoning fits. An acquisition-cost reference or preferred waiting period cannot by itself justify a hold. A Google Ads timeout is an unavailable live check, not evidence that a marketing recommendation is wrong. Describe the recommendation and uncertainty; retry the necessary live checks before execution, never bypass them.
+
+Search existing selected-account analyses and plans first; inspect their period, evidence, application status and scope. Reuse matching current work. For a new investigation or missing evidence, use `./bob brief --focus bids` (or `all` when explanations cross domains). The gateway's selected account is authoritative; unavailable evidence is not an empty finding. Reusing a report never reuses its execution approval.
 
 Recipes and saved Goals are baselines, not exclusive routes or marketing vetoes. Goals are included automatically in the brief; the user need not mention them. Acquisition cost references, usual change size and preferred wait periods guide judgement. Depart with executed evidence, a trade-off/risk explanation, expected outcome and review window. Set rationale and forecast on each departing proposal and record the decision. Account scope, explicit exclusions, valid values, permissions and exact-proposal approval remain enforced. Use current CLI help over legacy examples.
 
-Record consequential recommendations, immutable evidence and a prediction with `./bob decision record` before execution; put its `decision_id` on the plan. Bid changes require `bid-budget-validate` before approval and `--approval-hash` at apply, which rechecks live state. Review the recorded prediction with `./bob decision review` after the observation window and conversion maturity. Do not infer outcomes from action names.
+Record consequential recommendations, immutable evidence and a prediction with `./bob decision record` before execution; put its `decision_id` on the plan. `bid-budget-validate` is an offline draft check/hash, not a Google Ads eligibility check. Show the exact proposal and obtain explicit approval; apply checks current settings and requires that approved hash. Review the recorded prediction with `./bob decision review` after the observation window and conversion maturity. Do not infer outcomes from action names.
 
 ## Saving a final departure
 
@@ -61,7 +63,7 @@ Use `./bob bid-budget-propose --plan <baseline> --changes-json '<final actions>'
 
 The brief prepares available evidence and reports gaps. If the full baseline is needed, use current `bid-budget-recommend --help` and its exact-window prerequisites; use `data-manifest` before fetching. Do not run write-credential setup as a prerequisite for read-only investigation. Hosted authorization is managed by the gateway.
 
-Save the final choice with the registered proposal command, record and link its prediction, then validate before approval. The apply command re-reads live state and requires the exact approved hash. A baseline hold does not prevent further investigation.
+Save the final choice with the registered proposal command, record and link its prediction, then get the draft hash offline for approval. The apply command reads current settings and requires the exact approved hash. A baseline hold does not prevent further investigation.
 
 ## Post-Apply Wiki Update
 

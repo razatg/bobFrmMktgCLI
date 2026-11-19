@@ -167,18 +167,13 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
             "cooldown_ok": str(cooldown_ok),
         }
 
+        guidance_notes = []
         if not vol_ok:
-            skipped.append({"campaign_id": cid, "campaign_name": cname,
-                            "reason": f"W{w0_iso} installs {w0_inst:.0f} below minimum {min_installs}"})
-            continue
+            guidance_notes.append(f'recent install volume is below the usual {min_installs} reference')
         if not cac_ok:
-            skipped.append({"campaign_id": cid, "campaign_name": cname,
-                            "reason": f"W{w0_iso} CPA {w0_cpa:.2f} exceeds CAC ceiling {cac_ceiling:.0f}"})
-            continue
+            guidance_notes.append(f'acquisition cost is above the {cac_ceiling:g} reference or conversion evidence is missing')
         if not cooldown_ok:
-            skipped.append({"campaign_id": cid, "campaign_name": cname,
-                            "reason": f"changed {days_since_change}d ago ({last_change}) — within {cooldown_days}-day cooldown"})
-            continue
+            guidance_notes.append(f'a recent change is within the preferred {cooldown_days}-day waiting period')
         if ref_cpi == 0:
             skipped.append({"campaign_id": cid, "campaign_name": cname,
                             "reason": "insufficient prior-week data for CPI reference"})
@@ -246,6 +241,8 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
         if "budget" in action and daily_budget > 0:
             new_bgt = daily_budget * (1 + change_pct / 100) if "increase" in action else daily_budget * (1 - change_pct / 100)
 
+        if guidance_notes:
+            rationale += '. Review guidance: ' + '; '.join(guidance_notes)
         changes.append({
             **base_info,
             "action": action,
@@ -271,6 +268,8 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
                 f"{_fmt_display(c['current_daily_budget'], 'cost', _currency_symbol(profile.get('currency', ''))):>10}  "
                 f"{_fmt_display(c.get('proposed_daily_budget', 'NA'), 'cost', _currency_symbol(profile.get('currency', ''))):>10}"
             )
+            if 'Review guidance:' in c['rationale']:
+                print('    ' + c['rationale'].split('Review guidance:', 1)[1].strip())
 
     if args.dry_run:
         print("\n[dry-run] no files written")
@@ -360,19 +359,34 @@ def bid_budget_propose(args: argparse.Namespace) -> None:
     plan = yaml.safe_load(original.read_text())
     if str(plan.get('customer_id', '')).replace('-', '') != account or plan.get('applied'):
         die('baseline must be unapplied and belong to the selected account')
+    if plan.get('apply_results') or plan.get('applied_at'):
+        die('execution has started; preserve receipts and reconcile or retry the existing plan')
     changes = json.loads(args.changes_json)
     allowed = {'campaign_id', 'campaign_name', 'action', 'proposed_target_cpa', 'proposed_daily_budget',
                'campaign_budget_id', 'rationale', 'forecast'}
     if not isinstance(changes, list) or len(changes) > 1000:
         die('changes must be a bounded list')
+    baseline = {str(row['campaign_id']): row for row in plan.get('changes', [])}
+    merged = []
     for change in changes:
-        if not isinstance(change, dict) or set(change) - allowed or not change.get('rationale'):
-            die('each proposal requires supported fields and an evidence-backed rationale')
+        if not isinstance(change, dict):
+            die('each proposal must be an object')
+        base = baseline.get(str(change.get('campaign_id', '')), {})
+        unexpected = set(change) - allowed - set(base)
+        if unexpected:
+            die('unsupported bid proposal fields: ' + ', '.join(sorted(unexpected)))
+        change = dict(base, **change)
+        if not change.get('rationale'):
+            die('each proposal requires an evidence-backed rationale')
         if not str(change.get('campaign_id', '')).isdigit():
             die('each proposal requires an exact campaign ID')
         for field in ('proposed_target_cpa', 'proposed_daily_budget'):
             if change.get(field) is not None and not math.isfinite(float(change[field])):
                 die('proposed values must be finite')
+        merged.append(change)
+    changes = merged
+    if len({str(row['campaign_id']) for row in changes}) != len(changes):
+        die('duplicate campaign actions')
     plan.setdefault('baseline_changes', plan.get('changes', []))
     plan.update(changes=changes, decision_required=True, applied=False)
     for field in ('approved_hash', 'apply_results', 'applied_at', 'applied_by', 'decision_id'):
@@ -380,25 +394,24 @@ def bid_budget_propose(args: argparse.Namespace) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(plan, sort_keys=False, allow_unicode=True))
     print(json.dumps({'proposal': str(target), 'plan_hash': plan_hash(plan),
-                      'status': 'proposed; requires decision, live validation and explicit approval'}))
+                      'status': 'draft; requires decision and explicit approval; current state checked at apply'}))
 
 
 def bid_budget_validate(args: argparse.Namespace) -> None:
-    """Show a live verdict and the exact proposal hash before approval."""
+    """Return an offline draft check and approval hash; live checks belong at apply."""
     import json
     import yaml
-    from google.ads.googleads.client import GoogleAdsClient
-    from .guards import plan_hash, read_live_state, validate_plan
+    from .guards import plan_hash
     plan = yaml.safe_load(Path(args.plan).read_text())
     profile = load_profile(required=True)
     customer = str(profile["google_ads_customer_id"]).replace("-", "")
-    client = GoogleAdsClient.load_from_storage(str(_runtime_write_config_path()))
-    states = read_live_state(client, customer, today(), int(profile.get("bid_budget_cooldown_days", 14)))
-    verdicts = validate_plan(plan, profile, states, on_date=today(), permission="read_write",
-                             applied_today=sum(state.last_change == today() for state in states.values()))
-    print(json.dumps({"plan_hash": plan_hash(plan), "allowed": all(v.allowed for v in verdicts),
-                      "actions": [{"campaign_id": v.campaign_id, "allowed": v.allowed,
-                                   "reasons": v.reasons, "warnings": v.warnings} for v in verdicts]}, indent=2))
+    if str(plan.get('customer_id', '')).replace('-', '') != customer or plan.get('applied'):
+        die('draft must be unapplied and belong to the selected account')
+    changes = plan.get('changes')
+    if not isinstance(changes, list) or not all(isinstance(row, dict) for row in changes):
+        die('draft changes must be a list of objects')
+    print(json.dumps({'plan_hash': plan_hash(plan), 'live_checked': False,
+                      'status': 'Draft only; current campaign state is checked at apply.'}, indent=2))
 
 
 def _mutate_checkpointed(mutate, customer_id, operations, prior, plan, path):

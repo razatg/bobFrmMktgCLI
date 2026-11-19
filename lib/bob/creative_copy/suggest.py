@@ -219,7 +219,8 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
     for b_path, fid, lid in prompt_paths:
         print(f"  {b_path}  (assets {fid}–{lid})")
     print(f"\n{len(changes)} assets across {len({c['campaign_id'] for c in changes})} campaigns.")
-    print("Use the bob-creative-copy skill — spawn one Agent call per batch file, then run:")
-    print(f'  python3 lib/datapull.py creative-copy-apply --plan {yaml_path} --suggestions \'[...json...]\' ')
+    print("Use the bob-creative-copy skill: collect each batch's {id,text} suggestions, then save the selected set:")
+    print(f'  ./bob creative-copy-propose --plan {yaml_path} --changes-json \'[...json...]\' --output <final-plan.yaml>')
+    print('Review the saved final plan, record/link the decision, then apply only that plan with explicit approval.')
 
 __all__ = [name for name in globals() if not name.startswith("__")]

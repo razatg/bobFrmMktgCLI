@@ -24,6 +24,14 @@ def ensure_processed_file_for_period(
 ) -> Path | None:
     """Return a processed period file, aggregating the exact raw window when available."""
     found = find_processed_files_for_period(subdir, [(start, end)], customer_id)[0]
+    if found and grain == 'campaign_reach_period' and (end - start).days >= GRANULAR_QUERY_MAX_DAYS:
+        # Older long-period files may sum weekly unique users. Require provenance.
+        try:
+            metadata = json.loads(found.with_suffix('.meta.json').read_text())
+        except (OSError, ValueError):
+            metadata = {}
+        if not metadata.get('whole_period_reach'):
+            found = None
     if found and not force:
         return found
     raw_paths = find_raw_files_for_range(grain, start, end, customer_id)
@@ -66,7 +74,9 @@ def _agg_context(args: argparse.Namespace, profile: dict) -> None:
     """Preserve native settings/events; never sum budgets or event identifiers."""
     customer = str(args.customer or profile.get("google_ads_customer_id", "")).replace("-", "")
     start, end = dt.date.fromisoformat(args.from_date), dt.date.fromisoformat(args.to)
-    paths = [Path(path) for path in getattr(args, "input_paths", [])]
+    paths = [Path(path) for path in (getattr(args, "input_paths", None) or [])]
+    if not paths and getattr(args, 'input', None):
+        paths = [Path(args.input).expanduser()]
     if not paths:
         paths = find_raw_files_for_range(args.grain, start, end, customer) or []
     if not paths:
@@ -162,6 +172,8 @@ def _agg_network_period(
     else:
         input_paths = [newest_raw(source)]
     rows: list[dict[str, Any]] = []
+    if grain == 'campaign_reach_period' and len(input_paths) != 1:
+        die('reach requires one complete-period source; weekly unique users cannot be summed')
     for input_path in input_paths:
         rows.extend(read_csv(input_path))
     # Reach is optional; network is only present for the network-split grains.
@@ -191,6 +203,10 @@ def _agg_network_period(
     # registered grain may intentionally expose a smaller schema (for example,
     # the generic primary-conversion datasets); write only that contract.
     write_csv(output_path, [{field: row.get(field, "") for field in fields} for row in out_rows], fields)
+    if grain == 'campaign_reach_period':
+        write_metadata(output_path.with_suffix('.meta.json'), {
+            'whole_period_reach': True, 'inputs': [str(path) for path in input_paths],
+        })
     print(f"processed aggregate written: {output_path}")
     if not out_rows:
         print(

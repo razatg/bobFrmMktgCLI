@@ -30,20 +30,20 @@ CPM tolerance band: W0 CPM ≤ ref_CPM × 1.05 counts as "lower or same."
 
 **"Decrease bid"** = LOWER Target CPA value (e.g. ₹65 → ₹58.50 at 10%). A lower Target CPA restricts bids to protect efficiency.
 
-## Guards
+## Guidance for reviewing the baseline
 
-| Guard | Rule |
+| Reference | How Bob should use it |
 |---|---|
-| CAC ceiling | Skip if W0 actual CPA (cost / in_app_conversions) > `cac_ceiling`. If no in_app conversions, use `target_cpa` bid as proxy. Both must be ≤ ceiling to proceed. |
-| Minimum volume | Skip if W0 installs < 10 |
+| Acquisition cost reference | Compare W0 CPA with the saved reference; discuss whether efficiency or volume matters more. Above-reference cost is a warning, not an automatic skip. |
+| Minimum volume | Below 10 installs is a weak-evidence warning; investigate maturity and uncertainty. |
 | Conv% declining | Hold (do not increase) if post-install conv% (in_app / installs) drops >5% from W-1 to W0 — more volume won't help until quality improves |
-| Re-change cooldown | Skip if campaign had a CAMPAIGN or CAMPAIGN_BUDGET update within `bid_budget_cooldown_days` (profile default: 14 days) |
-| Magnitude cap | Change magnitude capped at 20% regardless of `bid_budget_change_pct` setting |
+| Preferred wait | A recent change calls for checking learning and conversion lag; it does not automatically exclude the campaign. |
+| Usual adjustment | Use the saved percentage as a starting point. Explain evidence-backed departures and their risks. |
 
 ## Magnitude
 
 ```
-pct = min(profile.bid_budget_change_pct, 20)   # default 10, capped at 20
+pct = profile.bid_budget_change_pct   # reference size; default 10
 
 # Increase bid (raise Target CPA)
 new_target_cpa = current_target_cpa × (1 + pct / 100)

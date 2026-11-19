@@ -194,6 +194,10 @@ class GatewayTests(unittest.TestCase):
         preserved = store.one('SELECT * FROM client_accounts WHERE id=?', (account,))
         self.assertEqual((preserved['primary_goal'], preserved['currency'], preserved['cac_ceiling'],
                           preserved['bid_budget_change_pct']), ('installs', 'INR', 75, 5))
+        updated = self.client.patch(f'/api/admin/clients/{client_id}/accounts/{account}',
+            headers={'X-CSRF-Token': csrf}, json={'customer_id': '1234567890', 'is_active': True})
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(store.one('SELECT account_name FROM client_accounts WHERE id=?', (account,))['account_name'], 'Renamed')
         goals = {'objective': 'Grow efficiently', 'targets': {'cpi': 40},
                  'usual_approach': {'cac_reference': 75, 'typical_change_pct': 5, 'preferred_wait_days': 14},
                  'priority_order': ['monthly budget', 'efficiency', 'volume'], 'review_date': '2026-12-31'}
@@ -422,8 +426,10 @@ class GatewayTests(unittest.TestCase):
     def test_selected_account_prompt_has_compact_knowledge_rule(self):
         from server.app import scope_wrapped_prompt
         prompt=scope_wrapped_prompt('What does GSR2Net mean?',client_instance_id='client-one',account_customer_id='1234567890')
-        self.assertIn('start with ./bob brief',prompt)
-        self.assertIn('Use ./bob search',prompt)
+        self.assertIn('First search for an existing selected-account artifact/report',prompt)
+        self.assertIn('./bob search',prompt)
+        self.assertIn('Reuse and link matching current work',prompt)
+        self.assertLess(prompt.index('./bob search'), prompt.index('./bob brief'))
         self.assertNotIn('client KT',prompt)
         self.assertIn('AUTHORITATIVE CURRENT ACCOUNT:',prompt)
         self.assertNotIn('MANAGEMENT',prompt)

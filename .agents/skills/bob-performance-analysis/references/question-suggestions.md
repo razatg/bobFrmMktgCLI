@@ -68,7 +68,7 @@ The CLI command and reference columns are agent-internal routing only — never 
 | Why did performance drop last week? | `compare-weeks` → delta diagnosis | `delta-diagnosis.md` |
 | Which network is dragging the account? | `compare-weeks --grain account` | `delta-diagnosis.md` |
 | What changed in [campaign name] recently? | fetch `change_history` → filter by campaign | `change-history-summary.md` |
-| Which ad groups in [campaign] are underperforming? | `fetch --query adgroup_network_period` (Tier 3) | `delta-diagnosis.md` |
+| Which ad groups in [campaign] are underperforming? | `adgroup_primary_conversion_period` (Tier 3; primary conversions, not separate installs/in-app conversions) | `delta-diagnosis.md` |
 | How does May compare to April? | `compare-months --month 5 --vs 4` | `calendar-period-comparison.md` |
 
 ---

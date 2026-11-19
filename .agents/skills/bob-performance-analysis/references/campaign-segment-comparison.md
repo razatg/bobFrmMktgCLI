@@ -14,8 +14,8 @@ Use for questions comparing performance of a named campaign group — e.g. "all 
 ## CLI Commands
 
 ```bash
-# Prerequisite: confirm processed campaign-network files exist
-ls data/processed/campaign-network/
+# Prerequisite: resolve the comparison dates and check complete account coverage.
+./bob data-manifest --query campaign_network_period --from <start> --to <end>
 
 # Compare campaigns containing "Stable" yesterday vs SDLW (default period)
 ./bob slice-campaigns --name-contains "Stable"

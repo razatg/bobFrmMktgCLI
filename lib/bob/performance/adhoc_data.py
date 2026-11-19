@@ -60,7 +60,8 @@ def prepare_dataset(
     processed_paths = find_processed_files_for_period(spec.subdir, [(start, end)], customer_id)
     path = processed_paths[0] if processed_paths else None
     fetched = False
-    if path is None:
+    # Reach cache provenance must be checked even when a period file exists.
+    if path is None or dataset == 'campaign_reach_period':
         path = ensure_processed_file_for_period(
             dataset, spec.subdir, start, end, customer_id,
             str(profile.get("primary_goal") or "in_app_conversions"),

@@ -81,6 +81,7 @@ DEFAULT_BOOTSTRAP = [
 DATE_QUERIES = {
     "campaign_daily",
     "campaign_reach_daily",
+    "campaign_reach_period",
     "network_daily",
     "creative_asset_daily",
     "conversion_action_daily",
@@ -108,7 +109,6 @@ GRANULAR_DATE_QUERIES = {
     "conversion_action_daily",
     "creative_conversion_action_daily",
     "campaign_network_period",
-    "campaign_reach_period",
     "adgroup_network_period",
     "campaign_primary_conversion_period",
     "adgroup_primary_conversion_period",
@@ -787,6 +787,9 @@ def find_raw_files_for_range(
     customer_id: str | None = None,
 ) -> list[Path] | None:
     """Return every exact contiguous chunk needed to cover an inclusive range."""
+    exact = find_raw_file_for_period(query_name, start, end, customer_id)
+    if exact:
+        return [exact]
     files: list[Path] = []
     windows = (
         split_date_range(start, end)
