@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 from lib.bob.creates_it.generate import _call_gemini, _mime_for, _provider_config
-from lib.bob.creates_it.video_media import adapt_portrait_to_landscape, finish_video, probe_video, render_overlay, validate_video
+from lib.bob.creates_it.video_media import adapt_portrait_to_landscape, fit_card_image, finish_video, probe_video, render_overlay, validate_video
 from lib.bob.platform.core import STATE_ROOT, account_wiki_dir, die, load_profile
 
 
@@ -35,8 +35,8 @@ VIDEO_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 MAX_SOURCE_BYTES = 20_000_000
 CLEAN_PANEL_PREFIX = (
     "Create one high-fidelity storyboard panel from the supplied reference. Preserve only the "
-    "approved scene, people, products, and composition needed for the motion. Do not reproduce "
-    "or add readable copy, logos, CTAs, offer badges, legal text, UI, or watermarks. "
+    "approved scene, people, products, and composition needed for the motion. Do not add "
+    "unrequested copy, logos, CTAs, offer badges, legal text, UI, or watermarks. "
 )
 
 
@@ -139,8 +139,8 @@ def _storyboard_sections(brief: dict[str, Any]) -> list[dict[str, str]]:
 
 def _storyboard_panels(brief: dict[str, Any]) -> list[dict[str, str]]:
     raw = brief.get("panels")
-    if not isinstance(raw, list) or len(raw) < 2:
-        die("video storyboard requires at least two pictorial panels")
+    if not isinstance(raw, list) or not raw:
+        die("video storyboard requires at least one pictorial panel")
     panels: list[dict[str, str]] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -151,15 +151,33 @@ def _storyboard_panels(brief: dict[str, Any]) -> list[dict[str, str]]:
         dialogue = str(item.get("dialogue") or "").strip()
         speaker = str(item.get("speaker") or "").strip()
         voice = str(item.get("voice") or "").strip()
+        timing = str(item.get("timing") or "").strip()
         kind = str(item.get("kind") or "scene").strip()
+        raw_sfx = item.get("sfx") or []
+        if isinstance(raw_sfx, str):
+            panel_sfx = raw_sfx.strip()
+        elif isinstance(raw_sfx, list) and all(isinstance(sound, str) for sound in raw_sfx):
+            panel_sfx = "; ".join(sound.strip() for sound in raw_sfx if sound.strip())
+        else:
+            die("storyboard panel sfx must be text or a list of sounds")
         if not title or not visual or not camera or kind not in {"scene", "end_card"}:
             die("each storyboard panel requires title, visual, camera, and scene/end_card kind")
         if bool(dialogue) != bool(speaker) or (dialogue and not voice):
             die("storyboard panel dialogue requires its named speaker and voice")
-        panels.append({"title": title, "visual": visual, "camera": camera, "dialogue": dialogue, "speaker": speaker, "voice": voice, "kind": kind})
-    if panels[-1]["kind"] != "end_card" or sum(item["kind"] == "scene" for item in panels) < 2:
-        die("storyboard requires two scene panels followed by one end-card panel")
+        panels.append({"title": title, "visual": visual, "camera": camera, "dialogue": dialogue, "speaker": speaker, "voice": voice, "timing": timing, "kind": kind, "sfx": panel_sfx})
+    card_positions = [index for index, panel in enumerate(panels) if panel["kind"] == "end_card"]
+    if not any(panel["kind"] == "scene" for panel in panels) or (card_positions and card_positions != [len(panels) - 1]):
+        die("storyboard needs scene panels and at most one final end-card panel")
+    if bool(card_positions) != bool(brief.get("end_card")):
+        die("the final end-card panel and end_card settings must appear together")
     return panels
+
+
+def _music_provider(brief: dict[str, Any]) -> str:
+    music = brief.get("music") or {}
+    if not isinstance(music, dict) or music.get("provider", "omni") not in {"omni", "lyria"}:
+        die("music provider must be omni or lyria")
+    return str(music.get("provider", "omni"))
 
 
 def _storyboard_hash(sections: list[dict[str, str]], brief: dict[str, Any]) -> str:
@@ -184,7 +202,7 @@ def _panel_fingerprint(source: Path, *, image_model: str, panels: list[dict[str,
     return hashlib.sha256(json.dumps({
         "source_sha256": _file_digest(source),
         "image_model": image_model,
-        "panels": panels,
+        "panels": [{"title": panel["title"], "visual": panel["visual"], "camera": panel["camera"]} for panel in panels],
         "aspect_ratio": ratio,
     }, sort_keys=True).encode()).hexdigest()
 
@@ -194,7 +212,8 @@ def _master_fingerprint(brief: dict[str, Any], source: Path, *, video_model: str
     stable = {
         "source_sha256": _file_digest(source),
         "panel_fingerprint": brief.get("panel_fingerprint"),
-        "video_prompt": brief.get("video_prompt"),
+        "video_prompt": brief.get("compiled_prompt"),
+        "edit_from": brief.get("edit_from"),
         "video_model": video_model,
         "image_model": image_model,
         "duration_seconds": duration,
@@ -203,21 +222,64 @@ def _master_fingerprint(brief: dict[str, Any], source: Path, *, video_model: str
     return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
 
 
-def _native_video_prompt(base: str, panels: list[dict[str, str]]) -> str:
-    """Attach approved cast/audio intent to the video request, not to a separate TTS route."""
-    dialogue = [
-        f"{panel['speaker']} ({panel['voice']}) says exactly: \"{panel['dialogue']}\""
-        for panel in panels if panel["kind"] == "scene" and panel.get("dialogue")
-    ]
-    rules = [
-        "[# Sources <FIRST_FRAME>@Image1 <LAST_FRAME>@Image2]",
-        "Use Image1 as the opening composition and Image2 as the closing composition.",
-        "Create one full-frame continuous progression between them; no collage, split-screen, storyboard layout, text, logo, CTA, offer, or end card.",
-        "Generate only native scene audio and the approved spoken lines. Do not add narration, music, or another speaker.",
-    ]
-    if dialogue:
-        rules.append("Dialogue casting: " + " ".join(dialogue))
-    return "\n\n".join([base, *rules])
+def _native_video_prompt(base: str, panels: list[dict[str, str]], sfx: list[str], music: dict[str, Any], copy: dict[str, Any], end_card: dict[str, Any] | None = None) -> str:
+    """Compile the approved scene panels into the readable Omni production prompt."""
+    scenes = [panel for panel in panels if panel["kind"] == "scene"]
+    roles = "[# Sources <FIRST_FRAME>@Image1]"
+    if len(scenes) > 1:
+        refs = " ".join(f"<IMAGE_REF_{index}>@Image{index + 2}" for index in range(len(scenes) - 1))
+        roles += f" [# References {refs}]"
+    lines = [roles, base]
+    if sfx:
+        lines.append("Shared sound direction: " + "; ".join(sfx))
+    for index, panel in enumerate(scenes, start=1):
+        heading = f"Scene {index} {panel['timing']}" if panel.get("timing") else f"Scene {index}"
+        reference = "Use Image1 (<FIRST_FRAME>) as the opening frame" if index == 1 else f"Use Image{index} (<IMAGE_REF_{index - 2}>) as this scene's visual reference, not a literal frame"
+        lines.append(f"{heading}: {reference}. {panel['visual']} Camera: {panel['camera']}")
+        if panel.get("dialogue"):
+            lines.append(f"{panel['speaker']} ({panel['voice']}) says exactly: \"{panel['dialogue']}\"")
+        if panel.get("sfx"):
+            lines.append("Scene sound: " + panel["sfx"])
+    if any(panel.get("timing") for panel in scenes) or music.get("timing"):
+        lines.append("Use the stated times as natural pacing guidance, not forced cuts.")
+    if panels[-1]["kind"] == "end_card":
+        start = (end_card or {}).get("start_seconds")
+        when = f" from approximately {start}s" if start is not None else ""
+        lines.append(f"The approved final card will be added in finishing{when}. Do not generate its graphics or copy; keep the generated audio continuous through it.")
+    elif copy:
+        lines.append("Approved on-screen copy: " + "; ".join(f"{key}: {value}" for key, value in copy.items()))
+    if music.get("direction") and music.get("provider") != "lyria":
+        lines.append("Music: " + str(music["direction"]))
+    if music.get("lyrics") and music.get("provider") != "lyria":
+        lines.append("Exact sung words: " + str(music["lyrics"]))
+    if music.get("timing") and music.get("provider") != "lyria":
+        lines.append("Music or jingle timing: " + str(music["timing"]))
+    if music.get("provider") == "lyria":
+        lines.append("Generate scene dialogue and natural ambience without music; the approved separate track will be mixed later.")
+    return "\n\n".join(lines)
+
+
+def _accepted_storyboard_omissions(storyboard: dict[str, Any], brief: dict[str, Any]) -> list[str]:
+    accepted = brief.get("accepted_omissions") or []
+    if not isinstance(accepted, list) or any(not isinstance(item, str) or item not in {"timing", "sfx", "music"} for item in accepted):
+        die("accepted_omissions must list only timing, sfx, or music")
+    scenes = [panel for panel in storyboard["panels"] if panel["kind"] == "scene"]
+    music = storyboard.get("music") or {}
+    missing = []
+    if any(not str(panel.get("timing") or "").strip() for panel in scenes):
+        missing.append("timing")
+    if not storyboard.get("sfx") and not any(panel.get("sfx") for panel in scenes):
+        missing.append("sfx")
+    if not music.get("direction") and not music.get("lyrics"):
+        missing.append("music")
+    unresolved = [item for item in missing if item not in accepted]
+    if unresolved:
+        die("storyboard needs " + ", ".join(unresolved) + " guidance or explicit user-approved accepted_omissions before prompt compilation")
+    return [item for item in missing if item in accepted]
+
+
+def _omni_text_input(prompt: str) -> dict[str, str]:
+    return {"type": "text", "text": prompt}
 
 
 def _music_prompt(music: dict[str, Any]) -> str:
@@ -235,11 +297,11 @@ def _music_fingerprint(prompt: str, model: str | None) -> str | None:
 
 
 def _end_card_start(brief: dict[str, Any], duration: int) -> float:
-    value = (brief.get("end_card") or {}).get("start_seconds", max(0, duration - 1.5)) if isinstance(brief.get("end_card") or {}, dict) else None
+    value = (brief.get("end_card") or {}).get("start_seconds") if isinstance(brief.get("end_card"), dict) else None
     try:
         start = float(value)
     except (TypeError, ValueError):
-        die("end-card start must be a number")
+        die("end-card storyboard requires a numeric start_seconds")
     if start < 0 or start >= duration:
         die("end-card start must be within the video duration")
     return start
@@ -275,7 +337,7 @@ def _write_index(path: Path, manifest: dict[str, Any]) -> None:
         "",
     ]
     for section in brief["sections"]:
-        risk = " · isolated controlled clip" if section["risk"] == "high" else ""
+        risk = " · high-risk action; inspect closely" if section["risk"] == "high" else ""
         lines += [f"### {section['title']}{risk}", section["action"], ""]
     panels = brief.get("panels") if isinstance(brief.get("panels"), list) else []
     panel_files = brief.get("panel_files") if isinstance(brief.get("panel_files"), list) else []
@@ -288,6 +350,8 @@ def _write_index(path: Path, manifest: dict[str, Any]) -> None:
             lines += [f"- Visual: {panel['visual']}", f"- Camera: {panel['camera']}"]
             if panel.get("dialogue"):
                 lines.append(f"- Native dialogue — {panel['speaker']} ({panel['voice']}): {panel['dialogue']}")
+            if panel.get("sfx"):
+                lines.append(f"- Scene sound: {panel['sfx']}")
             lines.append("")
     lines += ["## Exact copy", ""]
     copy = brief.get("copy") if isinstance(brief.get("copy"), dict) else {}
@@ -303,11 +367,19 @@ def _write_index(path: Path, manifest: dict[str, Any]) -> None:
     lines += [f"- Music: {music.get('direction', 'none specified')}"]
     if music.get("lyrics"):
         lines.append(f"- Lyrics: {music['lyrics']}")
-    lines.append("- Dialogue: generated natively by Omni from the approved pictorial panels.")
+    lines.append("- Dialogue and scene audio: generated natively by Omni from the approved production prompt.")
     lines += [""]
     end_card = brief.get("end_card") if isinstance(brief.get("end_card"), dict) else {}
-    lines += ["## Deterministic end card", "", f"- Final copy, logo, and CTA are added after motion generation from {end_card.get('start_seconds', 'the final 1–2 seconds') } seconds.", ""]
+    if end_card:
+        lines += ["## Finishing", "", f"- Show the approved final card from {end_card.get('start_seconds', 'the storyboard timing')} seconds.", ""]
+    else:
+        lines += ["## Finishing", "", "- Use the continuous generated scene; no final card is specified.", ""]
     lines += ["## Output plan", "", f"- {brief['duration_seconds']} second {brief['aspect_ratio']} master", "- 16:9 adaptation only after master approval", ""]
+    prompt = manifest.get("generation_prompt")
+    if isinstance(prompt, str) and prompt:
+        lines += ["## Omni text input for approval", "", "This exact text input is sent to Omni after the storyboard scene images:", "", "```json", json.dumps(_omni_text_input(prompt), indent=2, ensure_ascii=False), "```", ""]
+    if manifest.get("accepted_omissions"):
+        lines += ["## Accepted storyboard omissions", "", ", ".join(manifest["accepted_omissions"]), ""]
     policy = manifest.get("provider_policy") if isinstance(manifest.get("provider_policy"), dict) else {}
     if policy:
         stage = str(policy.get("stage") or "generation")
@@ -344,7 +416,7 @@ def _update_account_index(path: Path, manifest: dict[str, Any]) -> None:
     path.write_text((text[:insert] + f"\n\n{marker}\n{row}" + text[insert:]).rstrip() + "\n")
 
 
-def _extract_video(payload: Any) -> tuple[bytes, str]:
+def _extract_video(payload: Any) -> tuple[bytes, str, str]:
     candidates: list[tuple[str, str]] = []
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -366,7 +438,10 @@ def _extract_video(payload: Any) -> tuple[bytes, str]:
         die(f"Gemini returned invalid video data: {exc}")
     if not value or len(value) > 200_000_000:
         die("Gemini returned an empty or oversized video")
-    return value, candidates[0][1]
+    interaction_id = payload.get("id") if isinstance(payload, dict) else None
+    if not isinstance(interaction_id, str) or not interaction_id:
+        die("Gemini returned no interaction ID for video revisions")
+    return value, candidates[0][1], interaction_id
 
 
 def _extract_audio(payload: Any, *, label: str) -> tuple[bytes, str]:
@@ -392,19 +467,24 @@ def _extract_audio(payload: Any, *, label: str) -> tuple[bytes, str]:
         die(f"{label} returned invalid audio data: {exc}")
 
 
-def _call_omni(api_key: str, model: str, prompt: str, source: Path, aspect_ratio: str, last_frame: Path | None = None) -> tuple[bytes, str]:
-    source_bytes = source.read_bytes()
-    if len(source_bytes) > MAX_SOURCE_BYTES or (last_frame and last_frame.stat().st_size > MAX_SOURCE_BYTES):
-        die("video source image exceeds 20 MB")
-    inputs = [{"type": "image", "mime_type": _mime_for(source), "data": base64.b64encode(source_bytes).decode()}]
-    if last_frame:
-        inputs.append({"type": "image", "mime_type": _mime_for(last_frame), "data": base64.b64encode(last_frame.read_bytes()).decode()})
-    inputs.append({"type": "text", "text": prompt})
-    body = json.dumps({
+def _call_omni(api_key: str, model: str, prompt: str, sources: list[Path], aspect_ratio: str, previous_id: str | None = None) -> tuple[bytes, str, str]:
+    inputs: list[dict[str, str]] = []
+    if not previous_id:
+        for source in sources:
+            source_bytes = source.read_bytes()
+            if len(source_bytes) > MAX_SOURCE_BYTES:
+                die("video source image exceeds 20 MB")
+            inputs.append({"type": "image", "mime_type": _mime_for(source), "data": base64.b64encode(source_bytes).decode()})
+    inputs.append(_omni_text_input(prompt))
+    request_body: dict[str, Any] = {
         "model": model,
         "input": inputs,
         "response_format": {"type": "video", "aspect_ratio": aspect_ratio},
-    }).encode()
+        "store": True,
+    }
+    if previous_id:
+        request_body["previous_interaction_id"] = previous_id
+    body = json.dumps(request_body).encode()
     request = Request(VIDEO_URL, data=body, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST")
     try:
         with urlopen(request, timeout=360) as response:
@@ -491,6 +571,7 @@ def _pause_for_policy(
 def _stage_storyboard(customer_id: str, run_id: str, brief: dict[str, Any], image_caller: Callable[..., tuple[bytes, str]]) -> None:
     sections = _storyboard_sections(brief)
     panels = _storyboard_panels(brief)
+    _music_provider(brief)
     duration = _video_duration(brief)
     ratio = str(brief.get("aspect_ratio") or "")
     if ratio != "9:16":
@@ -509,11 +590,21 @@ def _stage_storyboard(customer_id: str, run_id: str, brief: dict[str, Any], imag
     revision = int(existing.get("storyboard_revision") or 0) + 1
     run_dir.mkdir(parents=True, exist_ok=True)
     references = run_dir / "references"; references.mkdir(exist_ok=True)
+    scene_fingerprint = _panel_fingerprint(source, image_model=image_model, panels=[panel for panel in panels if panel["kind"] == "scene"], ratio=ratio)
+    reuse_scenes = existing.get("scene_fingerprint") == scene_fingerprint and existing.get("storyboard_fidelity") == preview_mode
     panel_files: list[str] = []
     for index, panel in enumerate(panels, start=1):
         path = references / f"storyboard-panel-{index}.png"
         if panel["kind"] == "end_card":
-            render_overlay(path, width=720, height=1280, copy=brief.get("copy") or {}, logo=logo_path, opaque=True)
+            card = brief.get("end_card") or {}
+            if card.get("image"):
+                fit_card_image(_safe_state_file(str(card["image"]), "approved final card"), path, width=720, height=1280)
+            elif brief.get("copy") or logo_path:
+                render_overlay(path, width=720, height=1280, copy=brief.get("copy") or {}, logo=logo_path, opaque=True)
+            else:
+                die("end-card panel requires an approved image, copy, or logo")
+        elif reuse_scenes and path.is_file():
+            pass
         elif preview_mode == "high_fidelity":
             prompt = CLEAN_PANEL_PREFIX + panel["visual"] + " Camera: " + panel["camera"]
             image_bytes, _ = image_caller(_provider_config()["api_key"], image_model, prompt, source, ratio)
@@ -523,10 +614,13 @@ def _stage_storyboard(customer_id: str, run_id: str, brief: dict[str, Any], imag
         panel_files.append(str(path.relative_to(run_dir)))
     manifest = {
         "run_id": run_id, "customer_id": customer_id, "title": str(brief.get("title") or "Video storyboard"),
+        "decision_id": brief.get("decision_id") or existing.get("decision_id"),
         "created_at": existing.get("created_at") or _now(), "updated_at": _now(), "status": "storyboard_ready",
-        "storyboard_revision": revision,
+        "storyboard_revision": revision, "storyboard_hash": _storyboard_hash(sections, brief),
+        "scene_fingerprint": scene_fingerprint, "storyboard_fidelity": preview_mode,
         "storyboard": {"sections": sections, "panels": panels, "panel_files": panel_files, "copy": brief.get("copy") or {}, "sfx": brief.get("sfx") or [], "music": brief.get("music") or {}, "end_card": brief.get("end_card") or {}, "duration_seconds": duration, "aspect_ratio": ratio, "video_model": _model("video", brief)},
         "candidates": existing.get("candidates") or [],
+        "master_checkpoint": existing.get("master_checkpoint"),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     _write_index(run_dir / "index.md", manifest)
@@ -534,25 +628,67 @@ def _stage_storyboard(customer_id: str, run_id: str, brief: dict[str, Any], imag
     print(f"[[artifact:wiki/{customer_id}/creative-runs/{run_id}/index.md|Open the video storyboard]]")
 
 
-def _stage_master(customer_id: str, run_id: str, brief: dict[str, Any], caller: Callable[..., tuple[bytes, str]], music_caller: Callable[..., tuple[bytes, str]]) -> None:
+def _stage_prompt(customer_id: str, run_id: str, brief: dict[str, Any]) -> None:
     run_dir = account_wiki_dir(customer_id) / "creative-runs" / run_id
     manifest_path = run_dir / "manifest.json"
     manifest = _read_json(manifest_path, "video run manifest")
-    if manifest.get("customer_id") != customer_id or manifest.get("status") not in {
-        "storyboard_ready", "video_review_failed", "master_checkpointed",
-        "video_direction_needed", "music_direction_needed",
-    }:
-        die("video master requires the selected account's editable storyboard draft")
-    if brief.get("confirmed") is not True:
-        die("video master requires confirmed: true after storyboard approval")
+    if manifest.get("customer_id") != customer_id or brief.get("confirmed") is not True:
+        die("production prompt requires approval of this account's storyboard")
+    storyboard = manifest.get("storyboard") if isinstance(manifest.get("storyboard"), dict) else {}
+    panels = storyboard.get("panels") if isinstance(storyboard.get("panels"), list) else []
+    panel_files = storyboard.get("panel_files") if isinstance(storyboard.get("panel_files"), list) else []
+    board_hash = manifest.get("storyboard_hash")
+    if not isinstance(board_hash, str) or not board_hash or not panels or len(panel_files) != len(panels):
+        die("production prompt requires the saved pictorial storyboard")
+    _music_provider({"music": storyboard.get("music") or {}})
+    accepted_omissions = _accepted_storyboard_omissions(storyboard, brief)
+    edit_from = str(brief.get("edit_from") or "")
+    if edit_from:
+        candidate = next((item for item in manifest.get("candidates", []) if item.get("name") == edit_from and item.get("interaction_id")), None)
+        if candidate is None:
+            die("video edit requires a candidate with a saved Omni interaction ID")
+        prompt = str(brief.get("video_prompt") or "").strip()
+        if not prompt:
+            die("video edit requires a specific approved change")
+    else:
+        base = str(brief.get("video_prompt") or "").strip()
+        if not base:
+            die("production prompt requires a creative direction")
+        prompt = _native_video_prompt(base, panels, storyboard.get("sfx") or [], storyboard.get("music") or {}, storyboard.get("copy") or {}, storyboard.get("end_card") or {})
+    scene_files = [run_dir / file for panel, file in zip(panels, panel_files) if panel["kind"] == "scene"]
+    if not scene_files or any(not path.is_file() for path in scene_files):
+        die("production prompt requires the saved pictorial scene images")
+    prompt_hash = hashlib.sha256(json.dumps({
+        "prompt": prompt, "storyboard_hash": board_hash,
+        "scene_files": [_file_digest(path) for path in scene_files], "edit_from": edit_from,
+    }, sort_keys=True).encode()).hexdigest()
+    manifest.update({"status": "prompt_ready", "updated_at": _now(), "generation_prompt": prompt, "prompt_hash": prompt_hash, "edit_from": edit_from or None, "accepted_omissions": accepted_omissions})
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    _write_index(run_dir / "index.md", manifest)
+    print(f"production prompt ready: {prompt_hash[:12]}")
+    print(prompt)
+    print(f"[[artifact:wiki/{customer_id}/creative-runs/{run_id}/index.md|Review the production prompt]]")
+
+
+def _stage_master(customer_id: str, run_id: str, brief: dict[str, Any], caller: Callable[..., tuple[bytes, str, str]], music_caller: Callable[..., tuple[bytes, str]]) -> None:
+    _music_provider(brief)
+    run_dir = account_wiki_dir(customer_id) / "creative-runs" / run_id
+    manifest_path = run_dir / "manifest.json"
+    manifest = _read_json(manifest_path, "video run manifest")
+    if manifest.get("customer_id") != customer_id or manifest.get("status") not in {"prompt_ready", "master_checkpointed"}:
+        die("video master requires an approved production prompt in this run")
+    if brief.get("confirmed") is not True or brief.get("prompt_confirmed") is not True:
+        die("video master requires separate storyboard and production-prompt approvals")
     sections = _storyboard_sections(brief)
     expected_hash = _storyboard_hash(sections, brief)
+    if expected_hash != manifest.get("storyboard_hash"):
+        die("video master must use the current approved storyboard")
     duration, ratio = _video_duration(brief), str(brief.get("aspect_ratio") or "")
     if ratio != "9:16":
         die("the initial video route supports a 9:16 master")
     video_model = _model("video", brief)
     music = brief.get("music") if isinstance(brief.get("music"), dict) else {}
-    music_request = _music_prompt(music)
+    music_request = _music_prompt(music) if music.get("provider") == "lyria" else ""
     music_model = _model("music", brief) if music_request else None
     logo_path = _safe_state_file(str(brief["logo_image"]), "approved logo") if brief.get("logo_image") else None
     if brief.get("require_logo") is True and logo_path is None:
@@ -563,15 +699,29 @@ def _stage_master(customer_id: str, run_id: str, brief: dict[str, Any], caller: 
     storyboard = manifest.get("storyboard") if isinstance(manifest.get("storyboard"), dict) else {}
     panels = storyboard.get("panels") if isinstance(storyboard.get("panels"), list) else []
     panel_files = storyboard.get("panel_files") if isinstance(storyboard.get("panel_files"), list) else []
+    _accepted_storyboard_omissions(storyboard, {"accepted_omissions": manifest.get("accepted_omissions") or []})
     scene_files = [run_dir / panel_files[index] for index, panel in enumerate(panels) if panel.get("kind") == "scene" and index < len(panel_files)]
-    if len(scene_files) < 2 or any(not path.is_file() for path in scene_files):
-        die("video master requires an approved pictorial storyboard with two scene panels")
+    if not scene_files or any(not path.is_file() for path in scene_files):
+        die("video master requires approved pictorial scene panels")
     panel_fingerprint = hashlib.sha256(json.dumps({
         "panels": panels, "files": [_file_digest(path) for path in scene_files],
     }, sort_keys=True).encode()).hexdigest()
-    prompt = _native_video_prompt(base_prompt, panels)
+    edit_from = str(brief.get("edit_from") or "")
+    prompt = base_prompt if edit_from else _native_video_prompt(base_prompt, panels, storyboard.get("sfx") or [], storyboard.get("music") or {}, storyboard.get("copy") or {}, storyboard.get("end_card") or {})
+    prompt_hash = hashlib.sha256(json.dumps({
+        "prompt": prompt, "storyboard_hash": expected_hash,
+        "scene_files": [_file_digest(path) for path in scene_files], "edit_from": edit_from,
+    }, sort_keys=True).encode()).hexdigest()
+    if prompt != manifest.get("generation_prompt") or prompt_hash != manifest.get("prompt_hash") or brief.get("prompt_hash") != prompt_hash:
+        die("video master requires approval of the exact production prompt shown in the artifact")
+    previous_id: str | None = None
+    if edit_from:
+        prior = next((item for item in manifest.get("candidates", []) if item.get("name") == edit_from and item.get("interaction_id")), None)
+        if prior is None:
+            die("video edit requires a candidate with a saved Omni interaction ID")
+        previous_id = str(prior["interaction_id"])
     fingerprint = _master_fingerprint(
-        {**brief, "panel_fingerprint": panel_fingerprint},
+        {**brief, "panel_fingerprint": panel_fingerprint, "compiled_prompt": prompt},
         _safe_state_file(str(brief.get("source_image") or ""), "video source image"),
         video_model=video_model, image_model="storyboard-panels", duration=duration, ratio=ratio,
     )
@@ -584,6 +734,7 @@ def _stage_master(customer_id: str, run_id: str, brief: dict[str, Any], caller: 
         "raw_video": f"references/generated-video-{fingerprint[:12]}.mp4",
         "music": None,
         "panel_fingerprint": panel_fingerprint,
+        "interaction_id": None,
     }
     requested_music_fingerprint = _music_fingerprint(music_request, music_model)
     if checkpoint.get("music_fingerprint") != requested_music_fingerprint:
@@ -600,13 +751,16 @@ def _stage_master(customer_id: str, run_id: str, brief: dict[str, Any], caller: 
             raw = None
     if raw is None:
         try:
-            video_bytes, mime = caller(_provider_config()["api_key"], video_model, prompt, scene_files[0], ratio, scene_files[-1])
+            video_bytes, mime, interaction_id = caller(_provider_config()["api_key"], video_model, prompt, scene_files, ratio, previous_id)
         except ProviderPolicyBlocked as blocked:
             _pause_for_policy(manifest_path, manifest, checkpoint, run_dir, blocked, "approved storyboard panels")
         if mime != "video/mp4":
             die(f"unsupported generated video MIME type: {mime}")
+        if not interaction_id:
+            die("Gemini returned no interaction ID for video revisions")
         raw = run_dir / checkpoint["raw_video"]
         raw.write_bytes(video_bytes)
+        checkpoint["interaction_id"] = interaction_id
         _save_master_checkpoint(manifest_path, manifest, checkpoint)
     music_path = _checkpoint_file(run_dir, checkpoint, "music") if music_request else None
     if music_request and music_path is None:
@@ -620,24 +774,27 @@ def _stage_master(customer_id: str, run_id: str, brief: dict[str, Any], caller: 
         _save_master_checkpoint(manifest_path, manifest, checkpoint)
     copy = brief.get("copy") if isinstance(brief.get("copy"), dict) else {}
     overlay_path: Path | None = None
-    end_card_start = _end_card_start(brief, duration)
-    if copy or logo_path:
+    end_card = brief.get("end_card") if isinstance(brief.get("end_card"), dict) else {}
+    end_card_start = _end_card_start(brief, duration) if end_card else 0.0
+    if end_card:
         probe = probe_video(raw)
         streams = probe.get("streams") if isinstance(probe.get("streams"), list) else []
         stream = next((item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"), None)
         if not isinstance(stream, dict) or not int(stream.get("width") or 0) or not int(stream.get("height") or 0):
             die("generated video has no readable dimensions for deterministic overlays")
-        overlay_path = references / "master-overlay.png"
-        render_overlay(overlay_path, width=int(stream["width"]), height=int(stream["height"]), copy=copy, logo=logo_path, opaque=True)
+        overlay_path = references / f"master-overlay-{fingerprint[:12]}.png"
+        card_panel = run_dir / panel_files[-1]
+        fit_card_image(card_panel, overlay_path, width=int(stream["width"]), height=int(stream["height"]))
     name = _next_name(outputs, "master-9x16")
     qa = finish_video(raw, outputs / name, duration_seconds=duration, aspect_ratio=ratio, music=music_path, overlay=overlay_path, overlay_start_seconds=end_card_start)
-    candidate = {"name": name, "candidate_type": "video_master", "production_method": "ai_generation", "model": video_model, "review_status": "pending", "qa": qa, "request": {"storyboard_panels": panels, "video_prompt": prompt, "native_dialogue": True, "model": video_model, "music_model": music_model, "music_prompt": music_request or None, "deterministic_overlay": {"copy": copy, "logo_supplied": bool(logo_path), "start_seconds": end_card_start}, "duration_seconds": duration, "aspect_ratio": ratio}}
+    image_roles = (["FIRST_FRAME"] + [f"IMAGE_REF_{index}" for index in range(len(scene_files) - 1)]) if not edit_from else []
+    candidate = {"name": name, "candidate_type": "video_master", "production_method": "ai_generation", "model": video_model, "interaction_id": checkpoint.get("interaction_id"), "review_status": "pending", "qa": qa, "request": {"storyboard_panels": panels, "input_text": _omni_text_input(prompt), "image_roles": image_roles, "edited_from": edit_from or None, "native_dialogue": True, "model": video_model, "music_model": music_model, "music_prompt": music_request or None, "deterministic_overlay": {"enabled": bool(overlay_path), "start_seconds": end_card_start if overlay_path else None}, "duration_seconds": duration, "aspect_ratio": ratio}}
     _candidate_detail(run_dir, candidate)
     manifest.update({
         "status": "video_review_pending", "updated_at": _now(), "storyboard_hash": expected_hash,
         "storyboard_revision": int(manifest.get("storyboard_revision") or 1),
         "approved_brief": checkpoint["approved_brief"], "candidates": [*manifest.get("candidates", []), candidate],
-        "storyboard": {**storyboard, "sections": sections, "copy": brief.get("copy") or {}, "sfx": brief.get("sfx") or [], "music": brief.get("music") or {}, "end_card": {"start_seconds": end_card_start}, "duration_seconds": duration, "aspect_ratio": ratio, "video_model": video_model},
+        "storyboard": {**storyboard, "sections": sections, "copy": brief.get("copy") or {}, "sfx": brief.get("sfx") or [], "music": brief.get("music") or {}, "end_card": end_card, "duration_seconds": duration, "aspect_ratio": ratio, "video_model": video_model},
     })
     manifest.pop("provider_policy", None)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -665,13 +822,17 @@ def _record_visual_review(customer_id: str, run_id: str, path_text: str) -> None
             die("video visual review must cover each pending output once with every required check")
         if any(value not in {"passed", "failed"} for value in checks.values()) or not isinstance(issues, list):
             die("video visual review checks must be passed/failed and issues must be a list")
+        if pending[name].get("candidate_type") == "video_master" and (
+            review.get("audio_listened") is not True or not str(review.get("audio_notes") or "").strip()
+        ):
+            die("video master review requires listening to the full audio and recording audio_notes")
         failed = "failed" in checks.values()
         if failed and not issues:
             die("a failed video visual review needs an issue")
         if not failed and issues:
             die("a passed video visual review cannot have unresolved issues")
         pending[name]["review_status"] = "failed" if failed else "passed"
-        pending[name]["visual_review"] = {"checks": checks, "issues": issues, "reviewed_at": _now()}
+        pending[name]["visual_review"] = {"checks": checks, "issues": issues, "audio_notes": review.get("audio_notes"), "reviewed_at": _now()}
         submitted.add(name)
     if submitted != set(pending):
         die("video visual review must cover every pending output")
@@ -706,7 +867,7 @@ def _stage_adaptation(customer_id: str, run_id: str, brief: dict[str, Any]) -> N
     print(f"video adaptation ready: {candidate['name']}")
 
 
-def create_video(args: Any, caller: Callable[..., tuple[bytes, str]] = _call_omni, image_caller: Callable[..., tuple[bytes, str]] = _call_gemini, music_caller: Callable[..., tuple[bytes, str]] = _call_lyria) -> None:
+def create_video(args: Any, caller: Callable[..., tuple[bytes, str, str]] = _call_omni, image_caller: Callable[..., tuple[bytes, str]] = _call_gemini, music_caller: Callable[..., tuple[bytes, str]] = _call_lyria) -> None:
     """Create or update one review-only image-to-video run."""
     customer_id = _selected_customer_id()
     if getattr(args, "visual_review", None):
@@ -719,9 +880,20 @@ def create_video(args: Any, caller: Callable[..., tuple[bytes, str]] = _call_omn
     if brief.get("customer_id") and re.sub(r"\D", "", str(brief["customer_id"])) != customer_id:
         die("video brief belongs to a different account")
     run_id = _safe_run_id(str(getattr(args, "run_id", "") or brief.get("run_id") or uuid.uuid4().hex[:12]))
+    saved_manifest = account_wiki_dir(customer_id) / "creative-runs" / run_id / "manifest.json"
+    saved_decision = _read_json(saved_manifest, "video run manifest").get("decision_id") if saved_manifest.exists() else None
+    decision_id = brief.get("decision_id") or saved_decision
+    if saved_decision and saved_decision != decision_id:
+        die("video revision cannot change its linked decision")
+    if decision_id:
+        from lib.bob.decisions.records import get
+        get(STATE_ROOT, customer_id, str(decision_id))
     stage = str(brief.get("stage") or "storyboard")
     if stage == "storyboard":
         _stage_storyboard(customer_id, run_id, brief, image_caller)
+        return
+    if stage == "prompt":
+        _stage_prompt(customer_id, run_id, brief)
         return
     if stage == "master":
         _stage_master(customer_id, run_id, brief, caller, music_caller)
@@ -729,4 +901,4 @@ def create_video(args: Any, caller: Callable[..., tuple[bytes, str]] = _call_omn
     if stage == "adaptation":
         _stage_adaptation(customer_id, run_id, brief)
         return
-    die("video brief stage must be storyboard, master, or adaptation")
+    die("video brief stage must be storyboard, prompt, master, or adaptation")

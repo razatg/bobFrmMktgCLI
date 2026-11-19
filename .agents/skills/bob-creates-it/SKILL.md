@@ -17,7 +17,7 @@ Read `SOUL.md` before answering. Keep the workflow chat-driven: do not ask the u
 
 One user task has one creative run and one review artifact. Create the run once, then reuse its exact `run_id` for feedback edits, regenerations, visual-review retries, adaptations, and publication. Start another run only when the user explicitly asks for a separate task, concept, or artifact.
 
-This is one loop with different source selectors and media adapters. LOW static replacement is a performance selector. Campaign refresh and named-asset refresh use the image inventory. Image-to-video uses the same loop through the executable video adapter: first create one editable storyboard artifact, then generate only after an explicit chat approval of that storyboard. Do not reroute visual creative requests to the read-only Wings It analysis fallback.
+This is one loop with different source selectors and media adapters. LOW static replacement is a performance selector. Campaign refresh and named-asset refresh use the image inventory. Image-to-video uses the same loop through the executable video adapter: first create one editable storyboard artifact, then generate only after an explicit chat approval of that storyboard. Before compiling its prompt, check that the saved board covers visual panels, sequence and timing, scene sound, and the music or jingle decision. General approval of the board does not approve missing guidance: revise the same board from the user's stated direction, or record a missing item in `accepted_omissions` only when the user explicitly accepts leaving it out. This review applies at any duration and does not impose fixed beat lengths. Use registered analysis operations for performance investigation when useful; production and publishing retain their own approval boundaries.
 
 ## Static routes
 
@@ -36,7 +36,7 @@ The Gemini credential is configured at client level; the approved model IDs and 
 
 - Performance labels and numbers come only from Bob's deterministic creative workflow. A source inventory is not a performance report.
 - Never generate before a selected account is authoritative.
-- Never expose provider secrets, briefs, manifests, prompts, reference folders, or internal paths to the user.
+- Never expose provider secrets, private briefs, manifests, hidden prompts, reference folders, or internal paths to the user. Show a user-facing production prompt when the video approval flow requires it.
 - Present only reviewable output artifacts. The user controls revisions and publishing in chat; do not add workflow buttons.
 - A generation request never grants Google Ads mutation permission. Run the existing approval-gated apply workflow only after an explicit chat instruction such as “make all live” or “make `<name>` live”.
 - “Make all live” means only pending outputs in the latest run presented in the selected account. Never include another account or an older run.

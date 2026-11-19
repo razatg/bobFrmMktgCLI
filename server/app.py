@@ -3,6 +3,7 @@ import asyncio, base64, hashlib, json, logging, os, re, secrets, shlex, shutil, 
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
+from lib.bob.answer_check import check_answer, validate_proposal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request as URLRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -272,8 +273,8 @@ def account_settings(body):
     if not goal: raise HTTPException(400, 'primary goal must be installs or in_app_conversions')
     if body.currency.strip() and (len(body.currency.strip()) != 3 or not body.currency.strip().isalpha()): raise HTTPException(400, 'currency must be a 3-letter code such as INR or USD')
     if not 1 <= body.creative_lookback_days <= 30: raise HTTPException(400, 'creative lookback must be 1–30 days')
-    if body.creative_min_impressions < 0 or body.cac_ceiling < 0 or body.bid_budget_change_pct < 0 or body.bid_budget_change_pct > 20 or body.bid_budget_cooldown_days < 0:
-        raise HTTPException(400, 'account thresholds must be non-negative and bid/budget change must be at most 20%')
+    if body.creative_min_impressions < 0 or body.cac_ceiling < 0 or body.bid_budget_change_pct < 0 or body.bid_budget_cooldown_days < 0:
+        raise HTTPException(400, 'account reference values must be non-negative')
     return (goal, body.currency.strip().upper(), 'app_installs' if goal == 'installs' else 'app_in_app_conversions', body.creative_lookback_days, body.creative_min_impressions, body.cac_ceiling, body.bid_budget_change_pct, body.bid_budget_cooldown_days)
 
 def validated_scheduling_timezone(value):
@@ -402,7 +403,7 @@ def schedule_command(value: str) -> str | None:
 
 def scope_wrapped_prompt(prompt, account_context=None, account_permission='read', google_connected=False, client_instance_id=None, account_customer_id=None, continuity='', schedule_action=None, media_instruction=''):
     account_kt_path = f"wiki/{account_customer_id}/KT.md" if account_customer_id else 'wiki/<customer_id>/KT.md'
-    kt_guidance = f"Selected-account terminology and scope: the account KT is at {account_kt_path}. Read it when the user refers to KT or when its account-specific meanings, metrics, campaign naming, or exclusions affect the request. KT campaign exclusions are authoritative for that run: omit those campaigns from recommendation, hold, skip, and customer-facing tables. Never infer a city-to-campaign mapping; ask for exact campaign identity when KT is ambiguous. Ask one focused clarification when ambiguity could change the metric, data pull, or recommendation; otherwise proceed with a brief stated assumption. If the user explicitly confirms a new term or meaning, add the exact clarification to the selected account KT.\n\n" if account_customer_id else ''
+    kt_guidance = "Selected-account rules and terminology: start with ./bob brief; its account_rules are authoritative. Use ./bob search for additional account knowledge and prior decisions. Do not load the whole wiki. Ask when a material account meaning is ambiguous. Respect explicit campaign exclusions.\n\n" if account_customer_id else ''
     schedule_mode = ''
     if schedule_action:
         action = {'sch':'create a weekly scheduled job', 'sch-run':'run an existing scheduled job now',
@@ -416,13 +417,14 @@ def scope_wrapped_prompt(prompt, account_context=None, account_permission='read'
     return ("You are Bob for this workspace only. Answer only questions tied to this Bob project, Google Ads accounts, "
             "wiki, setup, reporting, analysis, budgets, creatives, or technical work clearly connected to this workspace. "
             f"If the user asks for unrelated general knowledge, reply with {OFF_SCOPE_SENTINEL} followed by one short sentence refusing as out of scope.\n\n"
-            "For a confirmed novel read-only analysis not covered by a standard Bob workflow, use the registered Bob MCP data tools first. Materialize only the prepared tables, use the Codex sandbox only for a temporary Pandas analysis in .wings-it, then call the registered verifier before presenting a result. Do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
+            "Use registered Bob MCP data tools during normal investigations, including performance, bids and creative diagnoses. Baseline recipes do not restrict follow-up analysis. Materialize only the prepared tables, use the Codex sandbox only for a temporary Pandas analysis in .wings-it, then call the registered verifier before presenting a result. Do not reuse a legacy CLI fetch plan from earlier native-thread context.\n\n"
             "When the user says a previous blocker or code has been fixed, or asks to retry or recheck, verify the affected capability now with its safe registered tool or data check. Do not repeat a prior failure solely from native-thread context.\n\n"
             "Scheduling is available only through explicit /sch commands. When the user message starts with /sch, follow the bob-scheduling skill and use only Bob's typed scheduling tools. Otherwise do not create or manage a schedule. Never create, update, pause, resume, or delete a native Codex, ChatGPT, Page, Space, operating-system cron job, or other external automation.\n\n"
             "Hosted setup is Admin-owned: never ask the user for a Google Ads developer token, customer ID, MCC ID, account name, campaign type, currency, or account configuration. Never run local CLI onboarding. If Google authorization is missing, ask the user to say ‘Set me up again’; the gateway supplies the authorization link.\n\n"
             + schedule_mode + kt_guidance
             + f"Current selected account: {account_context or 'none'}. Account permission: {account_permission}. Google Ads connection: {'connected' if google_connected else 'not connected'}. Saved data and wiki analysis are allowed without a Google connection. Only a deterministic GOOGLE_AUTH_REQUIRED tool error means setup is required. READ permission may analyze data and prepare plans but cannot apply changes; READ & WRITE permission may apply explicitly approved changes. Always answer using this selected account. Ignore account names in the user message; they must not change the selected account and must not trigger an account clarification question.\n\n"
             + continuity + media_instruction
+            + 'ANSWER CONTRACT: Return your final response as one JSON object with "answer" (user-facing Markdown), "account" (the authoritative customer ID, or empty when none), and "claims" (a list). Every numerical factual statement needs a claim with entity (identifier filter object), metric, period ([YYYY-MM-DD, YYYY-MM-DD]), value, decimals, and source (selected-account processed CSV relative to the state root). For a delta add baseline_source, baseline_period, and operation=delta or delta_percent. Do not invent evidence or claim verification. Keep claims outside the user-facing answer. Include a plans list for any proposed saved plan, each with path (account-scoped YAML relative to state root) and kind (bid_budget or copy). For numeric bid/budget proposals, use claims with kind=proposal, entity.campaign_id, metric=proposed_target_cpa or proposed_daily_budget, value, and source=the listed plan path; these are checked against the validated plan, not treated as observed performance. Never present a proposal as approved or validated before the corresponding checks pass.\n\n'
             + f"User message:\n{prompt}\n\nAUTHORITATIVE CURRENT ACCOUNT: {account_context or 'none'} ({account_customer_id or 'no customer ID'}). Use this account for every lookup, explanation, and recommendation in this turn. Do not reuse an account name from earlier conversation turns."
             )
 def prompt_for_selected_account(store, row, prompt):
@@ -520,7 +522,7 @@ def prepare_conversation_runtime(workspace_id: str):
     state_root = conv_root / 'state'
     workspace.mkdir(parents=True, exist_ok=True)
     state_root.mkdir(parents=True, exist_ok=True)
-    for shared in ('data', 'wiki', 'logs', 'validation', 'garf'):
+    for shared in ('data', 'wiki', 'logs', 'validation', 'garf', 'decisions', 'search'):
         target = STATE_ROOT / shared
         target.mkdir(parents=True, exist_ok=True)
         _safe_link(state_root / shared, target)
@@ -578,10 +580,11 @@ def prepare_conversation_runtime(workspace_id: str):
     return workspace, state_root
 def materialize_runtime_accounts(store, user_id, client_instance_id, state_root: Path, read_config_path: Path, account_id=None):
     """Build account context independently from live Google authorization."""
+    from lib.bob.platform.goals import account_goals
     # Rebuild the CLI-facing account registry in the conversation-local state
     # root so one web conversation's account choice never mutates another's.
     user=store.one('SELECT role FROM users WHERE id=?',(user_id,))
-    account_sql='SELECT id,customer_id,account_name,is_active,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days FROM client_accounts WHERE client_instance_id=? AND is_active=1'
+    account_sql='SELECT id,customer_id,account_name,is_active,primary_goal,currency,campaign_goal_type,creative_lookback_days,creative_min_impressions,cac_ceiling,bid_budget_change_pct,bid_budget_cooldown_days,goals_json FROM client_accounts WHERE client_instance_id=? AND is_active=1'
     account_args=[client_instance_id]
     if not user or user['role']!='admin':
         account_sql+=' AND EXISTS (SELECT 1 FROM user_account_access ua WHERE ua.account_id=client_accounts.id AND ua.user_id=?)'
@@ -614,6 +617,7 @@ def materialize_runtime_accounts(store, user_id, client_instance_id, state_root:
             'cac_ceiling': account['cac_ceiling'],
             'bid_budget_change_pct': account['bid_budget_change_pct'],
             'bid_budget_cooldown_days': account['bid_budget_cooldown_days'],
+            'goals': account_goals(dict(account, goals=json.loads(account['goals_json']))),
         }, indent=2) + '\n')
         try: profile_path.chmod(0o600)
         except OSError: pass
@@ -1174,9 +1178,56 @@ async def update_client_account(client_id: str, account_id: str, body: AccountUp
     if len(customer_id)!=10: raise HTTPException(400,'customer ID must contain 10 digits')
     if s.one('SELECT id FROM client_accounts WHERE client_instance_id=? AND customer_id=? AND id<>?',(client_id,customer_id,account_id)): raise HTTPException(409,'account customer ID already exists')
     name=body.account_name.strip() or customer_id
+    supplied = body.model_fields_set
+    merged = dict(account)
+    merged.update(body.model_dump(exclude_unset=True))
+    body = AccountUpdateIn(**{key: merged[key] for key in AccountUpdateIn.model_fields})
     settings=account_settings(body)
-    s.run('''UPDATE client_accounts SET account_name=?,customer_id=?,is_active=?,primary_goal=?,currency=?,campaign_goal_type=?,creative_lookback_days=?,creative_min_impressions=?,cac_ceiling=?,bid_budget_change_pct=?,bid_budget_cooldown_days=? WHERE id=?''',(name,customer_id,int(body.is_active),*settings,account_id))
+    from lib.bob.platform.goals import account_goals, APPROACH_FIELDS
+    goals = account_goals(dict(account, goals=json.loads(account['goals_json'])))
+    for key, (legacy, _) in APPROACH_FIELDS.items():
+        if legacy in supplied:
+            goals['usual_approach'][key] = merged[legacy]
+    s.run('''UPDATE client_accounts SET account_name=?,customer_id=?,is_active=?,primary_goal=?,currency=?,campaign_goal_type=?,creative_lookback_days=?,creative_min_impressions=?,cac_ceiling=?,bid_budget_change_pct=?,bid_budget_cooldown_days=?,goals_json=? WHERE id=?''',(name,customer_id,int(body.is_active),*settings,json.dumps(goals),account_id))
     return {'ok':True,'account_id':account_id,'account_name':name,'customer_id':customer_id,'is_active':body.is_active,**dict(zip(('primary_goal','currency','campaign_goal_type','creative_lookback_days','creative_min_impressions','cac_ceiling','bid_budget_change_pct','bid_budget_cooldown_days'),settings))}
+class GoalsIn(BaseModel):
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+    objective: str = ''
+    targets: dict[str, float] = {}
+    usual_approach: dict[str, float | None] = {}
+    priority_order: list[str] = []
+    budget_envelope: dict[str, float] = {}
+    risk_constraints: list[str] = []
+    excluded_entities: list[str] = []
+    protected_names: list[str] = []
+    review_date: str | None = None
+
+@app.put('/api/admin/clients/{client_id}/accounts/{account_id}/goals')
+async def save_account_goals(client_id: str, account_id: str, body: GoalsIn, request: Request):
+    user = await csrf(request)
+    if user['role'] != 'admin':
+        raise HTTPException(403, 'admin required')
+    store = request.app.state.store
+    account = store.one('SELECT * FROM client_accounts WHERE id=? AND client_instance_id=?', (account_id, client_id))
+    if not account:
+        raise HTTPException(404, 'account not found')
+    if set(body.usual_approach) - {'cac_reference', 'typical_change_pct', 'preferred_wait_days'}:
+        raise HTTPException(400, 'unknown usual approach field')
+    if any(value < 0 for value in (*body.targets.values(), *body.budget_envelope.values(),
+                                   *(v for v in body.usual_approach.values() if v is not None))):
+        raise HTTPException(400, 'targets and budget values must be nonnegative')
+    if body.review_date:
+        try:
+            datetime.strptime(body.review_date, '%Y-%m-%d')
+        except ValueError:
+            raise HTTPException(400, 'review date must be YYYY-MM-DD')
+    goals = body.model_dump()
+    if 'usual_approach' not in body.model_fields_set:
+        from lib.bob.platform.goals import account_goals
+        goals['usual_approach'] = account_goals(dict(account, goals=json.loads(account['goals_json'])))['usual_approach']
+    store.run('UPDATE client_accounts SET goals_json=? WHERE id=?', (json.dumps(goals), account_id))
+    return {'ok': True, 'goals': goals}
+
 class UserCreateIn(BaseModel):
     model_config = ConfigDict(extra='forbid')
     identifier: str
@@ -1817,6 +1868,19 @@ async def run_job(app_instance,jid,cid,prompt,row,lock,schedule_action=None):
                 if app_instance.state.cancel.get(jid) and app_instance.state.cancel[jid].is_set():
                     raise asyncio.CancelledError
                 final = final or 'No final response returned.'
+                answer_profile_path = state_root / '.bob' / 'accounts' / str(selected_account['customer_id']) / 'profile.json' if selected_account else None
+                answer_profile = json.loads(answer_profile_path.read_text()) if answer_profile_path and answer_profile_path.exists() else {}
+                checked = await asyncio.wait_for(asyncio.to_thread(check_answer, final, state_root, selected_account['customer_id'] if selected_account else '',
+                                       answer_profile.get('primary_goal', 'in_app_conversions'),
+                                       tuple(answer_profile.get('goals', {}).get('excluded_entities', [])),
+                                       lambda reference: validate_proposal(reference, state_root, answer_profile, runtime_config)), timeout=30)
+                s.event(jid, 'answer_check', {'passed': not checked.warnings and not checked.blocked,
+                                             'blocked': checked.blocked, 'warnings': list(checked.warnings)})
+                if checked.blocked:
+                    raise ValueError('Answer held because its account or evidence scope could not be verified.')
+                final = checked.answer
+                if any('claim' in warning or 'numerical' in warning for warning in checked.warnings):
+                    final += '\n\nSome figures in this answer could not be verified. Review them before acting.'
                 if final.startswith(OFF_SCOPE_SENTINEL):
                     learned = load_learned_offscope()
                     learned.add(normalize_scope_prompt(prompt))

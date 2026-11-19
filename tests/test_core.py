@@ -1235,8 +1235,10 @@ class TestCreativeCopyApply(unittest.TestCase):
             self.validation_error_indexes = set(validation_error_indexes or [])
             self.actual_error_indexes = set(actual_error_indexes or [])
 
-        def search(self, customer_id, query):
+        def search(self, customer_id, query, **kwargs):
             self.queries.append(query)
+            if 'FROM ad_group_ad_asset_view' in query:
+                return []
             return self.rows
 
         def mutate(self, *, request):
@@ -1307,9 +1309,11 @@ class TestCreativeCopyApply(unittest.TestCase):
         )
         ad_group_ad = types.SimpleNamespace(
             resource_name=f"customers/1234567890/adGroupAds/{ad_group_id}~{ad_id}",
+            status=types.SimpleNamespace(name="ENABLED"),
             ad=types.SimpleNamespace(id=ad_id, app_ad=app_ad),
         )
         return types.SimpleNamespace(
+            campaign=types.SimpleNamespace(id=1),
             ad_group=types.SimpleNamespace(id=ad_group_id),
             ad_group_ad=ad_group_ad,
         )
@@ -1363,7 +1367,7 @@ class TestCreativeCopyApply(unittest.TestCase):
         try:
             with mock.patch.object(dp, "_require_write_permission"), \
                  mock.patch.object(dp, "_runtime_write_config_path", return_value=Path(temp.name) / "google.yaml"), \
-                 mock.patch.object(dp, "load_profile", return_value={}), \
+                 mock.patch.object(dp, "load_profile", return_value={"google_ads_customer_id": "1234567890"}), \
                  mock.patch.dict(sys.modules, self._modules(client)), \
                  mock.patch("builtins.input", return_value="y"), \
                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -1423,7 +1427,7 @@ class TestCreativeCopyApply(unittest.TestCase):
 
         changes = [
             self._change(1, 10, 200, 501, "HEADLINE", "Old headline", "New headline"),
-            self._change(2, 10, 200, 502, "DESCRIPTION", "Old description", "New description"),
+            self._change(2, 10, 200, 502, "DESCRIPTION", "Old description", "New description."),
             self._change(3, 20, 300, 503, "HEADLINE", "Other headline", "Better headline"),
         ]
         plan = {"customer_id": "1234567890", "changes": changes, "applied": False, "applied_at": None}
@@ -1434,13 +1438,13 @@ class TestCreativeCopyApply(unittest.TestCase):
         ]
         suggestions = [
             {"id": 1, "text": "New headline"},
-            {"id": 2, "text": "New description"},
+            {"id": 2, "text": "New description."},
             {"id": 3, "text": "Better headline"},
         ]
         plan_path, _, client, error = self._run(plan, suggestions, rows)
 
         self.assertIsNone(error)
-        self.assertIn("ad_group_ad.ad.id IN (200, 300)", client.google_ads_service.queries[0])
+        self.assertTrue(any("ad_group_ad.ad.id IN (200, 300)" in query for query in client.google_ads_service.queries))
         self.assertEqual(len(client.google_ads_service.mutate_calls), 2)
         validation, mutation = client.google_ads_service.mutate_calls
         self.assertTrue(validation.validate_only)
@@ -1454,7 +1458,7 @@ class TestCreativeCopyApply(unittest.TestCase):
         }
         target = by_resource["customers/1234567890/ads/200"]
         self.assertEqual([asset.text for asset in target.update.app_ad.headlines], ["New headline", "Keep headline"])
-        self.assertEqual([asset.text for asset in target.update.app_ad.descriptions], ["New description"])
+        self.assertEqual([asset.text for asset in target.update.app_ad.descriptions], ["New description."])
         saved = yaml.safe_load(plan_path.read_text())
         self.assertTrue(saved["applied"])
         self.assertEqual(saved["apply_status"], "applied")

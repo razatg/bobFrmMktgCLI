@@ -27,6 +27,13 @@ class Store:
         self._ensure_column('client_accounts', 'cac_ceiling', 'REAL NOT NULL DEFAULT 200')
         self._ensure_column('client_accounts', 'bid_budget_change_pct', 'REAL NOT NULL DEFAULT 10')
         self._ensure_column('client_accounts', 'bid_budget_cooldown_days', 'INTEGER NOT NULL DEFAULT 14')
+        self._ensure_column('client_accounts', 'goals_json', "TEXT NOT NULL DEFAULT '{}'")
+        from lib.bob.platform.goals import account_goals
+        for row in self.db.execute('SELECT * FROM client_accounts').fetchall():
+            profile = dict(row)
+            profile['goals'] = json.loads(profile['goals_json'])
+            self.db.execute('UPDATE client_accounts SET goals_json=? WHERE id=?',
+                            (json.dumps(account_goals(profile)), row['id']))
         self._ensure_column('conversations', 'thread_input_tokens_estimate', 'INTEGER NOT NULL DEFAULT 0')
         self._ensure_column('conversations', 'fresh_start_pending', 'INTEGER NOT NULL DEFAULT 0')
         self._ensure_column('jobs', 'input_tokens_estimate', 'INTEGER')

@@ -1,0 +1,13 @@
+# Skill index
+
+Generated from frontmatter; full recipes load on demand.
+
+- [bob-accounts](bob-accounts/SKILL.md): Use for Bob Frm Mktg account setup and management — onboarding ("set me up", "onboard me", "add an account"), switching between accounts, listing accounts, and checking or repairing Google Ads config. Not for performance questions (use bob-performance-analysis).
+- [bob-bid-budget](bob-bid-budget/SKILL.md): Use when answering bid and budget questions for Google Ads app campaigns — generating recommendations, reviewing mutation plans, applying changes, and evaluating whether past changes worked.
+- [bob-creates-it](bob-creates-it/SKILL.md): Use for visual Google Ads creative requests: find, refresh, adapt, generate, revise, or publish image and video assets from account evidence or user references. The LOW static replacement workflow is one supported route.
+- [bob-creative-copy](bob-creative-copy/SKILL.md): Use when the user asks to review or replace LOW-performing text asset copy in Google App Campaigns.
+- [bob-performance-analysis](bob-performance-analysis/SKILL.md): Use when answering Bob Frm Mktg Google Ads performance questions — yesterday-vs-SDLW, WoW/MoM/MTD account comparisons, ISO-week and calendar-month comparisons, named campaign-segment comparisons, delta diagnosis, creative-underperformance diagnosis, change-history summaries, and suggesting what to ask. Account setup/switching, bid/budget, creative-copy edits, static replacement generation, and sync each have their own skill.
+- [bob-scheduling](bob-scheduling/SKILL.md): Use only when a hosted Bob message starts with /sch, /sch-run, /sch-pause, or /sch-resume. Handles the explicit JTBD scheduling command through Bob's typed tools. Not for ordinary performance questions or execution when a stored task triggers.
+- [bob-self-improve](bob-self-improve/SKILL.md): Use when the user asks Bob to learn from past sessions, review recurring mistakes, run a self-improvement or retro pass, or improve its own skills. Clusters logged friction signals into a proposal-only action plan; never applies changes itself.
+- [bob-sync](bob-sync/SKILL.md): Use when the user wants to sync, share, pull, or push Bob's wiki + self-improvement signals with teammates — triggers like "hey sync", "hey Bob sync", "sync", "share my analyses", "pull the team's updates", "push my wiki". Checks the shared-folder setup, guides one-time setup if it's missing, then runs `./bob sync`.
+- [bob-wings-it](bob-wings-it/SKILL.md): Use registered read-only analysis operations for normal performance, bid/budget and creative investigations, or novel analyses. Never grants mutation permission.

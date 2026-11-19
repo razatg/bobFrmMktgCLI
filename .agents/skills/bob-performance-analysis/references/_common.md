@@ -4,7 +4,7 @@ Snippets shared across the bob-performance-analysis intent references. Linked fr
 
 ## Significance Thresholds & Auto-Escalation
 
-Compute automatically after showing the comparison table. If **any** threshold is crossed, **proceed to delta diagnosis without waiting for the user to ask**:
+These are baseline attention thresholds. Investigate material changes using judgement, account goals, conversion maturity and the evidence already in the brief; crossing a threshold is not itself an instruction to change bids or budgets:
 
 | Metric | Threshold |
 |---|---|
@@ -13,7 +13,7 @@ Compute automatically after showing the comparison table. If **any** threshold i
 | CTR % | > 1 percentage point |
 | CTI % or conversion_rate % | > 1 percentage point |
 
-(This mirrors the **Auto-escalation rule** in `CLAUDE.md`.)
+These thresholds are guidance rather than hard business guards.
 
 **Escalation procedure** — follow `references/delta-diagnosis.md` using the *same date windows* as the comparison that triggered it:
 

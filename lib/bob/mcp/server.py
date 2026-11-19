@@ -25,13 +25,14 @@ from server.schedule_tools import with_schedule_tools
 server = MCPServer(
     "bob",
     instructions=(
-        "Use the analysis tools only for confirmed, read-only custom analyses on Bob's selected account. "
+        "Use registered read-only analysis during normal investigations on Bob's selected account. "
         "Use the scheduling tools only for Bob JTBD jobs in the authenticated Chat. Never create an "
         "external Codex, ChatGPT, Page, Space, or operating-system automation."
     ),
 )
 PREPARED: dict[str, PreparedDataset] = {}
 RESULTS: dict[str, AnalysisResult] = {}
+METHODS: dict[str, dict] = {}
 OBSOLETE_ADHOC_DATASETS = {"adgroup_network_period"}
 
 
@@ -113,6 +114,7 @@ def bob_analyze(
     except AnalysisError as exc:
         return preparation_error("ANALYSIS_VALIDATION_FAILED", exc)
     RESULTS[result_handle] = result
+    METHODS[result_handle] = {"sources": sources, "operations": operations, "final_table": final_table}
     return {
         "analysis_marker": {"type": "custom_analysis", "analysis_name": result.analysis_name},
         "result_handle": result.handle,
@@ -145,6 +147,8 @@ def bob_verify_exploration(analysis_name: str, sources: dict[str, str], code_fil
     except AnalysisError as exc:
         return preparation_error("EXPLORATION_VALIDATION_FAILED", exc)
     RESULTS[result_handle] = result
+    METHODS[result_handle] = {"sources": sources, "exploration_code": code_file,
+                              "result_file": result_file, "method_summary": method_summary}
     return {
         "analysis_marker": {"type": "custom_analysis", "analysis_name": result.analysis_name},
         "result_handle": result_handle,
@@ -172,6 +176,33 @@ def bob_publish_result(
     if result is None:
         raise AnalysisError("unknown or expired result handle")
     return publish_result(result, title, output_format)
+
+
+@server.tool(name="bob_record_decision", structured_output=True)
+def bob_record_decision(decision: dict[str, object], result_handles: list[str]) -> dict[str, object]:
+    """Persist a recommendation and immutable copies of cited analysis inputs/outputs."""
+    import json
+    from dataclasses import asdict
+    from lib.bob.performance.adhoc_data import selected_account
+    from lib.bob.platform.core import STATE_ROOT
+    from lib.bob.decisions.records import record
+    account, profile = selected_account()
+    decision = dict(decision)
+    decision.setdefault('goals', profile.get('goals', {}))
+    decision.setdefault('primary_goal', profile.get('primary_goal', 'in_app_conversions'))
+    evidence = list(decision.get("evidence", []))
+    if any(handle not in RESULTS for handle in result_handles):
+        raise AnalysisError("decision cites an unknown result")
+    directory = STATE_ROOT / 'data' / 'processed' / account / 'analysis'
+    directory.mkdir(parents=True, exist_ok=True)
+    for handle in result_handles:
+        method = METHODS.get(handle, {})
+        target = directory / f'{handle}.json'
+        sources = {alias: asdict(source) for alias, source in _resolve_sources(method.get('sources', {})).items()}
+        target.write_text(json.dumps({"result": asdict(RESULTS[handle]), "inputs": sources,
+                                      "method": method}, allow_nan=False))
+        evidence.append({"source": str(target.relative_to(STATE_ROOT)), "operation": method})
+    return record(STATE_ROOT, account, dict(decision, evidence=evidence))
 
 
 @server.tool(name="bob_schedule_list", structured_output=True)

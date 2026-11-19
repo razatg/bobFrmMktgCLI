@@ -28,12 +28,14 @@ from lib.bob.platform.presentation import read_csv
 MAX_PERIOD_DAYS = 366
 
 
-def selected_account() -> tuple[str, dict[str, object]]:
+def selected_account(allow_local: bool = False) -> tuple[str, dict[str, object]]:
     expected = re.sub(r"\D", "", os.environ.get("BOB_SELECTED_CUSTOMER_ID", ""))
-    if not expected:
+    if not expected and not allow_local:
         raise AnalysisError("selected-account scope is unavailable")
     profile = load_profile(required=True)
     actual = re.sub(r"\D", "", str(profile.get("google_ads_customer_id", "")))
+    if not expected and allow_local:
+        expected = actual
     if not actual or actual != expected:
         raise AnalysisError("selected-account scope does not match the active runtime profile")
     return expected, profile
@@ -46,12 +48,14 @@ def prepare_dataset(
     reason: str,
     question: str,
     handle: str,
+    allow_fetch: bool = True,
+    allow_local: bool = False,
 ) -> tuple[PreparedDataset, dict[str, object]]:
     spec = DATASETS.get(dataset)
     if spec is None:
         raise AnalysisError(f"unknown registered dataset: {dataset}")
     start, end = _date_window(from_date, to_date)
-    customer_id, profile = selected_account()
+    customer_id, profile = selected_account(allow_local=allow_local)
     manifest_pulls = _manifest_pull_status(customer_id, dataset, start, end)
     processed_paths = find_processed_files_for_period(spec.subdir, [(start, end)], customer_id)
     path = processed_paths[0] if processed_paths else None
@@ -62,6 +66,8 @@ def prepare_dataset(
             str(profile.get("primary_goal") or "in_app_conversions"),
         )
     if path is None:
+        if not allow_fetch:
+            raise AnalysisError("registered data is unavailable locally; fetching is disabled")
         if not reason.strip() or not question.strip():
             raise AnalysisError("reason and question are required before fetching missing data")
         _fetch_registered(dataset, start, end, customer_id, reason, question)
@@ -74,6 +80,13 @@ def prepare_dataset(
         raise AnalysisError("registered data could not be prepared for the requested period")
     source_rows = read_csv(path)
     if not source_rows:
+        if dataset == "change_history":
+            prepared = PreparedDataset(handle, spec, start.isoformat(), end.isoformat(),
+                                       str(profile.get("primary_goal") or "in_app_conversions"), ())
+            return prepared, {"dataset_handle": handle, "dataset": dataset, "rows": 0,
+                              "fetched": fetched, "source": str(path)}
+        if not allow_fetch:
+            raise AnalysisError("registered local data is empty; fetching is disabled")
         if not reason.strip() or not question.strip():
             raise AnalysisError("reason and question are required before rebuilding empty data")
         _fetch_registered(dataset, start, end, customer_id, reason, question, force=True)
@@ -98,6 +111,7 @@ def prepare_dataset(
         rows=rows,
     )
     return prepared, {
+        "source": str(path),
         "dataset_handle": handle,
         "dataset": dataset,
         "from": prepared.start,

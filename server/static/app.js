@@ -101,7 +101,52 @@ function renderClientSection(section,d){
   $('#add-account-from-tab')?.addEventListener('click',()=>openClientModal(c));
   $('#add-user-form')?.addEventListener('submit',async e=>{e.preventDefault();try{await api(`/api/admin/clients/${selectedClientId}/users`,{method:'POST',body:JSON.stringify({identifier:$('#new-user-identifier').value,password:$('#new-user-password').value})});await renderSelectedClient()}catch(x){alert(x.message)}});
   $('#save-creative-config')?.addEventListener('click',saveCreativeConfig);
+  if(section==='accounts')renderGoalEditors(target,d.accounts);
   if(section==='overview')bindClientInviteForm();
+}
+function renderGoalEditors(target,accounts){
+  for(const account of accounts){
+    const goals=JSON.parse(account.goals_json||'{}'), panel=document.createElement('form');
+    panel.className='detail-panel goals-editor';
+    panel.innerHTML=`<h3>${escapeHtml(account.account_name)} · GOALS</h3>
+      <label>Objective<input name="objective" value="${escapeHtml(goals.objective||'')}"></label>
+      <label>Priorities in order (one per line)<textarea name="priorities">${escapeHtml((goals.priority_order||[]).join('\n'))}</textarea></label>
+      <label>Target metric<select name="metric"><option value="cpi">Cost per install</option><option value="cpa">Cost per in-app conversion</option></select></label>
+      <label>Target cost (${escapeHtml(account.currency||'account currency')})<input name="cost" type="number" min="0" step="any"></label>
+      <label>Monthly budget target (${escapeHtml(account.currency||'account currency')})<input name="monthly" type="number" min="0" step="any" value="${goals.budget_envelope?.monthly??''}"></label>
+      <h4>Usual approach</h4>
+      <p>Bob uses these as starting points. When recommending a departure, it explains the evidence, trade-off and expected outcome for your review.</p>
+      <label>Acquisition cost reference (${escapeHtml(account.currency||'account currency')})<input name="cac" type="number" min="0" step="any"></label>
+      <label>Typical bid/budget adjustment (%)<input name="adjustment" type="number" min="0" step="any"></label>
+      <label>Preferred time between changes (days)<input name="wait" type="number" min="0" step="1"></label>
+      <label>Context and preferences (one per line)<textarea name="risks">${escapeHtml((goals.risk_constraints||[]).join('\n'))}</textarea></label>
+      <label>Names to preserve in copy (one per line)<textarea name="protected">${escapeHtml((goals.protected_names||[]).join('\n'))}</textarea></label>
+      <label>Review by<input name="review" type="date" value="${escapeHtml(goals.review_date||'')}"></label>
+      <button>SAVE GOALS</button><span role="status"></span>`;
+    const metric=Object.hasOwn(goals.targets||{},'cpa')?'cpa':Object.hasOwn(goals.targets||{},'cpi')?'cpi':account.primary_goal==='installs'?'cpi':'cpa';
+    const input=name=>panel.elements.namedItem(name);
+    input('metric').value=metric;
+    input('cost').value=goals.targets?.[metric]??'';
+    const approach=goals.usual_approach||{};
+    input('cac').value=Object.hasOwn(approach,'cac_reference')?(approach.cac_reference??''):(account.cac_ceiling??'');
+    input('adjustment').value=Object.hasOwn(approach,'typical_change_pct')?(approach.typical_change_pct??''):(account.bid_budget_change_pct??'');
+    input('wait').value=Object.hasOwn(approach,'preferred_wait_days')?(approach.preferred_wait_days??''):(account.bid_budget_cooldown_days??'');
+    panel.onsubmit=async event=>{
+      event.preventDefault();
+      const field=name=>panel.elements.namedItem(name).value, lines=name=>field(name).split('\n').map(x=>x.trim()).filter(Boolean);
+      const payload={...goals,objective:field('objective'),priority_order:lines('priorities'),risk_constraints:lines('risks'),protected_names:lines('protected'),review_date:field('review')||null,
+        usual_approach:{cac_reference:field('cac')?Number(field('cac')):null,typical_change_pct:field('adjustment')?Number(field('adjustment')):null,preferred_wait_days:field('wait')?Number(field('wait')):null},
+        targets:{...(goals.targets||{})},budget_envelope:{...(goals.budget_envelope||{})}};
+      delete payload.targets.cpi;delete payload.targets.cpa;
+      if(field('cost'))payload.targets[field('metric')]=Number(field('cost'));
+      if(field('monthly'))payload.budget_envelope.monthly=Number(field('monthly'));else delete payload.budget_envelope.monthly;
+      const button=panel.querySelector('button:not([type=button])');button.disabled=true;
+      try{const saved=await api(`/api/admin/clients/${selectedClientId}/accounts/${account.id}/goals`,{method:'PUT',body:JSON.stringify(payload)});Object.assign(goals,saved.goals);account.goals_json=JSON.stringify(saved.goals);panel.querySelector('[role=status]').textContent='Goals saved.'}
+      catch(error){panel.querySelector('[role=status]').textContent=error.message}
+      finally{button.disabled=false}
+    };
+    target.append(panel);
+  }
 }
 async function loadGlobalGoogleConfig(){try{const cfg=await api('/api/admin/google-ads/config');$('#admin-environment').value=cfg.environment.toUpperCase();$('#admin-base-url').value=cfg.base_url||'';$('#admin-client-id').value=cfg.oauth_client_id||'';$('#admin-redirect-uri').value=cfg.redirect_uri||'';$('#admin-developer-token').value='';$('#admin-client-secret').value='';$('#admin-config-status').textContent=cfg.configured?'Application configured; secrets remain masked.':''}catch(x){if($('#admin-config-status'))$('#admin-config-status').textContent=x.message}}
 async function loadSystemUsers(){try{const users=await api('/api/admin/users');$('#system-users-list').innerHTML=users.map(u=>`<div class="admin-row"><span>${escapeHtml(u.email_or_identifier)}<small>${escapeHtml(u.role)} · ${escapeHtml(u.status)} · Google ${escapeHtml(u.google_status)}</small></span></div>`).join('')}catch(x){$('#system-users-list').textContent=x.message}}

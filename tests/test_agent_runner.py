@@ -37,7 +37,7 @@ class AgentRunnerTests(unittest.TestCase):
         self.assertEqual(values['mcp_servers.bob.default_tools_approval_mode'], 'approve')
         self.assertEqual(values['mcp_servers.bob.enabled_tools'], [
             'bob_resolve_dates', 'bob_data_catalog', 'bob_prepare_data',
-            'bob_analyze', 'bob_materialize_exploration', 'bob_verify_exploration', 'bob_publish_result',
+            'bob_analyze', 'bob_materialize_exploration', 'bob_verify_exploration', 'bob_publish_result', 'bob_record_decision',
             'bob_schedule_list', 'bob_schedule_create', 'bob_schedule_update',
             'bob_schedule_pause', 'bob_schedule_resume', 'bob_schedule_run_now',
             'bob_schedule_delete',

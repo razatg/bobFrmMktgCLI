@@ -306,10 +306,15 @@ def static_variants_apply(args: argparse.Namespace) -> None:
 
     profile = load_profile(required=False)
     customer_id = str(plan.get("customer_id") or profile.get("google_ads_customer_id", "")).replace("-", "")
+    if customer_id != str(profile.get("google_ads_customer_id", "")).replace("-", ""):
+        die("static plan is outside the selected account")
     if not customer_id:
         die("customer_id missing from plan and profile")
     if str(source_manifest.get("customer_id", "")).replace("-", "") != customer_id:
         die("static source manifest belongs to a different account")
+    if plan.get("decision_id"):
+        from lib.bob.decisions.records import get, update
+        get(STATE_ROOT, customer_id, plan["decision_id"])
 
     prepared: list[dict[str, Any]] = []
     for idx, change in enumerate(changes, 1):
@@ -338,6 +343,9 @@ def static_variants_apply(args: argparse.Namespace) -> None:
         if not replacement_path.exists():
             die(f"replacement image not found for asset {asset_id}: {replacement_path}")
         info = _image_file_info(replacement_path)
+        excluded = profile.get('goals', {}).get('excluded_entities', [])
+        if excluded and (not source.get('campaign_id') or str(source['campaign_id']) in excluded):
+            die('static placement is excluded or its campaign identity is unavailable')
         source_width = int(number(source.get("width")) or 0)
         source_height = int(number(source.get("height")) or 0)
         if source_width and info["width"] != source_width:
@@ -383,15 +391,6 @@ def static_variants_apply(args: argparse.Namespace) -> None:
         print("\n[dry-run] no Google Ads changes applied")
         return
 
-    print("\nApprove upload + app-ad image replacement? [y/n]: ", end="", flush=True)
-    try:
-        answer = input().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\nAborted.")
-        return
-    if answer != "y":
-        print("Aborted — no changes applied.")
-        return
 
     try:
         import yaml as _yaml
@@ -419,7 +418,7 @@ def static_variants_apply(args: argparse.Namespace) -> None:
             " ad_group_ad.ad.app_ad.images"
             " FROM ad_group_ad"
             f" WHERE ad_group.id = {item['ad_group_id']}"
-            " AND ad_group_ad.status != 'REMOVED'"
+            " AND ad_group_ad.status = 'ENABLED'"
         )
         try:
             rows = list(ga_svc.search(customer_id=customer_id, query=gaql))
@@ -432,6 +431,22 @@ def static_variants_apply(args: argparse.Namespace) -> None:
 
     if results:
         raise SystemExit(2)
+
+    print("\nApprove upload + app-ad image replacement? [y/n]: ", end="", flush=True)
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return
+    if answer != "y":
+        print("Aborted — no changes applied.")
+        return
+
+    from lib.bob.bid_budget.guards import plan_hash
+    import hashlib
+    plan['approved_hash'] = plan_hash({'customer_id': customer_id, 'changes': [
+        {'old_asset': item['old_asset_resource'], 'ad_group_id': item['ad_group_id'], 'ad_id': item['ad_id'],
+         'image_sha256': hashlib.sha256(item['image_info']['data']).hexdigest()} for item in verified]})
 
     for item in verified:
         asset_op = client.get_type("AssetOperation")
@@ -459,7 +474,7 @@ def static_variants_apply(args: argparse.Namespace) -> None:
             "SELECT ad_group_ad.resource_name, ad_group_ad.ad.id, ad_group_ad.ad.app_ad.images"
             " FROM ad_group_ad"
             f" WHERE ad_group.id = {item['ad_group_id']}"
-            " AND ad_group_ad.status != 'REMOVED'"
+            " AND ad_group_ad.status = 'ENABLED'"
         )
         try:
             matched_ad, matched_images = _matching_app_ad(
@@ -517,6 +532,10 @@ def static_variants_apply(args: argparse.Namespace) -> None:
     ]
     if plan_path:
         plan_path.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
+        if plan.get("decision_id"):
+            update(STATE_ROOT, customer_id, plan["decision_id"], "execution",
+                   {"executed_at": plan["applied_at"], "plan": str(plan_path),
+                    "results": plan["apply_results"], "complete": plan["applied"]})
         print(f"\nplan updated: {plan_path}")
 
     n_replaced = sum(1 for r in results if r.get("status") == "replaced")

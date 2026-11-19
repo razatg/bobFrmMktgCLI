@@ -19,38 +19,38 @@ Examples: "W20 vs W19", "week 20 vs week 19", "compare May MTD with April", "how
 
 ```bash
 # Compare last complete week vs the week before (default)
-python3 lib/datapull.py compare-weeks
+./bob compare-weeks
 
 # Compare specific weeks
-python3 lib/datapull.py compare-weeks --week 20 --vs 19
+./bob compare-weeks --week 20 --vs 19
 
 # Account level only
-python3 lib/datapull.py compare-weeks --week 20 --vs 19 --grain account
+./bob compare-weeks --week 20 --vs 19 --grain account
 
 # Campaign level only, with name filter
-python3 lib/datapull.py compare-weeks --week 20 --vs 19 --grain campaign --name-contains "Stable"
+./bob compare-weeks --week 20 --vs 19 --grain campaign --name-contains "Stable"
 
 # Save full campaign CSV
-python3 lib/datapull.py compare-weeks --week 20 --vs 19 --output FILE
+./bob compare-weeks --week 20 --vs 19 --output FILE
 ```
 
 ### Month Comparison (MTD by default)
 
 ```bash
 # Compare current month MTD vs prior month MTD (default)
-python3 lib/datapull.py compare-months
+./bob compare-months
 
 # Compare specific months MTD: May 1–19 vs Apr 1–19
-python3 lib/datapull.py compare-months --month 5 --vs 4
+./bob compare-months --month 5 --vs 4
 
 # Full calendar months (May 1–31 vs Apr 1–30)
-python3 lib/datapull.py compare-months --month 5 --vs 4 --full
+./bob compare-months --month 5 --vs 4 --full
 
 # Campaign level with name filter
-python3 lib/datapull.py compare-months --month 5 --vs 4 --grain campaign --name-contains "Brand"
+./bob compare-months --month 5 --vs 4 --grain campaign --name-contains "Brand"
 
 # Save account + campaign CSVs
-python3 lib/datapull.py compare-months --month 5 --vs 4 \
+./bob compare-months --month 5 --vs 4 \
   --output-account FILE_ACCOUNT --output FILE_CAMPAIGN
 ```
 
@@ -60,10 +60,10 @@ The command prints the exact fetch + aggregate commands needed. Run them, then r
 
 ```bash
 # Example: W20 campaign files missing
-python3 lib/datapull.py fetch --query campaign_network_period --from 2026-05-11 --to 2026-05-17
-python3 lib/datapull.py fetch --query campaign_network_period --from 2026-05-04 --to 2026-05-10
-python3 lib/datapull.py aggregate --grain campaign_network_period
-python3 lib/datapull.py compare-weeks --week 20 --vs 19
+./bob fetch --query campaign_network_period --from 2026-05-11 --to 2026-05-17
+./bob fetch --query campaign_network_period --from 2026-05-04 --to 2026-05-10
+./bob aggregate --grain campaign_network_period
+./bob compare-weeks --week 20 --vs 19
 ```
 
 ## Date Resolution

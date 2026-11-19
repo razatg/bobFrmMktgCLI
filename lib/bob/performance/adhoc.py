@@ -42,6 +42,7 @@ class DatasetSpec:
     dimensions: tuple[str, ...]
     additive_metrics: tuple[str, ...] = BASE_METRICS
     allows_reach: bool = False
+    numeric_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,17 @@ class AnalysisResult:
 
 
 DATASETS: dict[str, DatasetSpec] = {
+    "bid_budget_inputs": DatasetSpec(
+        "bid_budget_inputs", "bid-budget-inputs",
+        ("customer_id", "campaign_id", "campaign_name", "campaign_status", "primary_status",
+         "primary_status_reasons", "bidding_strategy_type", "campaign_budget_id"),
+        numeric_fields=("daily_budget", "target_cpa", "budget_utilization_pct"),
+    ),
+    "change_history": DatasetSpec(
+        "change_history", "change-history",
+        ("customer_id", "campaign_id", "ad_group_id", "asset_id", "changed_at", "operation",
+         "change_resource_type", "change_resource_name", "changed_fields"), additive_metrics=(),
+    ),
     "account_network_period": DatasetSpec(
         "account_network_period", "account-network",
         ("customer_id", "customer_name", "network"),
@@ -119,8 +131,9 @@ def catalog() -> dict[str, object]:
                 "name": spec.name,
                 "dimensions": list(spec.dimensions),
                 "additive_metrics": list(spec.additive_metrics),
+                "non_additive_metrics": list(spec.numeric_fields),
                 "derived_metrics": [
-                    metric for metric in DERIVED_METRICS if metric != "frequency" or spec.allows_reach
+                    metric for metric in DERIVED_METRICS if spec.additive_metrics and (metric != "frequency" or spec.allows_reach)
                 ],
                 "reach_restriction": (
                     "reach and frequency remain at campaign grain" if spec.allows_reach else "unavailable"
@@ -149,6 +162,10 @@ def normalize_source_rows(spec: DatasetSpec, rows: list[dict[str, str]], custome
         if row_customer and row_customer != normalized_customer:
             raise AnalysisError("dataset contains rows outside the selected account")
         row: Row = {dimension: str(source.get(dimension, "")) for dimension in spec.dimensions}
+        row["customer_id"] = normalized_customer
+        for metric in spec.numeric_fields:
+            raw_value = source.get(metric)
+            row[metric] = None if raw_value is None or str(raw_value).upper() in {'', 'NA', 'NULL', 'NAN'} else number(raw_value)
         for metric in spec.additive_metrics:
             row[metric] = number(source.get(metric))
         output.append(row)
@@ -173,6 +190,10 @@ def run_analysis(
     if source_rows > MAX_SOURCE_ROWS:
         raise AnalysisError(f"sources exceed the {MAX_SOURCE_ROWS:,}-row analysis limit")
     goals = {source.primary_goal for source in sources.values()}
+    accounts = {str(row.get("customer_id", "")) for source in sources.values() for row in source.rows}
+    accounts.discard("")
+    if len(accounts) > 1:
+        raise AnalysisError("analysis cannot mix accounts")
     if len(goals) != 1:
         raise AnalysisError("all sources must use the same selected-account goal")
     tables = {alias: [dict(row) for row in source.rows] for alias, source in sources.items()}
@@ -254,6 +275,8 @@ def _group_sum(
     grouped: dict[tuple[Scalar, ...], Row] = {}
     for row in rows:
         key = tuple(row[column] for column in keys)
+        if any(value in (None, "") for value in key):
+            raise AnalysisError("join keys must not be missing")
         target = grouped.setdefault(key, {column: row[column] for column in keys})
         for metric in metrics:
             target[metric] = number(target.get(metric)) + number(row.get(metric))

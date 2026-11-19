@@ -16,6 +16,10 @@ env/
 .env
 *.sqlite3
 
+# Account decision evidence and retrieval indexes are private runtime state.
+/decisions/
+/search/
+
 # --- Bob Frm Mktg ---
 
 # Local account registry and per-account configs (local state, not for sharing)

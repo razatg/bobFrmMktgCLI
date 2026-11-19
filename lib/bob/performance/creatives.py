@@ -10,42 +10,20 @@ from lib.bob.platform.core import *  # noqa: F403
 from lib.bob.platform.data import *  # noqa: F403
 from lib.bob.platform.presentation import *  # noqa: F403
 
-def slice_creatives(args: argparse.Namespace) -> None:
-    """Filter creative processed CSV to LOW-label assets, flag Low-Action, show patterns."""
-    profile = load_profile(required=False)
-    min_imp = float(getattr(args, "min_impressions", None) or profile.get("creative_min_impressions", 50000))
-    primary_goal = profile.get("primary_goal", "in_app_conversions")
-    currency = _currency_symbol(profile.get("currency", ""))
-    customer_id = profile.get("google_ads_customer_id")
-
-    creative_paths = _creative_processed_paths(customer_id)
-    creative_path = creative_paths[-1]
-    rows = []
-    for creative_path in creative_paths:
-        rows.extend(read_csv(creative_path))
-    rows = _dedupe_creative_rows(rows)
-    if not rows:
-        print(
-            f"No creative data in {creative_path.name} (account {customer_id}). "
-            f"Nothing to slice.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
+def creative_baseline(rows: list[dict], min_imp: float, primary_goal: str) -> list[dict]:
+    """Existing LOW policy as reusable evidence, without presentation or writes."""
     # Step 1: filter to min impressions only
     eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
     # Step 2: filter to LOW label only
     low_rows = [r for r in eligible if r.get("performance_label", "").upper() == "LOW"]
 
     if not low_rows:
-        print(f"No LOW-label creatives above {min_imp:.0f} minimum impressions.")
-        return
+        return []
 
     # Build per-(campaign, asset_type) aggregates so text/video/image are compared fairly
-    conv_col = "in_app_conversions" if primary_goal == "in_app_conversions" else "installs"
     camp_agg: dict[tuple, dict] = {}
     for r in eligible:
-        key = (r.get("campaign_name", ""), r.get("asset_type", ""))
+        key = (r.get("campaign_id") or r.get("campaign_name", ""), r.get("field_type") or r.get("asset_type", ""))
         if key not in camp_agg:
             camp_agg[key] = {"imp": 0.0, "clicks": 0.0, "installs": 0.0, "cost": 0.0}
         camp_agg[key]["imp"] += number(r.get("impressions", 0))
@@ -61,7 +39,7 @@ def slice_creatives(args: argparse.Namespace) -> None:
     # Count assets per (campaign, asset_type) so we know when comparison is meaningful
     type_counts_per_camp: dict[tuple, int] = {}
     for r in eligible:
-        key = (r.get("campaign_name", ""), r.get("asset_type", ""))
+        key = (r.get("campaign_id") or r.get("campaign_name", ""), r.get("field_type") or r.get("asset_type", ""))
         type_counts_per_camp[key] = type_counts_per_camp.get(key, 0) + 1
 
     # Flag each LOW creative: low-action = 2+ metrics worse than campaign+asset_type avg
@@ -69,7 +47,8 @@ def slice_creatives(args: argparse.Namespace) -> None:
     for r in low_rows:
         cname = r.get("campaign_name", "")
         atype = r.get("asset_type", "")
-        cm = camp_agg.get((cname, atype), {})
+        group = (r.get("campaign_id") or cname, r.get("field_type") or atype)
+        cm = camp_agg.get(group, {})
 
         asset_ctr = number(r.get("ctr_percent", 0))
         asset_cti = number(r.get("cti_percent", 0))
@@ -79,7 +58,7 @@ def slice_creatives(args: argparse.Namespace) -> None:
         worse_cti = asset_cti < cm.get("cti", 0) * 0.90 if cm.get("cti", 0) > 0 else False
         worse_cpc = asset_cpc > cm.get("cpc", 0) * 1.10 if cm.get("cpc", 0) > 0 else False
 
-        peers = type_counts_per_camp.get((cname, atype), 0)
+        peers = type_counts_per_camp.get(group, 0)
         if peers <= 1:
             # Only asset of its type in this campaign — can't compare; trust the API LOW label
             flag = "low-action"
@@ -108,6 +87,36 @@ def slice_creatives(args: argparse.Namespace) -> None:
             "worse_cti": str(worse_cti),
             "worse_cpc": str(worse_cpc),
         })
+
+    return results
+
+
+def slice_creatives(args: argparse.Namespace) -> None:
+    """Filter creative processed CSV to LOW-label assets, flag Low-Action, show patterns."""
+    profile = load_profile(required=False)
+    min_imp = float(getattr(args, "min_impressions", None) or profile.get("creative_min_impressions", 50000))
+    primary_goal = profile.get("primary_goal", "in_app_conversions")
+    currency = _currency_symbol(profile.get("currency", ""))
+    customer_id = profile.get("google_ads_customer_id")
+
+    creative_paths = _creative_processed_paths(customer_id)
+    creative_path = creative_paths[-1]
+    rows = []
+    for creative_path in creative_paths:
+        rows.extend(read_csv(creative_path))
+    rows = _dedupe_creative_rows(rows)
+    if not rows:
+        print(
+            f"No creative data in {creative_path.name} (account {customer_id}). "
+            f"Nothing to slice.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    results = creative_baseline(rows, min_imp, primary_goal)
+    if not results:
+        print(f"No LOW-label creatives above {min_imp:.0f} minimum impressions.")
+        return
 
     text_low_action = [r for r in results if r["flag"] == "low-action" and r["asset_type"] == "TEXT"]
     text_low_watch = [r for r in results if r["flag"] == "low-watch" and r["asset_type"] == "TEXT"]

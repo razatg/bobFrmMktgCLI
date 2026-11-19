@@ -5,7 +5,7 @@ Use when the user asks what questions to ask, or as the post-onboarding follow-u
 ## When to Load This File
 
 - User says "suggest questions", "what can I ask", "what should I ask", "give me questions", "what can you do", "what's possible", "show me examples"
-- After `python3 lib/datapull.py onboard` completes successfully (see post-onboarding step in SKILL.md)
+- After `./bob onboard` completes successfully (see post-onboarding step in SKILL.md)
 
 ## How to Present
 

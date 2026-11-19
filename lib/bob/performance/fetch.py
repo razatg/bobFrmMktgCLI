@@ -16,6 +16,8 @@ from lib.bob.platform.core import *  # noqa: F403
 from lib.bob.performance.aggregate import aggregate
 
 def _fetch_one(args: argparse.Namespace) -> None:
+    if os.getenv("BOB_ALLOW_FETCH", "1") == "0" and not args.dry_run:
+        die("Live fetching is disabled in this environment; use the snapshot evidence.")
     ensure_dirs()
     profile = load_profile(required=not bool(args.account))
     query_name = args.query

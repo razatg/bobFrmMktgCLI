@@ -62,6 +62,8 @@ def _runtime_write_config_path() -> Path:
     return path
 
 def _require_write_permission() -> None:
+    if os.getenv("BOB_DISABLE_WRITES", "").lower() in {"1", "true", "yes"}:
+        die("Google Ads writes are disabled in this environment.")
     if os.getenv("BOB_ACCOUNT_PERMISSION", "read").strip().lower() != "read_write":
         die("This Bob user has READ access only. READ & WRITE permission is required to apply Google Ads changes.")
 

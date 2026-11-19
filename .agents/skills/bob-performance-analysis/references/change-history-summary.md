@@ -18,10 +18,10 @@ Use for questions asking what the team worked on yesterday, this week, or this m
 # garf/outputs/raw/change_history/<account>_<start>_<end>_<run>.csv
 
 # Re-fetch for a wider or custom window:
-python3 lib/datapull.py fetch --query change_history --days <N>
+./bob fetch --query change_history --days <N>
 
 # For performance context alongside changes:
-python3 lib/datapull.py aggregate --grain campaign_network_period \
+./bob aggregate --grain campaign_network_period \
   --input garf/outputs/raw/campaign_network_period/<account>_<start>_<end>_<run>.csv
 ```
 

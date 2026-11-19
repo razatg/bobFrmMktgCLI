@@ -58,6 +58,11 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
     rows = []
     for creative_path in creative_paths:
         rows.extend(read_csv(creative_path))
+    good_texts: dict[tuple[str, str], set[str]] = {}
+    for peer in rows:
+        if str(peer.get('performance_label', '')).upper() in {'GOOD', 'BEST'} and peer.get('asset_text'):
+            key = (str(peer.get('ad_group_id', '')), str(peer.get('field_type', '')))
+            good_texts.setdefault(key, set()).add(str(peer['asset_text']))
     rows = _dedupe_creative_rows(rows)
     eligible = [r for r in rows if number(r.get("impressions", 0)) >= min_imp]
 
@@ -126,6 +131,9 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
             "asset_id": r.get("asset_id", ""),
             "field_type": ft,
             "current_text": r.get("asset_text", ""),
+            "protected_terms": [term for term in profile.get("goals", {}).get("protected_names", [])
+                                if term.casefold() in str(r.get("asset_text", "")).casefold()],
+            "existing_good": sorted(good_texts.get((str(r.get('ad_group_id', '')), ft), set())),
             "current_asset_count": ag_field_counts.get((r.get("ad_group_id", ""), ft), 0),
             "ctr_percent": format_float(asset_ctr),
             "campaign_avg_ctr": format_float(cm.get("ctr", 0)),
@@ -163,6 +171,7 @@ def suggest_creative_copy(args: argparse.Namespace) -> None:
     _strip = {"_metric_note"}
     yaml_changes = [{k: v for k, v in c.items() if k not in _strip} for c in changes]
     plan = {
+        "decision_required": True,
         "date": today,
         "customer_id": customer_id,
         "changes": yaml_changes,

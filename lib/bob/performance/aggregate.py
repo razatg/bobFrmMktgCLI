@@ -50,6 +50,8 @@ def aggregate(args: argparse.Namespace) -> None:
 
     if grain == "account_daily":
         _agg_account_daily(args, profile, primary_goal)
+    elif grain in {"bid_budget_inputs", "change_history"}:
+        _agg_context(args, profile)
     elif grain in _NETWORK_PERIOD_KEY_COLS:
         _agg_network_period(args, profile, grain, primary_goal)
     elif grain == "creative_period":
@@ -58,6 +60,33 @@ def aggregate(args: argparse.Namespace) -> None:
         _agg_campaign_weekly_trend(args, profile, primary_goal)
     else:
         die(f"unknown grain: {grain}")
+
+
+def _agg_context(args: argparse.Namespace, profile: dict) -> None:
+    """Preserve native settings/events; never sum budgets or event identifiers."""
+    customer = str(args.customer or profile.get("google_ads_customer_id", "")).replace("-", "")
+    start, end = dt.date.fromisoformat(args.from_date), dt.date.fromisoformat(args.to)
+    paths = [Path(path) for path in getattr(args, "input_paths", [])]
+    if not paths:
+        paths = find_raw_files_for_range(args.grain, start, end, customer) or []
+    if not paths:
+        die("context dataset has no complete raw window")
+    rows = [row for path in paths for row in read_csv(path)]
+    if any(str(row.get("customer_id", customer)).replace("-", "") != customer for row in rows):
+        die("context evidence contains another account")
+    rows = [dict(row, customer_id=customer) for row in rows]
+    if args.grain == "bid_budget_inputs":
+        if len(paths) != 1:
+            die("settings need one exact-window pull; overlapping snapshots cannot be summed")
+        days = (end - start).days + 1
+        for row in rows:
+            budget = number(row.get("daily_budget"))
+            row["budget_utilization_pct"] = number(row.get("cost")) / (budget * days) * 100 if budget else "NA"
+    fields = sorted(set().union(*(row.keys() for row in rows))) if rows else ["customer_id"]
+    subdir = args.grain.replace("_", "-")
+    output = account_processed_dir(customer, subdir) / f"{customer}_{start}_{end}.csv"
+    write_csv(output, rows, fields)
+    print(f"processed context written: {output}")
 
 
 def _agg_account_daily(

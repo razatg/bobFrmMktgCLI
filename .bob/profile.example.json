@@ -12,5 +12,20 @@
   "creative_min_impressions": 50000,
   "cac_ceiling": 200,
   "bid_budget_change_pct": 10,
-  "bid_budget_cooldown_days": 14
+  "bid_budget_cooldown_days": 14,
+  "goals": {
+    "usual_approach": {
+      "cac_reference": 200,
+      "typical_change_pct": 10,
+      "preferred_wait_days": 14
+    },
+    "objective": "",
+    "targets": {},
+    "priority_order": [],
+    "budget_envelope": {},
+    "risk_constraints": [],
+    "excluded_entities": [],
+    "protected_names": [],
+    "review_date": null
+  }
 }

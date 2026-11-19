@@ -30,7 +30,7 @@ Bootstrap pre-fetches these. Check what's available, then aggregate:
 ls garf/outputs/raw/account_network_period/
 
 # Aggregate all available account_network_period raw files
-python3 lib/datapull.py aggregate --grain account_network_period
+./bob aggregate --grain account_network_period
 # Output lands in data/processed/account-network/
 
 # See processed outputs — pick the yesterday and SDLW files by date in filename
@@ -40,9 +40,9 @@ ls data/processed/account-network/
 To re-fetch if missing:
 
 ```bash
-python3 lib/datapull.py fetch --query account_network_period --from <yesterday> --to <yesterday>
-python3 lib/datapull.py fetch --query account_network_period --from <sdlw> --to <sdlw>
-python3 lib/datapull.py aggregate --grain account_network_period
+./bob fetch --query account_network_period --from <yesterday> --to <yesterday>
+./bob fetch --query account_network_period --from <sdlw> --to <sdlw>
+./bob aggregate --grain account_network_period
 ```
 
 ## Output

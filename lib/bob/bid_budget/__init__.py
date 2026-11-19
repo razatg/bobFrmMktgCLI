@@ -16,7 +16,7 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
     primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
     cac_ceiling = float(args.cac_ceiling or profile.get("cac_ceiling", 200))
-    change_pct = min(float(args.change_pct or profile.get("bid_budget_change_pct", 10)), 20)
+    change_pct = float(args.change_pct or profile.get("bid_budget_change_pct", 10))
     min_installs = 10
     budget_constrained_threshold = 0.90
     cpm_tolerance = 1.05
@@ -70,7 +70,6 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
         pass  # change_history is informational; don't block recommend if unavailable
 
     today_str = today().isoformat()
-    cooldown_cutoff = (today() - dt.timedelta(days=cooldown_days)).isoformat()
 
     changes: list[dict] = []
     holds: list[dict] = []
@@ -131,19 +130,12 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
 
         # CPA for CAC guard: use actual W0 CPA if available; fall back to target_cpa bid
         w0_cpa = w0_cost / w0_conv if w0_conv > 0 else 0.0
-        if w0_cpa > 0:
-            cac_ok = w0_cpa <= cac_ceiling
-        elif target_cpa_bid > 0:
-            cac_ok = target_cpa_bid <= cac_ceiling  # bid above ceiling = skip
-        else:
-            cac_ok = False  # no conversion data and no bid → skip
-
-        # Volume guard
-        vol_ok = w0_inst >= min_installs
-
-        # Cooldown guard: skip if campaign was changed within cooldown_days
+        from .guards import eligibility
         last_change = ch_index.get(cid, "")
-        cooldown_ok = not last_change or last_change < cooldown_cutoff
+        vol_ok, cac_ok, cooldown_ok = eligibility(
+            w0_inst, w0_cpa if w0_cpa > 0 else target_cpa_bid,
+            dt.date.fromisoformat(last_change) if last_change else None,
+            on_date=today(), ceiling=cac_ceiling, cooldown_days=cooldown_days)
         days_since_change = (
             (dt.date.fromisoformat(today_str) - dt.date.fromisoformat(last_change)).days
             if last_change else None
@@ -304,6 +296,7 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
     try:
         import yaml as _yaml
         plan = {
+            "decision_required": True,
             "generated": date_str,
             "customer_id": str(customer).replace("-", ""),
             "current_iso_week": int(current_iso) if str(current_iso).isdigit() else current_iso,
@@ -343,10 +336,108 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
             "applied_at": None,
             "applied_by": None,
         }
+        import copy
+        plan["baseline_changes"] = copy.deepcopy(plan["changes"])
         yaml_path.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
         print(f"mutation plan written: {yaml_path}")
     except ImportError:
         print("note: pyyaml not installed — YAML plan not written. Run: pip install pyyaml")
+
+
+def bid_budget_propose(args: argparse.Namespace) -> None:
+    """Save a discretionary final proposal without applying or approving it."""
+    import json
+    import math
+    import yaml
+    from .guards import plan_hash
+    profile = load_profile(required=True)
+    account = str(profile['google_ads_customer_id']).replace('-', '')
+    original = Path(args.plan).resolve()
+    target = Path(args.output).resolve()
+    wiki = account_wiki_dir(account).resolve()
+    if not original.is_relative_to(wiki) or not target.is_relative_to(wiki):
+        die('baseline and final proposal must stay in the selected account wiki')
+    plan = yaml.safe_load(original.read_text())
+    if str(plan.get('customer_id', '')).replace('-', '') != account or plan.get('applied'):
+        die('baseline must be unapplied and belong to the selected account')
+    changes = json.loads(args.changes_json)
+    allowed = {'campaign_id', 'campaign_name', 'action', 'proposed_target_cpa', 'proposed_daily_budget',
+               'campaign_budget_id', 'rationale', 'forecast'}
+    if not isinstance(changes, list) or len(changes) > 1000:
+        die('changes must be a bounded list')
+    for change in changes:
+        if not isinstance(change, dict) or set(change) - allowed or not change.get('rationale'):
+            die('each proposal requires supported fields and an evidence-backed rationale')
+        if not str(change.get('campaign_id', '')).isdigit():
+            die('each proposal requires an exact campaign ID')
+        for field in ('proposed_target_cpa', 'proposed_daily_budget'):
+            if change.get(field) is not None and not math.isfinite(float(change[field])):
+                die('proposed values must be finite')
+    plan.setdefault('baseline_changes', plan.get('changes', []))
+    plan.update(changes=changes, decision_required=True, applied=False)
+    for field in ('approved_hash', 'apply_results', 'applied_at', 'applied_by', 'decision_id'):
+        plan.pop(field, None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(plan, sort_keys=False, allow_unicode=True))
+    print(json.dumps({'proposal': str(target), 'plan_hash': plan_hash(plan),
+                      'status': 'proposed; requires decision, live validation and explicit approval'}))
+
+
+def bid_budget_validate(args: argparse.Namespace) -> None:
+    """Show a live verdict and the exact proposal hash before approval."""
+    import json
+    import yaml
+    from google.ads.googleads.client import GoogleAdsClient
+    from .guards import plan_hash, read_live_state, validate_plan
+    plan = yaml.safe_load(Path(args.plan).read_text())
+    profile = load_profile(required=True)
+    customer = str(profile["google_ads_customer_id"]).replace("-", "")
+    client = GoogleAdsClient.load_from_storage(str(_runtime_write_config_path()))
+    states = read_live_state(client, customer, today(), int(profile.get("bid_budget_cooldown_days", 14)))
+    verdicts = validate_plan(plan, profile, states, on_date=today(), permission="read_write",
+                             applied_today=sum(state.last_change == today() for state in states.values()))
+    print(json.dumps({"plan_hash": plan_hash(plan), "allowed": all(v.allowed for v in verdicts),
+                      "actions": [{"campaign_id": v.campaign_id, "allowed": v.allowed,
+                                   "reasons": v.reasons, "warnings": v.warnings} for v in verdicts]}, indent=2))
+
+
+def _mutate_checkpointed(mutate, customer_id, operations, prior, plan, path):
+    """Persist intent before the request; ambiguity never authorizes a resend."""
+    import os
+    import yaml
+    keys = {(cid, field) for _, cid, field, _, _ in operations}
+    kept = [receipt for receipt in prior if (receipt.get("campaign_id"), receipt.get("field")) not in keys]
+    pending = [{"campaign": name, "campaign_id": cid, "field": field, "value": value, "status": "unknown"}
+               for name, cid, field, value, _ in operations]
+
+    def checkpoint(receipts):
+        plan["apply_results"] = receipts
+        temp = path.with_suffix(path.suffix + '.tmp')
+        temp.write_text(yaml.safe_dump(plan, sort_keys=False))
+        os.replace(temp, path)
+
+    checkpoint(kept + pending)
+    try:
+        response = mutate(customer_id=customer_id, operations=[op for _, _, _, _, op in operations])
+        returned = list(response.results)
+        if len(returned) != len(operations):
+            raise ValueError("mutation result count did not match the request")
+        for receipt, result, (_, _, _, _, operation) in zip(pending, returned, operations):
+            if result.resource_name != operation.update.resource_name:
+                raise ValueError("mutation resource did not match the request")
+            receipt.update(status="ok", resource=result.resource_name,
+                           executed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+    except Exception as exc:
+        try:
+            from google.ads.googleads.errors import GoogleAdsException
+            rejected = isinstance(exc, GoogleAdsException)
+        except ImportError:
+            rejected = False
+        for receipt in pending:
+            receipt.update(status="error" if rejected else "unknown", error=str(exc))
+    receipts = kept + pending
+    checkpoint(receipts)
+    return receipts
 
 
 def bid_budget_apply(args: argparse.Namespace) -> None:
@@ -361,16 +452,22 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
         die(f"plan file not found: {plan_path}")
 
     plan = _yaml.safe_load(plan_path.read_text())
+    if plan.get('decision_required') and not plan.get('decision_id'):
+        die('Record and link the recommendation and prediction before applying this plan.')
+    from .guards import plan_hash, read_live_state, validate_plan
+    approved_hash = getattr(args, "approval_hash", None)
+    if not approved_hash or approved_hash != plan_hash(plan):
+        die("Explicit approval of this exact plan is required. Review the plan and supply --approval-hash from bid-budget-validate.")
+    if any(result.get("status") == "unknown" for result in plan.get("apply_results", [])):
+        die("An earlier mutation has an unknown outcome. Reconcile Google Ads before retrying.")
     retry_fields: set[tuple[str, str]] | None = None
     if plan.get("applied"):
-        prior_errors = [
-            r for r in plan.get("apply_results", [])
-            if r.get("status") == "error" and r.get("campaign") and r.get("field")
-        ]
-        if not prior_errors:
-            die(f"plan already applied on {plan['applied_at']} by {plan['applied_by']}")
-        retry_fields = {(r["campaign"], r["field"]) for r in prior_errors}
-        print(f"retrying {len(retry_fields)} failed mutation(s) from partial apply")
+        die("plan already applied; no operations will be resent")
+    if plan.get("apply_results"):
+        if any(not receipt.get("campaign_id") for receipt in plan["apply_results"]):
+            die("legacy partial receipts lack campaign identities; reconcile before retrying")
+        retry_fields = {(r["campaign_id"], r["field"]) for r in plan["apply_results"]
+                        if r.get("status") in {"error", "not_sent"}}
 
     if not plan.get("changes"):
         print("no changes in plan — nothing to apply")
@@ -385,31 +482,48 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
     config_path = str(_runtime_write_config_path())
     customer_id = str(plan.get("customer_id", profile.get("google_ads_customer_id", ""))).replace("-", "")
+    if customer_id != str(profile.get("google_ads_customer_id", "")).replace("-", ""):
+        die("plan is outside the selected account")
 
     try:
         client = GoogleAdsClient.load_from_storage(config_path)
     except Exception as exc:
         die(f"failed to load Google Ads client: {exc}")
 
-    results: list[dict] = []
+    live = read_live_state(client, customer_id, today(), int(profile.get("bid_budget_cooldown_days", 14)))
+    pending = dict(plan)
+    if retry_fields is not None:
+        pending["changes"] = [change for change in plan["changes"]
+                              if any(cid == str(change["campaign_id"]) for cid, _ in retry_fields)]
+    verdicts = validate_plan(pending, profile, live, on_date=today(),
+                             permission=os.getenv("BOB_ACCOUNT_PERMISSION", "read"),
+                             applied_today=sum(state.last_change == today() for state in live.values()))
+    denied = [verdict for verdict in verdicts if not verdict.allowed]
+    if denied:
+        die("Plan rejected: " + "; ".join(f"{v.campaign_id}: {', '.join(v.reasons)}" for v in denied))
+    if plan.get("decision_id"):
+        from lib.bob.decisions.records import get, update
+        get(STATE_ROOT, customer_id, plan["decision_id"])
+        update(STATE_ROOT, customer_id, plan["decision_id"], "human",
+               {"response": "approved", "plan_hash": approved_hash, "at": dt.datetime.now(dt.timezone.utc).isoformat()})
+
     campaign_ops: list = []
     budget_ops: list = []
-    campaign_ids_for_budget: list[tuple] = []
 
     campaign_service = client.get_service("CampaignService")
     budget_service = client.get_service("CampaignBudgetService")
 
     for change in plan["changes"]:
         cid = str(change["campaign_id"])
-        cname = change["campaign_name"]
+        cname = change.get("campaign_name", cid)
         action = change["action"]
 
-        if retry_fields is None or (cname, "target_cpa") in retry_fields:
+        if retry_fields is None or (cid, "target_cpa") in retry_fields:
             should_apply_bid = "bid" in action and change.get("proposed_target_cpa")
         else:
             should_apply_bid = False
 
-        if retry_fields is None or (cname, "daily_budget") in retry_fields:
+        if retry_fields is None or (cid, "daily_budget") in retry_fields:
             should_apply_budget = (
                 "budget" in action
                 and change.get("proposed_daily_budget")
@@ -432,59 +546,36 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
             op = client.get_type("CampaignBudgetOperation")
             bgt = op.update
             bgt.resource_name = budget_service.campaign_budget_path(customer_id, str(change["campaign_budget_id"]))
-            budget_amount = int(round(float(change["proposed_daily_budget"])))
-            bgt.amount_micros = budget_amount * 1_000_000
+            budget_amount = float(change["proposed_daily_budget"])
+            bgt.amount_micros = int(round(budget_amount * 1_000_000))
             field_mask = FieldMask()
             field_mask.paths.append("amount_micros")
             op.update_mask.CopyFrom(field_mask)
             budget_ops.append((cname, cid, "daily_budget", budget_amount, op))
 
-    # Apply campaign (Target CPA) mutations
-    if campaign_ops:
-        try:
-            response = campaign_service.mutate_campaigns(
-                customer_id=customer_id,
-                operations=[op for _, _, _, _, op in campaign_ops],
-            )
-            for (cname, cid, field, val, _), result in zip(campaign_ops, response.results):
-                results.append({"campaign": cname, "field": field, "value": val, "status": "ok", "resource": result.resource_name})
-                print(f"  ✓ {cname} — target_cpa → {val}")
-        except Exception as exc:
-            for cname, cid, field, val, _ in campaign_ops:
-                results.append({"campaign": cname, "field": field, "value": val, "status": "error", "error": str(exc)})
-            print(f"  ✗ campaign mutations failed: {exc}")
-
-    # Apply budget mutations
-    if budget_ops:
-        try:
-            response = budget_service.mutate_campaign_budgets(
-                customer_id=customer_id,
-                operations=[op for _, _, _, _, op in budget_ops],
-            )
-            for (cname, cid, field, val, _), result in zip(budget_ops, response.results):
-                results.append({"campaign": cname, "field": field, "value": val, "status": "ok", "resource": result.resource_name})
-                print(f"  ✓ {cname} — daily_budget → {val}")
-        except Exception as exc:
-            for cname, cid, field, val, _ in budget_ops:
-                results.append({"campaign": cname, "field": field, "value": val, "status": "error", "error": str(exc)})
-            print(f"  ✗ budget mutations failed: {exc}")
-
-    prior_results = plan.get("apply_results", [])
-    if retry_fields:
-        results = [
-            r for r in prior_results
-            if (r.get("campaign"), r.get("field")) not in retry_fields
-        ] + results
-
-    errors = [r for r in results if r.get("status") == "error"]
+    results = list(plan.get("apply_results", [])) or [
+        {"campaign": name, "campaign_id": cid, "field": field, "value": value, "status": "not_sent"}
+        for name, cid, field, value, _ in [*campaign_ops, *budget_ops]]
+    for operations, mutate in ((campaign_ops, campaign_service.mutate_campaigns),
+                               (budget_ops, budget_service.mutate_campaign_budgets)):
+        if not operations:
+            continue
+        results = _mutate_checkpointed(mutate, customer_id, operations, results, plan, plan_path)
+        if any(receipt["status"] == "unknown" for receipt in results):
+            break
+    errors = [r for r in results if r.get("status") != "ok"]
 
     # Mark plan as applied only when every requested mutation has succeeded.
     import datetime as _dt
     plan["applied"] = not errors
-    plan["applied_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+    plan["applied_at"] = max((receipt.get("executed_at", "") for receipt in results), default="") or _dt.datetime.now().isoformat(timespec="seconds")
     plan["applied_by"] = "bid-budget-apply"
     plan["apply_results"] = results
     plan_path.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
+    if plan.get("decision_id"):
+        update(STATE_ROOT, customer_id, plan["decision_id"], "execution",
+               {"executed_at": plan["applied_at"], "plan": str(plan_path),
+                "results": results, "complete": plan["applied"]})
     state = "applied" if plan["applied"] else "partially applied"
     print(f"\nplan marked {state}: {plan_path}")
 
@@ -507,94 +598,13 @@ def bid_budget_retrospective(args: argparse.Namespace) -> None:
     if not plan.get("applied"):
         die("plan has not been applied yet — nothing to evaluate")
 
-    applied_date = dt.date.fromisoformat(plan["applied_at"][:10])
-    cal = applied_date.isocalendar()
-    base_week, base_year = cal.week, cal.year
-
-    # Find W+1 and W+2 processed campaign-network files
-    w1_start, w1_end = iso_week_to_dates(base_week, base_year)
-    w2_week = base_week + 1
-    w2_year = base_year
-    if w2_week > dt.date(base_year, 12, 28).isocalendar().week:
-        w2_week = 1
-        w2_year = base_year + 1
-    w2_start, w2_end = iso_week_to_dates(w2_week, w2_year)
-
-    profile = load_profile(required=False)
-    retro_customer_id = profile.get("google_ads_customer_id")
-    found = find_processed_files_for_period("campaign-network", [(w1_start, w1_end), (w2_start, w2_end)], retro_customer_id)
-    w1_path, w2_path = found[0], found[1]
-
-    if not w1_path:
-        print(f"\nW+1 data not yet available (need {w1_start}–{w1_end})")
-        print(f"Run: python3 lib/datapull.py fetch --query campaign_network_period --from {w1_start} --to {w1_end}")
-        print("     python3 lib/datapull.py aggregate --grain campaign_network_period")
-        print("\nToo early to evaluate — check back after W+1 data is available.")
+    # The previous direction-only CPI verdict contradicted its own forecasts,
+    # used one network row and could include pre-action days. Never emit it.
+    if not plan.get("decision_id"):
+        print("Inconclusive: this legacy plan has no recorded prediction. No causal or performance verdict can be inferred from its action name.")
         return
+    print(f"Review the recorded prediction with ./bob decision review {plan['decision_id']} --source <exact-window processed CSV>.")
+    return
 
-    primary_goal = profile.get("primary_goal") or "in_app_conversions"
-    w1_rows = read_csv(w1_path)
-    w2_rows = read_csv(w2_path) if w2_path else []
-
-    def _cpi_from_rows(rows: list[dict], cid: str) -> float:
-        for r in rows:
-            if str(r.get("campaign_id", "")).replace("-", "") == cid:
-                cost = number(r.get("cost", 0))
-                inst = number(r.get("installs", 0))
-                return cost / inst if inst > 0 else 0.0
-        return 0.0
-
-    verdicts: list[dict] = []
-    for change in plan.get("changes", []):
-        cid = str(change["campaign_id"])
-        cname = change["campaign_name"]
-        action = change["action"]
-        baseline_cpi = float(change.get("w0_cpi", 0) or 0)
-        expected = "lower" if "increase" in action else "higher"
-
-        w1_cpi = _cpi_from_rows(w1_rows, cid)
-        w2_cpi = _cpi_from_rows(w2_rows, cid) if w2_rows else 0.0
-
-        w1_moved = (w1_cpi < baseline_cpi) if expected == "lower" else (w1_cpi > baseline_cpi)
-        w2_moved = (w2_cpi < baseline_cpi) if expected == "lower" else (w2_cpi > baseline_cpi)
-
-        if w2_cpi > 0 and w1_moved and w2_moved:
-            verdict = "working"
-        elif not w2_path or w2_cpi == 0:
-            verdict = "too_early"
-        else:
-            verdict = "not_working"
-
-        verdicts.append({
-            "campaign": cname,
-            "action": action,
-            "baseline_cpi": baseline_cpi,
-            "w1_cpi": w1_cpi,
-            "w2_cpi": w2_cpi if w2_cpi > 0 else None,
-            "expected": expected,
-            "verdict": verdict,
-        })
-
-    sym = _currency_symbol(profile.get("currency", ""))
-    total = len(verdicts)
-    working = sum(1 for v in verdicts if v["verdict"] == "working")
-    early = sum(1 for v in verdicts if v["verdict"] == "too_early")
-    not_wk = sum(1 for v in verdicts if v["verdict"] == "not_working")
-
-    print(f"\nBid/Budget Retrospective — changes applied {plan['applied_at'][:10]}")
-    print(f"  {working}/{total} working  |  {early} too early  |  {not_wk} not working\n")
-
-    hdr = f"  {'Campaign':<45}  {'Action':<26}  {'Baseline CPI':>12}  {'W+1 CPI':>10}  {'W+2 CPI':>10}  {'Verdict':<12}"
-    print(hdr)
-    print("  " + "─" * (len(hdr) - 2))
-    for v in verdicts:
-        w2_str = _fmt_display(v["w2_cpi"], "cost", sym) if v["w2_cpi"] else "—"
-        print(
-            f"  {v['campaign']:<45}  {v['action']:<26}  "
-            f"{_fmt_display(v['baseline_cpi'], 'cost', sym):>12}  "
-            f"{_fmt_display(v['w1_cpi'], 'cost', sym):>10}  "
-            f"{w2_str:>10}  "
-            f"{v['verdict']:<12}"
-        )
 
 __all__ = [name for name in globals() if not name.startswith("__")]

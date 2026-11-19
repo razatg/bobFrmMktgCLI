@@ -352,7 +352,8 @@ def load_profile(required: bool = True) -> dict[str, Any]:
             die(f"Account profile missing: {acct_profile}. Run: python3 lib/datapull.py onboard")
         return {}
     with acct_profile.open() as f:
-        return json.load(f)
+        from .goals import with_goal_aliases
+        return with_goal_aliases(json.load(f))
 
 
 def account_processed_dir(customer_id: str, subdir: str) -> Path:

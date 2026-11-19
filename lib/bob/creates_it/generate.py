@@ -1189,7 +1189,13 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
     if stage in {"edit", "masters"} or needs_ai_adaptation:
         provider = _provider_config()
         model = _image_model(brief)
+    if brief.get("decision_id"):
+        from lib.bob.decisions.records import get
+        get(STATE_ROOT, customer_id, str(brief["decision_id"]))
+    if existing_manifest and existing_manifest.get("decision_id") and brief.get("decision_id") and existing_manifest["decision_id"] != brief["decision_id"]:
+        die("creative revision cannot change its linked decision")
     run_manifest = existing_manifest or {
+        "decision_id": brief.get("decision_id"),
         "run_id": run_id,
         "customer_id": customer_id,
         "status": "generating",
@@ -1204,6 +1210,8 @@ def create_static_replacements(args: Any, caller: Callable[..., tuple[bytes, str
         "models_used": [model] if model else [],
         "candidates": [],
     }
+    if brief.get('decision_id'):
+        run_manifest['decision_id'] = brief['decision_id']
     if (
         run_manifest.get("customer_id") != customer_id
         or run_manifest.get("source_manifest") != str(source_manifest_path)

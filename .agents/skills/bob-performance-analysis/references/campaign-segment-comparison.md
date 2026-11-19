@@ -18,18 +18,18 @@ Use for questions comparing performance of a named campaign group — e.g. "all 
 ls data/processed/campaign-network/
 
 # Compare campaigns containing "Stable" yesterday vs SDLW (default period)
-python3 lib/datapull.py slice-campaigns --name-contains "Stable"
+./bob slice-campaigns --name-contains "Stable"
 
 # Other periods
-python3 lib/datapull.py slice-campaigns --name-contains "Stable" --period wow
-python3 lib/datapull.py slice-campaigns --name-contains "Stable" --period mom
+./bob slice-campaigns --name-contains "Stable" --period wow
+./bob slice-campaigns --name-contains "Stable" --period mom
 
 # Save full comparison CSV
-python3 lib/datapull.py slice-campaigns --name-contains "Stable" \
+./bob slice-campaigns --name-contains "Stable" \
   --output data/processed/campaign-slices/stable-yesterday-vs-sdlw.csv
 
 # Explicit files (if auto-detection fails)
-python3 lib/datapull.py slice-campaigns \
+./bob slice-campaigns \
   --name-contains "Stable" \
   --current data/processed/campaign-network/<account>_<yesterday>_<yesterday>.csv \
   --baseline data/processed/campaign-network/<account>_<sdlw>_<sdlw>.csv
@@ -37,7 +37,7 @@ python3 lib/datapull.py slice-campaigns \
 
 If processed campaign-network files are missing, regenerate them first:
 ```bash
-python3 lib/datapull.py aggregate --grain campaign_network_period
+./bob aggregate --grain campaign_network_period
 ```
 
 ## Output Structure
@@ -66,8 +66,8 @@ Bootstrap pre-fetches `yesterday_vs_sdlw` and `3week_rolling` for `campaign_netw
 - Re-run bootstrap, or
 - Fetch manually:
 ```bash
-python3 lib/datapull.py fetch --query campaign_network_period --from <start> --to <end>
-python3 lib/datapull.py aggregate --grain campaign_network_period
+./bob fetch --query campaign_network_period --from <start> --to <end>
+./bob aggregate --grain campaign_network_period
 ```
 
 ## Wiki / Artefact

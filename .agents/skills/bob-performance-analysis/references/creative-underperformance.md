@@ -15,19 +15,19 @@ Use for questions asking which creatives are underperforming after enough delive
 
 **Step 1 — Aggregate creative data (bootstrap fetches this; re-run if >7 days old):**
 ```bash
-python3 lib/datapull.py aggregate --grain creative_period
+./bob aggregate --grain creative_period
 # Output: data/processed/creative/<account>_<start>_<end>.csv
 ```
 
 If bootstrap data is stale:
 ```bash
-python3 lib/datapull.py fetch --query creative_period --days 30 --reason "creative underperformance review"
-python3 lib/datapull.py aggregate --grain creative_period --from <start> --to <end>
+./bob fetch --query creative_period --days 30 --reason "creative underperformance review"
+./bob aggregate --grain creative_period --from <start> --to <end>
 ```
 
 **Step 2 — Run the underperformance slicer:**
 ```bash
-python3 lib/datapull.py slice-creatives
+./bob slice-creatives
 # Output: printed table + pattern analysis
 # Optional: --output FILE to save full flagged CSV
 ```
@@ -36,7 +36,7 @@ Do not filter the CSV manually or use pandas/grep to find LOW rows. `slice-creat
 
 **Step 3 (optional) — Generate copy plan + agent prompt:**
 ```bash
-python3 lib/datapull.py suggest-creative-copy
+./bob suggest-creative-copy
 # Output:
 #   wiki/action-items/creative-copy-YYYY-MM-DD.yaml    — plan with BEST examples + LOW-action candidates
 #   wiki/action-items/creative-copy-YYYY-MM-DD-prompt.txt  — compact prompt for any agent (Codex, Claude, GPT)
@@ -66,7 +66,7 @@ The apply command has its own approval table and waits for `y` before uploading 
 
 **Step 5 (after agent fills suggestions and user approves) — Apply text changes only:**
 ```bash
-python3 lib/datapull.py creative-copy-apply \
+./bob creative-copy-apply \
   --plan wiki/action-items/creative-copy-YYYY-MM-DD.yaml \
   --suggestions '[{"id":1,"text":"..."},...]'
 # CLI shows approval table; user confirms y/n before anything is pushed to Google Ads

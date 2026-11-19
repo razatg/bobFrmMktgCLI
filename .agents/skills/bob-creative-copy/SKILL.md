@@ -11,20 +11,21 @@ Use this skill when the user asks about reviewing, rewriting, or replacing creat
 
 Read `SOUL.md` before answering. Every response must sound like Bob wrote it.
 
-## Compact execution contract
+## Investigation contract
 
-Use `./bob data-manifest --query creative` for the selected account before reading creative files.
-Use `fetch --quiet`; keep the complete flagged asset list in the existing CSV/text artifacts and
-inspect only the requested campaign, asset, or batch. Load the detailed creative reference only
-for the active workflow step.
+Start with `./bob brief --focus creative` (or `all` when explanations cross domains). The gateway's selected account is authoritative. Rules and evidence maturity come from the brief; unavailable evidence is not an empty finding. Use `./bob search` for relevant knowledge and history.
 
-Present creative findings and approval decisions, not internal commands, paths, batch mechanics, raw events, or hidden reasoning. Only provide technical commands when the user explicitly asks for deployment, SSH, VM, or debugging help.
+Recipes and fixed policies are baselines, not exclusive routes. Registered analysis operations may be used during ordinary investigations. Agree, hold or depart with evidence. Hard limits and explicit approval apply to everyone; no decision modes. Use current CLI help over legacy command examples.
 
-YAML, JSON, and batch TXT files are internal working files: never link or paste them into the customer conversation. If the customer explicitly asks to see or download every proposed change, convert the complete existing YAML/JSON plan to CSV under the active account's `wiki/.../action-items/`, add that CSV to the Wiki Index, and link it. If the customer says to apply or make an already-reviewed plan live, use the internal files directly and do not create a presentation CSV.
+Record consequential recommendations, immutable evidence and a prediction with `./bob decision record` before execution; put its `decision_id` on the plan. Bid changes require `bid-budget-validate` before approval and `--approval-hash` at apply, which rechecks live state. Review the recorded prediction with `./bob decision review` after the observation window and conversion maturity. Do not infer outcomes from action names.
+
+## Saving final asset choices
+
+Use `./bob creative-copy-propose --plan <baseline> --changes-json '<final asset choices>' --output <account plan>` to add, drop or change supported replacement/pause choices with reasons. Record the prediction and link it with `./bob decision link <id> --plan <final plan>`. Apply retains live validation and explicit approval. GOOD/BEST peers are refreshed from live evidence; account protected names are preserved without guessing proper nouns from capitalization.
 
 ## Operating Rules
 
-- **Repo-wide rules apply** (no fabrication, no scratch scripts, don't read or modify source files, use `data-manifest` before fetching, always pass `--reason`): see `AGENTS.md` → Hard constraints + Agent Mode and `CLAUDE.md`.
+- Follow the universal contract in `AGENTS.md`. Use registered commands and operations for ordinary analysis; source edits require separate development authorization. Inspect structured failures and supported alternatives before using the failsafe.
 - **Never call `creative-copy-apply` without explicit user approval** at the approval table. The command is also hard-blocked for Bob users with `READ` access.
 - Never generate copy suggestions yourself inline. The subagent in Step 2 does this — always.
 - All creative-copy artefacts are account-scoped. First identify the active account's customer ID with `./bob list-accounts`, remove dashes, and use `wiki/<customer_id>/action-items/` for every plan, batch, suggestion, and final artefact path. Never use the flat `wiki/action-items/` directory.
@@ -54,7 +55,7 @@ YAML, JSON, and batch TXT files are internal working files: never link or paste 
 #   ... (one file per 25 assets)
 ```
 
-If `suggest-creative-copy` outputs "0 assets" there are no LOW-action TEXT assets — tell the user and stop.
+If the baseline has zero candidates, report that baseline result. If the user asked a broader question, investigate other registered evidence rather than treating LOW as the only possible answer.
 
 When the customer requests the complete review as CSV, every row must include campaign and ad-group
 identity, field type, current copy, proposed copy, reason for change, and the supporting performance
@@ -146,4 +147,4 @@ if the customer requested the complete changes; otherwise use plain text and do 
 
 ## Failsafe — Unanswerable Questions
 
-When the question can't be answered from the steps above or any `./bob` subcommand, use the repo failsafe in `CLAUDE.md` / `AGENTS.md`: answer in Bob's voice (`SOUL.md`) that this isn't something you can do yet, append a `[BUG]`/`[FEATURE]` entry to `logs/backlog.md` (with the user's exact words), log a `failsafe` signal, and confirm to the user.
+When the question can't be answered from the steps above or any `./bob` subcommand, use the repo failsafe in `AGENTS.md`: answer in Bob's voice (`SOUL.md`) that this isn't something you can do yet, append a `[BUG]`/`[FEATURE]` entry to `logs/backlog.md` (with the user's exact words), log a `failsafe` signal, and confirm to the user.

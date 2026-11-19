@@ -13,6 +13,43 @@ from lib.bob.platform.data import *
 from lib.bob.platform.google_ads import *
 from lib.bob.platform.presentation import *
 from .suggest import *
+from .rules import validate_copy
+
+
+def creative_copy_propose(args: argparse.Namespace) -> None:
+    """Save final asset choices without requiring an agent to hand-edit a mutation file."""
+    import copy
+    import yaml
+    profile = load_profile(required=True)
+    account = str(profile['google_ads_customer_id']).replace('-', '')
+    original, target = Path(args.plan).resolve(), Path(args.output).resolve()
+    wiki = account_wiki_dir(account).resolve()
+    if not original.is_relative_to(wiki) or not target.is_relative_to(wiki):
+        die('creative proposals must stay in the selected account wiki')
+    plan = yaml.safe_load(original.read_text())
+    if str(plan.get('customer_id', '')).replace('-', '') != account or plan.get('applied'):
+        die('creative baseline must be unapplied and belong to the selected account')
+    changes = json.loads(args.changes_json)
+    allowed = {'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'ad_id', 'asset_id',
+               'field_type', 'current_text', 'suggested_text', 'action', 'rationale'}
+    if not isinstance(changes, list) or len(changes) > 1000:
+        die('changes must be a bounded list')
+    for change in changes:
+        if not isinstance(change, dict) or set(change) - allowed or not change.get('rationale'):
+            die('creative choices need supported fields and an evidence-backed rationale')
+        if change.get('action') not in {'replace', 'pause'} or not change.get('current_text'):
+            die('creative choices require a supported action and the exact current text')
+        if any(not str(change.get(field, '')).isdigit() for field in ('ad_group_id', 'ad_id', 'asset_id')):
+            die('creative choices require exact ad group, ad and asset IDs')
+    plan.setdefault('baseline_changes', copy.deepcopy(plan.get('changes', [])))
+    plan.update(changes=changes, decision_required=True, applied=False)
+    for key in ('groups', 'approved_hash', 'apply_results', 'applied_at', 'applied_by', 'decision_id'):
+        plan.pop(key, None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(plan, sort_keys=False, allow_unicode=True))
+    print(f'Proposal saved for decision recording, live validation and explicit approval: {target}')
+
+
 def creative_copy_apply(args: argparse.Namespace) -> None:
     """Review suggested copy, get user approval, push to Google Ads."""
     _require_write_permission()
@@ -26,6 +63,8 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
     if not plan_path.exists():
         die(f"plan file not found: {plan_path}")
     plan = _yaml.safe_load(plan_path.read_text())
+    if plan.get('decision_required') and not plan.get('decision_id'):
+        die('Record and link the recommendation and prediction before applying this plan.')
 
     if plan.get("applied"):
         die(f"plan already applied on {plan.get('applied_at')}")
@@ -141,6 +180,21 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         print("No changes applied — fix the suggestions and review the complete plan again.")
         return
 
+    # Pre-approval validation is separate from the fresh read after approval.
+    from .rules import read_live_ads, validate_plan, refresh_copy_evidence
+    from google.ads.googleads.client import GoogleAdsClient
+    preview_profile = load_profile(required=True)
+    preview_account = str(preview_profile.get('google_ads_customer_id', '')).replace('-', '')
+    preview_client = GoogleAdsClient.load_from_storage(str(_runtime_write_config_path()))
+    refresh_copy_evidence(preview_client, preview_account, plan, preview_profile)
+    excluded_entities = tuple(preview_profile.get('goals', {}).get('excluded_entities', []))
+    if any(str(change.get('campaign_id', '')) in excluded_entities for _, change in actionable):
+        die('creative plan includes an excluded campaign')
+    preview = validate_plan(plan, preview_account, read_live_ads(preview_client, preview_account, [c for _, c in actionable]), excluded_entities)
+    for verdict in preview:
+        if not verdict['allowed']:
+            print(f"  HELD #{verdict['index'] + 1}: {'; '.join(verdict['reasons'])}")
+
     # Approval table
     if groups:
         print(f"\n{'#':<3}  {'Theme':<28}  {'Field':<12}  {'Lang':<10}  {'N':<4}  Suggested")
@@ -229,6 +283,17 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         print("Aborted — no changes applied.")
         return
 
+    from lib.bob.bid_budget.guards import plan_hash
+    approved_hash = plan_hash({"customer_id": plan.get("customer_id"), "changes": [
+        {key: change.get(key) for key in ("ad_group_id", "asset_id", "current_text", "suggested_text", "field_type", "action")}
+        for _, change in actionable]})
+    selected_profile = load_profile(required=True)
+    if str(plan.get("customer_id", "")).replace("-", "") != str(selected_profile.get("google_ads_customer_id", "")).replace("-", ""):
+        die("creative plan is outside the selected account")
+    if plan.get("decision_id"):
+        from lib.bob.decisions.records import get, update
+        get(STATE_ROOT, str(plan["customer_id"]).replace("-", ""), plan["decision_id"])
+
     try:
         from google.ads.googleads.client import GoogleAdsClient  # type: ignore
         from google.ads.googleads.errors import GoogleAdsException  # type: ignore
@@ -246,9 +311,10 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         die(f"failed to load Google Ads client: {exc}")
 
     ga_svc = client.get_service("GoogleAdsService")
+    refresh_copy_evidence(client, customer_id, plan, profile)
     ad_svc = client.get_service("AdService")
     select_fields = (
-        "SELECT ad_group.id, ad_group_ad.resource_name, ad_group_ad.ad.id,"
+        "SELECT campaign.id, ad_group.id, ad_group_ad.resource_name, ad_group_ad.ad.id, ad_group_ad.status,"
         " ad_group_ad.ad.app_ad.headlines, ad_group_ad.ad.app_ad.descriptions"
         " FROM ad_group_ad"
     )
@@ -266,6 +332,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
                 rows_by_ad[str(row.ad_group_ad.ad.id)] = {
                     "ad": row.ad_group_ad,
                     "ad_group_id": str(row.ad_group.id),
+                    "campaign_id": str(row.campaign.id),
                 }
         except Exception as exc:
             die(f"creative copy validation failed while resolving target ads: {exc}")
@@ -287,7 +354,11 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
                 + " AND ad_group_ad.status != 'REMOVED'"
             )
             try:
-                legacy_by_group[ad_group_id] = [row.ad_group_ad for row in ga_svc.search(customer_id=customer_id, query=query)]
+                legacy_rows = list(ga_svc.search(customer_id=customer_id, query=query))
+                legacy_by_group[ad_group_id] = [row.ad_group_ad for row in legacy_rows]
+                for row in legacy_rows:
+                    rows_by_ad[str(row.ad_group_ad.ad.id)] = {'ad': row.ad_group_ad,
+                        'ad_group_id': str(row.ad_group.id), 'campaign_id': str(row.campaign.id)}
             except Exception as exc:
                 die(f"creative copy validation failed while resolving ad group {ad_group_id}: {exc}")
         field = str(change.get("field_type", ""))
@@ -303,7 +374,7 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
             )
             continue
         change["ad_id"] = str(candidates[0].ad.id)
-        rows_by_ad[change["ad_id"]] = {"ad": candidates[0], "ad_group_id": ad_group_id}
+        rows_by_ad[change["ad_id"]].update({"ad": candidates[0], "ad_group_id": ad_group_id})
 
     from collections import defaultdict as _defaultdict
     changes_by_ad: dict[str, list[tuple[int, dict]]] = _defaultdict(list)
@@ -317,10 +388,20 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
         current = str(change.get("current_text", ""))
         proposed = str(change.get("suggested_text") or "")
         row_errors = []
+        if action == "replace":
+            row_errors.extend(validate_copy(proposed, field,
+                              protected_terms=tuple(change.get("protected_terms", [])),
+                              existing_good=tuple(change.get("existing_good", []))))
         if not ad_id.isdigit() or ad_id not in rows_by_ad:
             row_errors.append(f"target ad {ad_id or 'missing'} was not found")
         elif rows_by_ad[ad_id]["ad_group_id"] != ad_group_id:
             row_errors.append(f"target ad is not in ad group {ad_group_id}")
+        elif rows_by_ad[ad_id]['campaign_id'] in excluded_entities:
+            row_errors.append('live campaign is excluded by account rules')
+        elif change.get('campaign_id') and str(change['campaign_id']) != rows_by_ad[ad_id]['campaign_id']:
+            row_errors.append('campaign identity does not match the live ad')
+        elif rows_by_ad[ad_id]["ad"].status.name != 'ENABLED':
+            row_errors.append('target ad is no longer enabled')
         if field not in LIMITS:
             row_errors.append(f"unsupported field type {field or 'missing'}")
         if action not in ("replace", "pause"):
@@ -508,6 +589,12 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
             print(f"  ERROR: {error}")
         die("Google Ads rejected every creative operation during validation — no changes were applied")
 
+    final_hash = plan_hash({"customer_id": plan.get("customer_id"), "changes": [
+        {key: change.get(key) for key in ("ad_group_id", "asset_id", "current_text", "suggested_text", "field_type", "action")}
+        for _, change in actionable]})
+    if final_hash != approved_hash:
+        die("creative proposal changed after approval; review it again")
+    plan["approved_hash"] = approved_hash
     try:
         mutation_response = ga_svc.mutate(request=mutate_request(surviving_operations, validate_only=False))
     except Exception as exc:
@@ -572,6 +659,10 @@ def creative_copy_apply(args: argparse.Namespace) -> None:
     plan_temp = plan_path.with_suffix(plan_path.suffix + ".tmp")
     plan_temp.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
     os.replace(plan_temp, plan_path)
+    if plan.get("decision_id"):
+        update(STATE_ROOT, customer_id, plan["decision_id"], "execution",
+               {"executed_at": applied_at, "plan": str(plan_path),
+                "results": plan["apply_results"], "complete": plan["applied"]})
 
     for result in current_results.values():
         if result["status"] == "replaced":

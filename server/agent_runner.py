@@ -109,6 +109,9 @@ def schedule_tool_marker(event):
 def bob_mcp_config(environment, schedule_action: str | None = None):
     """Return Codex overrides for a secret-minimal local STDIO MCP child."""
     safe_keys = (
+        'BOB_AGENT_MODEL',
+        'BOB_DISABLE_WRITES',
+        'BOB_ALLOW_FETCH',
         'BOB_STATE_ROOT',
         'BOB_METADATA_DB',
         'BOB_CLIENT_INSTANCE_ID',
@@ -134,6 +137,7 @@ def bob_mcp_config(environment, schedule_action: str | None = None):
         'bob_materialize_exploration',
         'bob_verify_exploration',
         'bob_publish_result',
+        'bob_record_decision',
         'bob_schedule_list',
         'bob_schedule_create',
         'bob_schedule_update',
@@ -223,6 +227,9 @@ class ExecutionPolicy:
 
 class AgentRunner:
     SHELL_ENV_KEYS = (
+        'BOB_AGENT_MODEL',
+        'BOB_DISABLE_WRITES',
+        'BOB_ALLOW_FETCH',
         'BOB_STATE_ROOT',
         'BOB_SHARED_STATE_ROOT',
         'BOB_CLIENT_INSTANCE_ID',
@@ -324,6 +331,8 @@ class AgentRunner:
         runtime = os.getenv('BOB_RUNTIME', 'hosted').strip().lower()
         environment = os.environ.copy()
         if policy.environment: environment.update(policy.environment)
+        if policy.model:
+            environment['BOB_AGENT_MODEL'] = policy.model
         if session_id:
             # Resume options must precede the session ID. The native session
             # retains its original working directory, so resume does not take

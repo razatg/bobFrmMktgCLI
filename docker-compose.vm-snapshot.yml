@@ -3,5 +3,7 @@ services:
     environment:
       BOB_METADATA_DB: /snapshot/metadata/metadata.sqlite3
       BOB_STATE_ROOT: /snapshot/client
+      BOB_DISABLE_WRITES: "1"
+      BOB_ALLOW_FETCH: "0"
     volumes:
       - ./.local/vm-snapshot.working:/snapshot

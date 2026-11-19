@@ -15,6 +15,13 @@ import datapull as dp  # noqa: E402
 
 
 EXPECTED_HANDLERS = {
+    "brief": "_run",
+    "search": "_run",
+    "skills": "_run",
+    "decision": "_run",
+    "bid-budget-validate": "bid_budget_validate",
+    "bid-budget-propose": "bid_budget_propose",
+    "creative-copy-propose": "creative_copy_propose",
     "fetch": "fetch",
     "bootstrap": "bootstrap",
     "log-pull": "log_pull_cmd",

@@ -145,6 +145,76 @@ class SchedulingRunner(FakeRunner):
         return (session_id or 'schedule-thread', final)
 
 class GatewayTests(unittest.TestCase):
+    def test_answer_check_runs_before_display_and_holds_foreign_account(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        csrf = self.bootstrap()
+        conversation = self.client.post('/api/conversations', headers={'X-CSRF-Token': csrf}).json()['id']
+        self.app.state.runner.run = AsyncMock(return_value=('test-thread', json.dumps({
+            'account': '', 'answer': 'CPI is 999.', 'claims': []})))
+        sent = self.client.post(f'/api/conversations/{conversation}/messages', headers={'X-CSRF-Token': csrf},
+                                json={'content': 'Review campaign performance'})
+        import time
+        for _ in range(100):
+            job = self.client.get('/api/jobs/' + sent.json()['job_id']).json()
+            if job['status'] not in ('queued', 'running'):
+                break
+            time.sleep(.01)
+        self.assertEqual(job['status'], 'completed')
+        messages = self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        self.assertIn('could not be verified', messages[-1]['content'])
+        self.assertNotIn('"claims"', messages[-1]['content'])
+        event = self.app.state.store.one("SELECT payload FROM job_events WHERE job_id=? AND event_type='answer_check'", (job['id'],))
+        self.assertFalse(json.loads(event['payload'])['passed'])
+        self.app.state.runner.run = AsyncMock(return_value=('test-thread', json.dumps({
+            'account': '9999999999', 'answer': 'Foreign account answer', 'claims': []})))
+        sent = self.client.post(f'/api/conversations/{conversation}/messages', headers={'X-CSRF-Token': csrf},
+                                json={'content': 'Review campaign performance again'})
+        for _ in range(100):
+            job = self.client.get('/api/jobs/' + sent.json()['job_id']).json()
+            if job['status'] not in ('queued', 'running'):
+                break
+            time.sleep(.01)
+        self.assertEqual(job['status'], 'failed')
+        messages = self.client.get(f'/api/conversations/{conversation}').json()['messages']
+        self.assertFalse(any(message['content'] == 'Foreign account answer' for message in messages))
+
+    def test_goals_survive_hosted_profile_regeneration(self):
+        from server.app import materialize_runtime_accounts
+        csrf = self.bootstrap()
+        store = self.app.state.store
+        client_id = store.one('SELECT id FROM client_instances')['id']
+        user_id = store.one('SELECT id FROM users WHERE role="admin"')['id']
+        created = self.client.post(f'/api/admin/clients/{client_id}/accounts', headers={'X-CSRF-Token': csrf},
+                                   json={'customer_id': '1234567890', 'account_name': 'Example'})
+        self.assertEqual(created.status_code, 200, created.text)
+        account = store.one('SELECT id FROM client_accounts WHERE customer_id="1234567890"')['id']
+        store.run('UPDATE client_accounts SET primary_goal=?,currency=?,cac_ceiling=?,bid_budget_change_pct=? WHERE id=?',
+                  ('installs', 'INR', 75, 5, account))
+        renamed = self.client.patch(f'/api/admin/clients/{client_id}/accounts/{account}',
+            headers={'X-CSRF-Token': csrf}, json={'account_name': 'Renamed', 'customer_id': '1234567890', 'is_active': True})
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        preserved = store.one('SELECT * FROM client_accounts WHERE id=?', (account,))
+        self.assertEqual((preserved['primary_goal'], preserved['currency'], preserved['cac_ceiling'],
+                          preserved['bid_budget_change_pct']), ('installs', 'INR', 75, 5))
+        goals = {'objective': 'Grow efficiently', 'targets': {'cpi': 40},
+                 'usual_approach': {'cac_reference': 75, 'typical_change_pct': 5, 'preferred_wait_days': 14},
+                 'priority_order': ['monthly budget', 'efficiency', 'volume'], 'review_date': '2026-12-31'}
+        saved = self.client.put(f'/api/admin/clients/{client_id}/accounts/{account}/goals',
+                                headers={'X-CSRF-Token': csrf}, json=goals)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        root = Path(self.tmp.name) / 'runtime-goals'
+        for _ in range(2):
+            materialize_runtime_accounts(store, user_id, client_id, root, root/'read.yaml', account)
+            profile = json.loads((root/'.bob/accounts/1234567890/profile.json').read_text())
+            self.assertEqual(profile['goals']['priority_order'], goals['priority_order'])
+            self.assertEqual(profile['goals']['targets'], {'cpi': 40})
+            self.assertEqual(profile['goals']['usual_approach'], goals['usual_approach'])
+
+        from lib.bob.platform.goals import with_goal_aliases
+        profile['goals']['usual_approach']['typical_change_pct'] = 15
+        self.assertEqual(with_goal_aliases(profile)['bid_budget_change_pct'], 15)
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.db=str(Path(self.tmp.name)/'metadata.sqlite3')
@@ -355,12 +425,13 @@ class GatewayTests(unittest.TestCase):
     def test_selected_account_prompt_has_compact_knowledge_rule(self):
         from server.app import scope_wrapped_prompt
         prompt=scope_wrapped_prompt('What does GSR2Net mean?',client_instance_id='client-one',account_customer_id='1234567890')
-        self.assertIn('account KT is at wiki/1234567890/KT.md',prompt)
+        self.assertIn('start with ./bob brief',prompt)
+        self.assertIn('Use ./bob search',prompt)
         self.assertNotIn('client KT',prompt)
         self.assertIn('AUTHORITATIVE CURRENT ACCOUNT:',prompt)
         self.assertNotIn('MANAGEMENT',prompt)
-        self.assertIn('Ask one focused clarification',prompt)
-        self.assertIn('KT campaign exclusions are authoritative',prompt)
+        self.assertIn('Ask when a material account meaning is ambiguous',prompt)
+        self.assertIn('Respect explicit campaign exclusions',prompt)
         self.assertIn('Do not repeat a prior failure solely from native-thread context',prompt)
 
     def test_admin_observability_is_lightweight_and_reads_history(self):
@@ -647,8 +718,8 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse((prepared / 'AGENTS.md').is_symlink())
         hosted_instructions=(prepared / 'AGENTS.md').read_text()
         self.assertEqual(hosted_instructions, (app_module.ROOT / 'AGENTS.md').read_text())
-        self.assertIn('Admin owns Google Ads application credentials',hosted_instructions)
-        self.assertIn('Image-to-video is a `bob-creates-it` route',hosted_instructions)
+        self.assertIn('Hosted configuration is Admin-owned',hosted_instructions)
+        self.assertIn('Image-to-video must show a storyboard',hosted_instructions)
         self.assertFalse((prepared / '.agents' / 'skills' / 'bob-accounts').exists())
         self.assertTrue((app_module.ROOT / '.agents' / 'skills' / 'bob-accounts').is_dir())
         self.assertFalse((prepared / 'garf' / 'queries').is_symlink())

@@ -19,14 +19,14 @@ Use for questions asking what caused performance to improve or deteriorate.
 **Tier 1 — Account × Network (aggregated from bootstrap raw files):**
 ```bash
 ls garf/outputs/raw/account_network_period/
-python3 lib/datapull.py aggregate --grain account_network_period
+./bob aggregate --grain account_network_period
 ls data/processed/account-network/
 ```
 
 **Tier 2a — Campaign × Network:**
 ```bash
 ls garf/outputs/raw/campaign_network_period/
-python3 lib/datapull.py aggregate --grain campaign_network_period
+./bob aggregate --grain campaign_network_period
 ls data/processed/campaign-network/
 ```
 
@@ -42,9 +42,9 @@ ls garf/outputs/raw/change_history/
 
 **Tier 3 — Ad Group × Network (on demand, not in bootstrap — fetch fresh):**
 ```bash
-python3 lib/datapull.py fetch --query adgroup_network_period --from <start> --to <end>
+./bob fetch --query adgroup_network_period --from <start> --to <end>
 ls garf/outputs/raw/adgroup_network_period/
-python3 lib/datapull.py aggregate --grain adgroup_network_period
+./bob aggregate --grain adgroup_network_period
 ls data/processed/adgroup-network/
 ```
 

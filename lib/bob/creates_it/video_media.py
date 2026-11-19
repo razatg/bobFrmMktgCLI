@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 def _binary(name: str) -> str:
@@ -109,6 +109,17 @@ def render_overlay(output: Path, *, width: int, height: int, copy: dict[str, Any
         cta_width = box[2] - box[0] + padding * 2
         draw.rounded_rectangle((margin, cta_y, margin + cta_width, height - margin), radius=padding, fill=(250, 204, 0, 255))
         draw.text((margin + padding, cta_y + padding), cta, font=body_font, fill=(0, 0, 0, 255))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output, format="PNG")
+
+
+def fit_card_image(source: Path, output: Path, *, width: int, height: int) -> None:
+    """Fit an approved card without stretching or cropping its contents."""
+    with Image.open(source) as image:
+        image.load()
+        card = ImageOps.contain(image.convert("RGB"), (width, height))
+    canvas = Image.new("RGB", (width, height), (0, 0, 0))
+    canvas.paste(card, ((width - card.width) // 2, (height - card.height) // 2))
     output.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output, format="PNG")
 

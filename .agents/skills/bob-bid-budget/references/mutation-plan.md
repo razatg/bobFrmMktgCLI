@@ -9,8 +9,8 @@
 ## Step 1 — Generate Plan
 
 ```bash
-python3 lib/datapull.py bid-budget-recommend --dry-run   # preview without writing files
-python3 lib/datapull.py bid-budget-recommend              # write CSV + YAML
+./bob bid-budget-recommend --dry-run   # preview without writing files
+./bob bid-budget-recommend              # write CSV + YAML
 ```
 
 Output files:
@@ -34,7 +34,7 @@ State the holds and skips with reasons. Bob should call out the 1-2 campaigns th
 ## Step 3 — Apply (Only After Explicit Approval)
 
 ```bash
-python3 lib/datapull.py bid-budget-apply --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml
+./bob bid-budget-apply --approval-hash APPROVED_HASH --plan wiki/action-items/bid-budget-YYYY-MM-DD.yaml
 ```
 
 The command:

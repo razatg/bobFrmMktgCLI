@@ -30,7 +30,7 @@ Bootstrap pre-fetches WoW, MoM, and MTD. Check what's available, then aggregate:
 ls garf/outputs/raw/account_network_period/
 
 # Aggregate all available account_network_period raw files
-python3 lib/datapull.py aggregate --grain account_network_period
+./bob aggregate --grain account_network_period
 # Output lands in data/processed/account-network/
 
 # See processed outputs — date pairs in filenames identify each window
@@ -40,8 +40,8 @@ ls data/processed/account-network/
 To re-fetch a specific period on demand:
 
 ```bash
-python3 lib/datapull.py fetch --query account_network_period --from <start> --to <end>
-python3 lib/datapull.py aggregate --grain account_network_period
+./bob fetch --query account_network_period --from <start> --to <end>
+./bob aggregate --grain account_network_period
 ```
 
 ## Output
