@@ -255,6 +255,25 @@ class GatewayTests(unittest.TestCase):
         technical=sanitize_user_response(internal,technical=True)
         self.assertNotIn('/data/client',technical)
         self.assertIn('./bob fetch',technical)
+    def test_plan_links_use_readable_review_and_approval_hashes_stay_internal(self):
+        from server.app import STATE_ROOT, sanitize_user_response
+        review = STATE_ROOT / 'wiki' / '1112223333' / 'action-items' / 'plan.review.csv'
+        review.parent.mkdir(parents=True, exist_ok=True)
+        review.write_text('campaign_id,proposed_target_cpa\n1,110\n')
+        digest = 'a' * 64
+        answer = ('Ready for your approval.\n'
+                  '[Plan](/data/client/wiki/1112223333/action-items/plan.yaml)\n'
+                  f'Validated approval hash:\n`{digest}`\n')
+        shown = sanitize_user_response(answer, customer_id='1112223333')
+        self.assertIn('Ready for your approval.', shown)
+        self.assertIn('[[artifact:wiki/1112223333/action-items/plan.review.csv|Review proposal and results]]', shown)
+        self.assertNotIn('artifact unavailable', shown)
+        self.assertNotIn(digest, shown)
+        self.assertNotIn('approval hash', shown)
+        self.assertEqual(sanitize_user_response('[Plan](wiki/1112223333/action-items/plan.yaml)',
+                                               customer_id='9998887777'), '[artifact unavailable]')
+        self.assertIn(digest, sanitize_user_response(answer, customer_id='1112223333', technical=True))
+
     def test_health_and_bootstrap_login(self):
         self.assertEqual(self.client.get('/api/health').json(),{'status':'ok'})
         csrf=self.bootstrap(); self.assertTrue(csrf)

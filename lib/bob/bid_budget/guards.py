@@ -97,7 +97,7 @@ def _change_verdict(change: dict, state: CampaignState | None, profile: dict,
             reasons.append("budget identity changed")
         direction = float(proposed) - current
         if ("increase" in action and direction < 0) or ("decrease" in action and direction > 0):
-            reasons.append(f"{field}: direction contradicts action")
+            reasons.append(f"{field}: direction contradicts action; saved={change.get('current_' + field, 'unavailable')}, proposed={proposed}, live={current}")
     if warnings and not (change.get('rationale') and change.get('forecast')):
         reasons.append("departure requires rationale (evidence, trade-off and risk) and forecast (expected outcome and review window)")
     return Verdict(cid, not reasons, tuple(reasons), tuple(warnings))
@@ -127,10 +127,15 @@ def validate_plan(plan: dict, profile: dict, live: dict[str, CampaignState], *,
     if len(budgets) != len(set(budgets)):
         raise ValueError("a shared budget cannot be changed twice in one proposal")
     excluded = set(profile.get('goals', {}).get('excluded_entities', []))
-    if any(state.campaign_id in excluded and state.budget_id in budgets for state in live.values()):
-        raise ValueError('budget change would affect an excluded campaign')
-    return [_change_verdict(c, live.get(str(c.get("campaign_id", ""))), profile, on_date)
-            for c in changes]
+    excluded_budgets = {state.budget_id for state in live.values() if state.campaign_id in excluded}
+    verdicts = []
+    for change in changes:
+        verdict = _change_verdict(change, live.get(str(change.get('campaign_id', ''))), profile, on_date)
+        if 'budget' in str(change.get('action', '')) and str(change.get('campaign_budget_id', '')) in excluded_budgets:
+            verdict = Verdict(verdict.campaign_id, False,
+                              verdict.reasons + ('budget change would affect an excluded campaign',), verdict.warnings)
+        verdicts.append(verdict)
+    return verdicts
 
 
 def read_live_state(client, account: str, on_date: dt.date, cooldown_days: int) -> dict[str, CampaignState]:

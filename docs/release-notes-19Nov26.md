@@ -11,6 +11,9 @@ Ask “What happened last week?” or “Show me that creative proposal again.�
 
 Saved bid and budget proposals are searchable too. Ask “Continue the T3 proposal.” Bob should recover and inspect the saved proposal before suggesting a rebuild. You do not need to supply or save an approval hash; Bob recalculates it from the exact plan. Your explicit approval is still required before changes are applied.
 
+### Clear approvals and partial execution — 20 November follow-up
+Bob links a readable proposal and results table. Approval hashes stay internal: review the displayed changes and say “Apply these changes” when ready. If a campaign fails its live check, Bob holds it and continues with eligible campaigns. The results distinguish applied, held and failed changes with reasons. For example, if 17 campaigns pass and two have conflicting current settings, Bob applies the 17 and explains the two holds. A retry preserves successful changes. If live state cannot be read for the account or an earlier mutation's outcome is unknown, Bob explains the blocker before proceeding.
+
 ### Recommendations without an extra live check
 Asking which bids or budgets to change no longer triggers an execution-validation request to Google Ads. Saved marketing targets and preferred waiting periods inform the recommendation. Bob checks current campaign settings when applying the exact proposal you approve; an execution timeout does not invalidate the earlier analysis.
 

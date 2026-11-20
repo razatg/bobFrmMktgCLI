@@ -12,6 +12,29 @@ from lib.bob.platform.data import *  # noqa: F403
 from lib.bob.platform.google_ads import *  # noqa: F403
 from lib.bob.platform.presentation import *  # noqa: F403
 
+def _write_plan_review(plan: dict, path: Path) -> dict:
+    """Publish the exact saved choices and receipts as a customer-readable CSV."""
+    receipts = plan.get('apply_results', [])
+    fields = ['campaign_id', 'campaign_name', 'action', 'current_target_cpa', 'proposed_target_cpa',
+              'current_daily_budget', 'proposed_daily_budget', 'rationale', 'forecast', 'status', 'reason']
+    rows = []
+    for change in plan.get('changes', []):
+        results = [r for r in receipts if str(r.get('campaign_id')) == str(change.get('campaign_id'))]
+        row = {key: change.get(key, '') for key in fields}
+        row['status'] = '; '.join(f"{r['field']}: {r['status']}" for r in results) or 'proposed; not live checked'
+        row['reason'] = '; '.join(dict.fromkeys(r['error'] for r in results if r.get('error')))
+        rows.append(row)
+    review = path.with_suffix('.review.csv')
+    write_csv(review, rows, fields)
+    result = {'review': str(review)}
+    account = str(plan.get('customer_id', '')).replace('-', '')
+    wiki = account_wiki_dir(account).resolve()
+    if review.resolve().is_relative_to(wiki):
+        relative = review.resolve().relative_to(wiki).as_posix()
+        result['artifact'] = f'[[artifact:wiki/{account}/{relative}|Review proposal and results]]'
+    return result
+
+
 def bid_budget_recommend(args: argparse.Namespace) -> None:
     profile = load_profile(required=False)
     primary_goal = args.goal or profile.get("primary_goal") or "in_app_conversions"
@@ -339,6 +362,7 @@ def bid_budget_recommend(args: argparse.Namespace) -> None:
         plan["baseline_changes"] = copy.deepcopy(plan["changes"])
         yaml_path.write_text(_yaml.dump(plan, default_flow_style=False, allow_unicode=True, sort_keys=False))
         print(f"mutation plan written: {yaml_path}")
+        print(json.dumps(_write_plan_review(plan, yaml_path)))
     except ImportError:
         print("note: pyyaml not installed — YAML plan not written. Run: pip install pyyaml")
 
@@ -393,7 +417,7 @@ def bid_budget_propose(args: argparse.Namespace) -> None:
         plan.pop(field, None)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(plan, sort_keys=False, allow_unicode=True))
-    print(json.dumps({'proposal': str(target), 'plan_hash': plan_hash(plan),
+    print(json.dumps({'proposal': str(target), **_write_plan_review(plan, target), 'plan_hash': plan_hash(plan),
                       'status': 'draft; requires decision and explicit approval; current state checked at apply'}))
 
 
@@ -410,11 +434,11 @@ def bid_budget_validate(args: argparse.Namespace) -> None:
     changes = plan.get('changes')
     if not isinstance(changes, list) or not all(isinstance(row, dict) for row in changes):
         die('draft changes must be a list of objects')
-    print(json.dumps({'plan_hash': plan_hash(plan), 'live_checked': False,
+    print(json.dumps({**_write_plan_review(plan, Path(args.plan)), 'plan_hash': plan_hash(plan), 'live_checked': False,
                       'status': 'Draft only; current campaign state is checked at apply.'}, indent=2))
 
 
-def _mutate_checkpointed(mutate, customer_id, operations, prior, plan, path):
+def _mutate_checkpointed(mutate, customer_id, operations, prior, plan, path, client=None):
     """Persist intent before the request; ambiguity never authorizes a resend."""
     import os
     import yaml
@@ -431,11 +455,31 @@ def _mutate_checkpointed(mutate, customer_id, operations, prior, plan, path):
 
     checkpoint(kept + pending)
     try:
-        response = mutate(customer_id=customer_id, operations=[op for _, _, _, _, op in operations])
+        response = mutate(request={'customer_id': customer_id,
+                                   'operations': [op for _, _, _, _, op in operations], 'partial_failure': True})
         returned = list(response.results)
         if len(returned) != len(operations):
             raise ValueError("mutation result count did not match the request")
-        for receipt, result, (_, _, _, _, operation) in zip(pending, returned, operations):
+        failures = {}
+        status = getattr(response, 'partial_failure_error', None)
+        if status and int(status.code):
+            if client is None or not status.details:
+                raise ValueError('partial failure could not be mapped; reconcile live state')
+            failure_type = type(client.get_type('GoogleAdsFailure'))
+            for detail in status.details:
+                failure = (failure_type.deserialize(detail.value) if hasattr(failure_type, 'deserialize')
+                           else failure_type.FromString(detail.value))
+                for error in failure.errors:
+                    indexes = [int(e.index) for e in error.location.field_path_elements if e.field_name == 'operations']
+                    if not indexes or not 0 <= indexes[0] < len(operations):
+                        raise ValueError('partial failure lacks an operation identity; reconcile live state')
+                    failures.setdefault(indexes[0], []).append(str(error.message))
+            if not failures:
+                raise ValueError('partial failure has no operation details; reconcile live state')
+        for index, (receipt, result, (_, _, _, _, operation)) in enumerate(zip(pending, returned, operations)):
+            if index in failures:
+                receipt.update(status='error', error='; '.join(failures[index]))
+                continue
             if result.resource_name != operation.update.resource_name:
                 raise ValueError("mutation resource did not match the request")
             receipt.update(status="ok", resource=result.resource_name,
@@ -480,7 +524,7 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
         if any(not receipt.get("campaign_id") for receipt in plan["apply_results"]):
             die("legacy partial receipts lack campaign identities; reconcile before retrying")
         retry_fields = {(r["campaign_id"], r["field"]) for r in plan["apply_results"]
-                        if r.get("status") in {"error", "not_sent"}}
+                        if r.get("status") in {"error", "not_sent", "held"}}
 
     if not plan.get("changes"):
         print("no changes in plan — nothing to apply")
@@ -511,9 +555,23 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
     verdicts = validate_plan(pending, profile, live, on_date=today(),
                              permission=os.getenv("BOB_ACCOUNT_PERMISSION", "read"),
                              applied_today=sum(state.last_change == today() for state in live.values()))
-    denied = [verdict for verdict in verdicts if not verdict.allowed]
-    if denied:
-        die("Plan rejected: " + "; ".join(f"{v.campaign_id}: {', '.join(v.reasons)}" for v in denied))
+    denied = {verdict.campaign_id: verdict for verdict in verdicts if not verdict.allowed}
+    receipts = {(str(r['campaign_id']), r['field']): dict(r) for r in plan.get('apply_results', [])}
+    for change in pending['changes']:
+        cid = str(change['campaign_id'])
+        action = str(change.get('action', ''))
+        fields = (['target_cpa'] if 'bid' in action else []) + (['daily_budget'] if 'budget' in action else [])
+        for field in fields or ['proposal']:
+            if retry_fields is not None and (cid, field) not in retry_fields:
+                continue
+            receipt = {'campaign': change.get('campaign_name', cid), 'campaign_id': cid, 'field': field,
+                       'value': change.get('proposed_' + field), 'status': 'held' if cid in denied else 'not_sent'}
+            if cid in denied:
+                receipt['error'] = '; '.join(denied[cid].reasons)
+            receipts[cid, field] = receipt
+        if cid in denied:
+            print(f"HELD {change.get('campaign_name', cid)} ({cid}): {'; '.join(denied[cid].reasons)}")
+    results = list(receipts.values())
     if plan.get("decision_id"):
         from lib.bob.decisions.records import get, update
         get(STATE_ROOT, customer_id, plan["decision_id"])
@@ -526,8 +584,10 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
     campaign_service = client.get_service("CampaignService")
     budget_service = client.get_service("CampaignBudgetService")
 
-    for change in plan["changes"]:
+    for change in pending["changes"]:
         cid = str(change["campaign_id"])
+        if cid in denied:
+            continue
         cname = change.get("campaign_name", cid)
         action = change["action"]
 
@@ -566,14 +626,11 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
             op.update_mask.CopyFrom(field_mask)
             budget_ops.append((cname, cid, "daily_budget", budget_amount, op))
 
-    results = list(plan.get("apply_results", [])) or [
-        {"campaign": name, "campaign_id": cid, "field": field, "value": value, "status": "not_sent"}
-        for name, cid, field, value, _ in [*campaign_ops, *budget_ops]]
     for operations, mutate in ((campaign_ops, campaign_service.mutate_campaigns),
                                (budget_ops, budget_service.mutate_campaign_budgets)):
         if not operations:
             continue
-        results = _mutate_checkpointed(mutate, customer_id, operations, results, plan, plan_path)
+        results = _mutate_checkpointed(mutate, customer_id, operations, results, plan, plan_path, client)
         if any(receipt["status"] == "unknown" for receipt in results):
             break
     errors = [r for r in results if r.get("status") != "ok"]
@@ -589,11 +646,17 @@ def bid_budget_apply(args: argparse.Namespace) -> None:
         update(STATE_ROOT, customer_id, plan["decision_id"], "execution",
                {"executed_at": plan["applied_at"], "plan": str(plan_path),
                 "results": results, "complete": plan["applied"]})
-    state = "applied" if plan["applied"] else "partially applied"
+    state = "applied" if plan["applied"] else "partially applied" if any(r['status'] == 'ok' for r in results) else 'not applied'
     print(f"\nplan marked {state}: {plan_path}")
+    print(json.dumps(_write_plan_review(plan, plan_path)))
+    for receipt in results:
+        detail = receipt.get('error') or (f"applied {receipt.get('value')}" if receipt['status'] == 'ok'
+                                         else 'not sent; an earlier mutation outcome requires reconciliation')
+        print(f"{receipt['status'].upper()} {receipt.get('campaign', receipt['campaign_id'])} ({receipt['campaign_id']}) "
+              f"{receipt['field']}: {detail}")
 
     if errors:
-        print(f"{len(errors)} mutation(s) failed — see plan file for details")
+        print(f"{sum(r['status'] == 'ok' for r in results)} applied; {len(errors)} held, failed or unresolved — see review for details")
         raise SystemExit(2)
 
 

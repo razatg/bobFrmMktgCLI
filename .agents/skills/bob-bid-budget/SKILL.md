@@ -29,7 +29,9 @@ Record consequential recommendations, immutable evidence and a prediction with `
 
 ## Saving a final departure
 
-Use `./bob bid-budget-propose --plan <baseline> --changes-json '<final actions>' --output <account plan>` to save a different final choice without editing protected mutation files. This does not approve or apply it. Record the prediction, then `./bob decision link <id> --plan <final plan>`, then validate and request approval of the resulting exact hash.
+Use `./bob bid-budget-propose --plan <baseline> --changes-json '<final actions>' --output <account plan>` to save a different final choice without editing protected mutation files. This does not approve or apply it. Record the prediction, then `./bob decision link <id> --plan <final plan>`, then validate offline. Link the returned readable review artifact and request approval of the exact displayed changes. Keep the hash internal; never ask the user to copy, understand or approve a hash. An offline draft check is not live verification.
+
+At apply, eligible campaigns proceed while campaigns rejected by live checks are held with reasons. Use the saved per-field receipts to report applied, held, failed and unknown outcomes, and link the refreshed review artifact. Include saved/proposed/live values when available. Do not describe unaffected campaigns as stale or require a rebuild to report partial results. Preserve successes on retry. A missing account-wide live read or an unknown mutation outcome still requires reconciliation before proceeding; never infer that a timed-out mutation failed.
 
 ## Operating Rules
 

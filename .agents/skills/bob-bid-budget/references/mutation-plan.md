@@ -3,9 +3,9 @@
 ## Workflow
 
 1. Recover a matching saved proposal first. Run `bid-budget-recommend` only for a new or explicitly rebuilt proposal.
-2. Show the plan to the user for review.
+2. Show the returned readable review artifact to the user; keep the YAML and approval hash internal.
 3. Record/link the decision, get the saved draft's hash with `bid-budget-validate` (offline), and obtain approval for that exact proposal.
-4. Only after explicit approval ("make it live", "apply it", "go ahead") — run `bid-budget-apply`. It reads current campaign settings before executing. If that read times out, no mutation is sent; report the execution blocker without withdrawing the earlier recommendation.
+4. Only after explicit approval ("make it live", "apply it", "go ahead") — run `bid-budget-apply`. It reads current campaign settings before executing. Campaigns failing live checks are held while eligible campaigns proceed. Report each outcome and reason from receipts and link the refreshed review CSV. If the entire live read times out, no mutation is sent; report the execution blocker without withdrawing the earlier recommendation. Never retry unknown mutation outcomes without reconciliation.
 
 ## Step 1 — Generate Plan
 
@@ -46,6 +46,8 @@ The command:
 - Calls `CampaignBudgetService.mutate_campaign_budgets()` for budget changes
 - Updates YAML in-place: `applied: true`, `applied_at`, `applied_by: "bid-budget-apply"`
 - Prints per-campaign success/failure
+
+`applied` becomes true only when every requested field succeeds. Partial executions retain applied, held, failed and unknown receipts and refresh the readable `.review.csv`. Retry unfinished fields from the existing plan; successful fields are never resent. Changed proposal values require approval again. Do not expose hashes or internal YAML links to the user.
 
 ## Safety Gates
 

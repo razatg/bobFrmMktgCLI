@@ -3,6 +3,15 @@
 Author: Rajat · Date: 2026-11-18
 Architecture: `architecture-proposal-changed.md`
 
+**20 November execution follow-up:**
+
+- [x] Publish a readable review CSV from the exact bid/budget proposal on generation, proposal save, offline check and execution. Link that review rather than internal YAML. Normalize existing YAML links to the companion review when available; refresh results from receipts.
+- [x] Keep approval hashes in tools, not end-user responses. Users approve the displayed changes; exact-proposal matching remains enforced internally.
+- [x] Hold campaigns rejected by live checks and execute eligible campaigns from the same approved proposal. Return saved/proposed/live values for direction conflicts. Protect excluded campaigns and their shared budgets per affected row.
+- [x] Enable native Google Ads partial failures for bid/budget mutation batches, retain per-field results and retry only held/error/not-sent fields. Preserve successful receipts. Unmapped responses remain unknown; an unknown mutation outcome blocks blind retries. Account-wide live-read failures send no mutations.
+- [x] Verify mixed live/API failures, retry without resending successes, all-held plans, changed-proposal rejection, unknown-response reconciliation, readable artifacts and hash filtering. Native Google Ads response types are covered without network calls.
+- [x] Local regression verification: **301 tests passed**, compilation and diff checks passed. No live Google Ads mutations performed; staging/provider acceptance remains open.
+
 **19 November saved-proposal recovery follow-up:**
 
 - [x] Index selected-account YAML/YML proposals and filenames in `bob search`, alongside existing Markdown and decisions. Exclude foreign-account plans, malformed YAML and file links outside the account wiki.

@@ -576,8 +576,9 @@ class FinalPlanTests(unittest.TestCase):
         self.profile['goals'] = {'excluded_entities': ['2']}
         self.live['2'] = CampaignState('2', True, 100, 1000, 50, 80, None, '2')
         self.plan['changes'][0].update(action='increase_bid_and_budget', campaign_budget_id='2', proposed_daily_budget=1100)
-        with self.assertRaisesRegex(ValueError, 'excluded campaign'):
-            self.check()
+        verdict = self.check()[0]
+        self.assertFalse(verdict.allowed)
+        self.assertIn('budget change would affect an excluded campaign', verdict.reasons)
 
     def test_nonfinite_business_limits_fail_closed(self):
         self.profile['bid_budget_change_pct'] = float('nan')
